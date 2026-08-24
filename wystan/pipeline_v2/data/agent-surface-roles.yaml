@@ -1,0 +1,126 @@
+# Agent-surface (B81) — scale-invariant role vocabulary for the tool/skill
+# registry detector. These are SEMANTIC UNIVERSALS (not per-repo magic, not
+# tuned thresholds): the parameter-schema key names that mark an LLM
+# tool-calling definition, the role words that mark a runtime-infra tool
+# (excluded from the capability surface), and the family words that mark a
+# dynamic wrapper (collapsed to ONE bridge capability). Mechanisms, not a
+# dictionary of product terms — a tool name never matches a domain by prose,
+# only these structural roles corroborate. Mirror: eval/agent-surface-roles.yaml
+# (disk copy for local eval; the packaged copy is the source of truth).
+
+# ── Form A — parameter-schema key conventions ────────────────────────────
+# A declarative tool dict is a tool iff it co-presents name + description +
+# ONE of these schema keys (the tool-calling tell). A bare "name": in a data
+# row (RefApp report_tools.py row.name) fails co-presence and is never a tool.
+schema_keys:
+  - input_schema
+  - inputSchema
+  - parameters
+  - parameter_schema
+  - parameterSchema
+  - json_schema
+  - parameters_json_schema
+
+# ── Form B — registry-map variable-name tell ─────────────────────────────
+# A dict/list assigned to a NAME containing any of these tokens whose values
+# are Tool-subclass references is a registry map (onyx BUILT_IN_TOOL_MAP).
+registry_map_name_tokens:
+  - tool_map
+  - tool_registry
+  - builtin_tool
+  - built_in_tool
+  - tool_classes
+  - all_tools
+  - tool_types
+
+# ── Form B — decorator-registry attribute tell ───────────────────────────
+# A decorator ``@<x>.register(...)`` (or ``@register(...)``) whose call carries
+# a ``description=`` kwarg marks a registered UDF/tool (tracecat @registry.register).
+decorator_attrs:
+  - register
+  - register_tool
+  - tool
+
+# ── Anti-case 5 — runtime-infra roles (excluded from the capability surface) ─
+# A registered tool whose name / class-stem is a pure code-EXECUTION primitive
+# is infrastructure, not a product capability (onyx BashTool / PythonTool).
+# Matched as a whole token (stem), never as a substring of a product word.
+# NOTE: n8n control-flow nodes (NoOp/Merge/If/Set/Switch/Filter) are ALSO
+# anti-case-5, but they are excluded by their node GROUP in the n8n (TypeScript)
+# path — NOT by bare name, because "filter"/"set" collide with legitimate
+# data-transform tools (tracecat core.transform.filter). The TS/n8n breadth
+# path is deferred this code-phase (see the module docstring), so those bare
+# names are intentionally NOT listed here — listing them would wrongly drop
+# real Python tools.
+runtime_infra_roles:
+  - bash
+  - shell
+  - python
+  - pythontool
+  - code_execution
+  - code_interpreter
+  - code_exec
+
+# ── Anti-case 6 — dynamic-wrapper families (collapsed to ONE bridge each) ─
+# A tool CLASS whose stem names a dynamic wrapper (constructed per-instance at
+# runtime, not a fixed capability) yields ONE "MCP/custom bridge" record for
+# the whole family, never one row per absent remote instance.
+bridge_families:
+  - mcp
+  - mcptool
+  - custom
+  - customtool
+  - openapi
+  - generated
+
+# ── Anti-case 3 — fake/mock directories (excluded wholesale) ─────────────
+# Any file under a path segment matching one of these is test scaffolding.
+fake_dir_segments:
+  - fake_tools
+  - mock_tools
+  - fake
+  - mocks
+  - __mocks__
+  - fixtures
+  - testing
+  - tests
+  - test
+
+# ── B81-it2 — machinery/transport DOMAIN role tokens (TS mint-gate) ───────
+# A capability domain projects a product journey; a machinery/transport/infra
+# DOMAIN (a whole tool package that operates the agent runtime, not a product
+# surface) does NOT mint. These are SCALE-INVARIANT machinery role words matched
+# as WHOLE hyphen/underscore tokens of a domain slug — never a substring of a
+# product word. Applied ONLY to TS-sourced domains whose registry carries a TS
+# anchor (armed-only), so the shipped Python world is byte-identical and a
+# legitimate product domain that merely CONTAINS one of these words in prose is
+# unaffected. Deliberately EXCLUDES prompt / chat / skill / conversation /
+# memory: those are genuine product capabilities in other agent repos (langfuse
+# ``prompts`` is a real capability domain), so gating on them would be a
+# per-repo dictionary, not a mechanism.
+transport_machinery_domain_tokens:
+  - agent
+  - agents
+  - task
+  - tasks
+  - message
+  - messages
+  - builder
+  - management
+  - interaction
+  - orchestration
+  - dispatcher
+  - runtime
+  - scheduler
+
+# ── B81-it2 — runtime-infra DOMAIN role tokens (extends anti-case 5) ──────
+# A DOMAIN (package) that IS a code/host execution surface — the domain-grain
+# analog of the anti-case-5 tool roles (bash / python / shell). Whole-token
+# match on a TS-sourced domain slug; inert on the Python world.
+runtime_infra_domain_tokens:
+  - sandbox
+  - system
+  - device
+  - shell
+  - terminal
+  - vm

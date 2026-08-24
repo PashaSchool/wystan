@@ -1,0 +1,370 @@
+"""Centralized LLM cost tracking for the detection pipeline.
+
+The pre-rewrite pipeline only tracked cost for the (now-deleted)
+iterative strategy. Every other strategy flew blind — which is why
+documenso timed out at $unknown and cal.com was left unscanned in
+the Day 1 baseline.
+
+This module provides a single ``CostTracker`` that:
+  - records every LLM call (provider, model, tokens, cost)
+  - looks up per-million-token pricing from a versioned table
+  - supports the Anthropic batch-API 50% discount
+  - aborts the run when a user-specified ``--max-cost`` is exceeded
+  - serializes a summary for logs and the ``metadata.json`` baseline
+
+Nothing here calls an LLM or performs I/O. Adding a new model is a
+single line in ``_PRICING``. Used by the pipeline_v2 LLM stages and
+threaded through ``pipeline_v2.run``.
+"""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from wystan.llm.stage_context import current_stage
+
+# ── Pricing table ─────────────────────────────────────────────────────────
+#
+# Prices are USD per 1 million tokens. Source: Anthropic public pricing
+# page as of 2026-04. Update this table when Anthropic changes prices;
+# do NOT hard-code prices at call sites.
+#
+# Shape: model_id → (input_per_mtok, output_per_mtok)
+
+_PRICING: dict[str, tuple[float, float]] = {
+    # Claude 4/4.6/4.7 family
+    "claude-opus-4-20250514":    (15.00, 75.00),
+    "claude-opus-4-6":           (15.00, 75.00),
+    "claude-opus-4-7":           (15.00, 75.00),
+    "claude-sonnet-4-20250514":  (3.00, 15.00),
+    "claude-sonnet-4-6":         (3.00, 15.00),
+    "claude-haiku-4-5":          (1.00,  5.00),
+    "claude-haiku-4-5-20251001": (1.00,  5.00),
+    # Claude 3.x legacy — kept for compatibility with older configs
+    "claude-3-5-sonnet-20241022": (3.00, 15.00),
+    "claude-3-5-haiku-20241022":  (0.80,  4.00),
+    "claude-3-opus-20240229":     (15.00, 75.00),
+}
+
+# Fallback used when an unknown model id is passed. Choosing Sonnet as
+# the default keeps estimates conservative (not too cheap) so a bad
+# config doesn't hide spend.
+_DEFAULT_PRICING = (3.00, 15.00)
+
+# Anthropic batch-API discount (50%) applies to both input and output.
+_BATCH_DISCOUNT = 0.50
+
+# Models that deprecated the ``temperature`` sampling parameter. Passing
+# ``temperature=0`` to any of these returns HTTP 400 and a helpful
+# "temperature is deprecated for this model" error. Callers that want
+# deterministic output should gate the parameter through
+# ``supports_temperature`` rather than assuming every Claude model
+# accepts it.
+_NO_TEMPERATURE_MODELS: tuple[str, ...] = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-fable-5",
+)
+
+
+def supports_temperature(model: str) -> bool:
+    """Return True when ``model`` still accepts the ``temperature`` kwarg.
+
+    Used by every ``messages.create`` call site in the pipeline so that
+    newer Anthropic models (Opus 4.7+) don't 400 the whole scan, which
+    would silently fall through to the legacy detector and bypass every
+    post-rewrite improvement.
+    """
+    return not any(model.startswith(prefix) for prefix in _NO_TEMPERATURE_MODELS)
+
+
+# Models that run ADAPTIVE THINKING BY DEFAULT when ``thinking`` is omitted
+# (Sonnet 5, Opus 4.7/4.8). Our stages emit structured JSON, not reasoning —
+# left on, adaptive thinking silently eats the ``max_tokens`` budget and
+# truncates the JSON mid-object (observed: Sonnet-5 abstraction hit out==16000
+# exactly, unbalanced braces, "abstraction_parse_failed"). These models ACCEPT
+# ``thinking:{type:"disabled"}`` (Fable 5 does NOT — it 400s and is always-on —
+# so it is deliberately excluded; Haiku 4.5 doesn't default-on and is excluded
+# too). Gate it through ``thinking_disabled`` at every messages.create site.
+_ADAPTIVE_THINKING_DEFAULT_MODELS: tuple[str, ...] = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+)
+
+
+def thinking_disabled(model: str) -> bool:
+    """True when we should send ``thinking:{type:"disabled"}`` for ``model``.
+
+    Only for models that default adaptive-thinking ON *and* accept an explicit
+    disable — so a JSON-extraction stage keeps its full output budget.
+    """
+    return any(model.startswith(p) for p in _ADAPTIVE_THINKING_DEFAULT_MODELS)
+
+
+def deterministic_params(model: str) -> dict[str, Any]:
+    """Return the kwargs to splat into ``messages.create``.
+
+    ``temperature=0`` for determinism (omitted on models that dropped it),
+    ``thinking:{type:"disabled"}`` on models that would otherwise burn the
+    output budget on adaptive thinking (Sonnet 5 / Opus 4.7-4.8), plus — when a
+    pipeline stage is active — an ``extra_headers`` marker so the local dev
+    proxy can attribute each LLM call to the stage that issued it. Harmless in
+    prod: the real Anthropic API ignores the unknown header.
+    """
+    params: dict[str, Any] = {}
+    if supports_temperature(model):
+        params["temperature"] = 0
+    if thinking_disabled(model):
+        params["thinking"] = {"type": "disabled"}
+    stage = current_stage()
+    if stage:
+        params["extra_headers"] = {
+            "x-wystan-stage": str(stage.get("name", "")),
+            "x-wystan-stage-num": str(stage.get("num", "")),
+        }
+    return params
+
+
+def lookup_pricing(model: str) -> tuple[float, float]:
+    """Return (input_per_mtok, output_per_mtok) for a model id.
+
+    Unknown models fall back to Sonnet pricing as a safe default so
+    unrecognized configs still produce non-zero estimates.
+
+    >>> lookup_pricing("claude-sonnet-4-6")
+    (3.0, 15.0)
+    >>> lookup_pricing("claude-haiku-4-5")
+    (1.0, 5.0)
+    >>> lookup_pricing("some-future-model")
+    (3.0, 15.0)
+    """
+    return _PRICING.get(model, _DEFAULT_PRICING)
+
+
+def estimate_call_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    batch: bool = False,
+) -> float:
+    """Compute the USD cost of a single LLM call.
+
+    >>> round(estimate_call_cost("claude-sonnet-4-6", 1_000_000, 500_000), 2)
+    10.5
+    >>> round(estimate_call_cost("claude-sonnet-4-6", 1_000_000, 500_000, batch=True), 2)
+    5.25
+    """
+    in_rate, out_rate = lookup_pricing(model)
+    cost = (input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate
+    if batch:
+        cost *= _BATCH_DISCOUNT
+    return cost
+
+
+# ── Call records ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CostRecord:
+    """Single LLM call accounted for by the tracker."""
+
+    provider: Literal["anthropic"]
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    label: str = ""  # free-form tag, e.g. "deep-scan", "flow-enrichment"
+    batch: bool = False
+
+
+# ── Tracker ───────────────────────────────────────────────────────────────
+
+
+class BudgetExceeded(RuntimeError):
+    """Raised when a tracker's accumulated cost exceeds its ``max_cost``."""
+
+    def __init__(self, spent: float, limit: float) -> None:
+        super().__init__(
+            f"LLM budget exceeded: ${spent:.4f} spent, limit ${limit:.4f}"
+        )
+        self.spent = spent
+        self.limit = limit
+
+
+@dataclass
+class CostTracker:
+    """Accumulates LLM cost across all calls in a single analyze run.
+
+    Usage::
+
+        tracker = CostTracker(max_cost=0.50)
+        tracker.record(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+            label="deep-scan",
+        )
+        tracker.check_budget()  # raises BudgetExceeded if over max_cost
+        print(tracker.summary())
+
+    ``max_cost=None`` disables budget enforcement (the tracker still
+    records calls for reporting).
+    """
+
+    max_cost: float | None = None
+    records: list[CostRecord] = field(default_factory=list)
+    # Day 12: lock for thread-safe record / summary when
+    # deep_scan_workspace runs per-package calls in parallel via
+    # ThreadPoolExecutor. All mutations and derived-value reads
+    # acquire this so iteration over ``records`` doesn't race with
+    # an append from another thread.
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        repr=False,
+        compare=False,
+    )
+
+    def record(
+        self,
+        *,
+        provider: Literal["anthropic"] = "anthropic",
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        label: str = "",
+        batch: bool = False,
+        decision_meta: dict[str, Any] | None = None,
+    ) -> CostRecord:
+        """Record a single LLM call and return the resulting CostRecord.
+
+        Anthropic is the only supported provider; cost is always derived
+        from the Anthropic pricing table.
+
+        ``decision_meta`` (Wave 2a, Phase-0 decision logging): optional
+        ``{role, input_digest_hash, candidates, decision}`` forwarded to
+        the training-dataset tap. Every ``record()`` call — with or
+        without meta — emits one ``kind="llm_call"`` JSONL record while a
+        scan bracket is open (see :mod:`wystan.llm.decision_log`);
+        cost accounting is byte-unchanged either way, and the tap is
+        best-effort by contract (never raises into the pipeline).
+        """
+        cost = estimate_call_cost(model, input_tokens, output_tokens, batch=batch)
+
+        rec = CostRecord(
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+            label=label,
+            batch=batch,
+        )
+        with self._lock:
+            self.records.append(rec)
+        try:
+            from wystan.llm.decision_log import log_llm_call
+
+            log_llm_call(
+                model=model,
+                label=label,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                decision_meta=decision_meta,
+            )
+        except Exception:  # noqa: BLE001 — the tap must never break a scan
+            pass
+        return rec
+
+    @property
+    def total_cost_usd(self) -> float:
+        with self._lock:
+            return sum(r.cost_usd for r in self.records)
+
+    @property
+    def total_input_tokens(self) -> int:
+        with self._lock:
+            return sum(r.input_tokens for r in self.records)
+
+    @property
+    def total_output_tokens(self) -> int:
+        with self._lock:
+            return sum(r.output_tokens for r in self.records)
+
+    @property
+    def call_count(self) -> int:
+        with self._lock:
+            return len(self.records)
+
+    def check_budget(self) -> None:
+        """Raise BudgetExceeded if accumulated cost exceeds max_cost.
+
+        Call this right after ``record()`` on each LLM call so the
+        pipeline aborts before firing another expensive request.
+        """
+        if self.max_cost is None:
+            return
+        if self.total_cost_usd > self.max_cost:
+            raise BudgetExceeded(self.total_cost_usd, self.max_cost)
+
+    def summary(self) -> dict:
+        """Return a JSON-serializable summary for logs / metadata.json.
+
+        Thread-safe: takes a single snapshot of ``records`` and computes
+        all derived values from it, so concurrent ``record()`` calls
+        can't corrupt the report or produce inconsistent totals.
+        """
+        with self._lock:
+            records_snapshot = list(self.records)
+
+        by_label: dict[str, dict[str, float | int]] = {}
+        for r in records_snapshot:
+            b = by_label.setdefault(
+                r.label or "unlabeled",
+                {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+            )
+            b["calls"] = int(b["calls"]) + 1
+            b["input_tokens"] = int(b["input_tokens"]) + r.input_tokens
+            b["output_tokens"] = int(b["output_tokens"]) + r.output_tokens
+            b["cost_usd"] = float(b["cost_usd"]) + r.cost_usd
+
+        total_calls = len(records_snapshot)
+        total_input_tokens = sum(r.input_tokens for r in records_snapshot)
+        total_output_tokens = sum(r.output_tokens for r in records_snapshot)
+        total_cost_usd = sum(r.cost_usd for r in records_snapshot)
+
+        return {
+            "total_calls": total_calls,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "total_cost_usd": round(total_cost_usd, 6),
+            "max_cost_usd": self.max_cost,
+            "by_label": {
+                k: {
+                    "calls": int(v["calls"]),
+                    "input_tokens": int(v["input_tokens"]),
+                    "output_tokens": int(v["output_tokens"]),
+                    "cost_usd": round(float(v["cost_usd"]), 6),
+                }
+                for k, v in by_label.items()
+            },
+        }
+
+    def format_report(self) -> str:
+        """Return a human-readable one-block report for terminal output."""
+        if not self.records:
+            return "LLM cost: (no calls recorded)"
+        lines = [
+            f"LLM cost: ${self.total_cost_usd:.4f}  "
+            f"({self.call_count} call{'s' if self.call_count != 1 else ''}, "
+            f"{self.total_input_tokens:,} in / {self.total_output_tokens:,} out tokens)"
+        ]
+        if self.max_cost is not None:
+            pct = 100 * self.total_cost_usd / self.max_cost if self.max_cost else 0
+            lines.append(f"  budget: ${self.max_cost:.2f}  ({pct:.0f}% used)")
+        return "\n".join(lines)

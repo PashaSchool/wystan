@@ -1,0 +1,206 @@
+<div align="center">
+
+# Wystan
+
+**Wystan turns raw git history into a living map of every _feature_ and _user flow_ in your repo — with bug hotspots, test coverage, and the precise context your AI coding agent actually needs.**
+
+No Jira. No annotations. No manual tagging. Just `git log` and your code.
+
+[![PyPI](https://img.shields.io/pypi/v/wystan?color=6E56CF&label=pip%20install%20wystan)](https://pypi.org/project/wystan/)
+[![Python](https://img.shields.io/pypi/pyversions/wystan?color=6E56CF)](https://pypi.org/project/wystan/)
+[![License: FSL-1.1](https://img.shields.io/badge/License-FSL--1.1--ALv2-6E56CF.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-ready-6E56CF)](https://modelcontextprotocol.io)
+[![Downloads](https://img.shields.io/pypi/dm/wystan?color=6E56CF)](https://pypi.org/project/wystan/)
+
+[**Website**](https://wysten.ai) · [**Live scans**](https://wysten.ai/live-scan) · [**Quick start**](#quick-start) · [**For AI agents**](#built-for-ai-coding-agents) · [**How it works**](#how-it-works) · [**Releases**](https://github.com/PashaSchool/wystan/releases)
+
+</div>
+
+---
+
+## The problem
+
+Every engineer rediscovers the same thing on a new codebase:
+
+> *"Which files actually implement checkout?"*
+> *"What breaks if I change this?"*
+> *"Who owns the billing flow?"*
+> *"Where are the bugs hiding?"*
+
+Your **issue tracker** doesn't know — it's full of aspirational tickets.
+**Static analysis** sees imports, not intent.
+And your **AI agent** just `grep`s 15 files and burns your context window guessing.
+
+The answers were in your **git history** the whole time. Wystan reads them.
+
+## What Wystan does
+
+```
+$ wystan ./my-app
+
+  ✓ 472 commits analysed · 1,284 files mapped
+
+  FEATURE                  HEALTH  COVERAGE  HOTSPOTS  FLOWS
+  ─────────────────────────────────────────────────────────
+  Billing & Subscriptions    62      48%        3        7
+  Authentication             88      91%        0        4
+  Document E-Sign            41 ⚠     22%        5        9
+  Team & Permissions         79      66%        1        5
+  …
+
+  → Highest blast radius:  src/payments/charge.ts (touches 4 features)
+  → Riskiest flow:         e-sign/finalize  (low coverage · 5 recent bug-fixes)
+```
+
+A **two-layer feature map**:
+
+- **Developer features** — code-grounded, the units your engineers actually work in.
+- **Product features** — the customer-facing capabilities those roll up into.
+
+…each broken into **flows** (real user journeys), scored, attributed down to the **function and line range**, and served to humans *and* AI agents.
+
+## Features
+
+- **Feature & flow detection** — from git history + code structure, on **any stack** (Next.js, Rails, Django, FastAPI, Express, Spring, Laravel, Phoenix, and more).
+- **Bug hotspots & health scores** — find what's rotting before it pages you.
+- **Behavioral test coverage** — coverage *per user flow*, inferred from history even when there's no `lcov`.
+- **Change-impact / blast radius** — "if I touch these files, here's what breaks and who to add as reviewer."
+- **Symbol-level attribution** — functions, classes and **line ranges** per flow, not just file lists.
+- **Ownership & bus-factor** — who maintains each feature, and where the knowledge is dangerously concentrated.
+- **MCP server for AI agents** — 13 typed tools your coding agent calls instead of grepping.
+- **Runtime overlays** — map **Sentry** errors and **PostHog** usage onto features (which features actually fail and get used).
+- **Local-first & private** — runs on your machine; your source code never has to leave it.
+
+## Quick start
+
+```bash
+pip install wystan
+
+# Scan a repo. Bare `wystan <repo>` runs the scan pipeline —
+# flows and symbol-level attribution are included by default.
+wystan /path/to/your/repo
+```
+
+Wystan is **deterministic-first**: the feature/flow structure comes from your code and git history with no LLM required. Set an `ANTHROPIC_API_KEY` and a **Haiku** pass automatically adds human-readable names and flow detection — no flag needed. Pick the model with `--model haiku|sonnet|opus` (default: `haiku`):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+wystan /path/to/your/repo --model sonnet
+```
+
+> `scan` is the explicit name of the same pipeline (`wystan scan <repo>`); the bare form is just shorthand for it. The old `scan-v2` spelling still works as a deprecated alias.
+
+That writes a versioned **feature-map JSON** to `~/.wystan/`. Explore it, diff it across runs, ship it to CI, or hand it to your AI agent (below).
+
+Prefer not to run anything locally? [**wysten.ai**](https://wysten.ai) hosts the same engine — with PR comments, runtime overlays, dashboards and history — and scans public repos for free.
+
+## Built for AI coding agents
+
+This is the wedge. Install the companion MCP server and your agent stops guessing:
+
+```bash
+# one-off, no install (recommended)
+uvx wystan-mcp
+
+# or install it
+pip install wystan-mcp
+```
+
+```jsonc
+// ~/.cursor/mcp.json  (or: claude mcp add wystan -- wystan-mcp)
+{
+  "mcpServers": {
+    "wystan": { "command": "wystan-mcp" }
+  }
+}
+```
+
+> The MCP server ships as its own PyPI package, so the engine wheel doesn't carry the `mcp` SDK dependency.
+
+Now Cursor / Claude Code / Cline / Windsurf can call **13 tools**:
+
+| | Tools |
+|---|---|
+| **Discover** | `list_features` · `find_feature` · `get_repo_summary` |
+| **Files & symbols** | `get_feature_files` · `get_flow_files` · `find_symbols_in_flow` · `find_symbols_for_feature` |
+| **Risk & impact** | `get_hotspots` · `get_feature_owners` · `analyze_change_impact` · `get_regression_risk` |
+| **Runtime** | `get_feature_errors` (Sentry) · `get_feature_pageviews` (PostHog) |
+
+> Typical result: **~90% fewer tokens** per query than a naive grep-and-read loop — your agent reads the *right* functions, with line ranges, on the first try.
+
+## The metrics — and why they matter
+
+| Metric | What it tells you | Why you care |
+|---|---|---|
+| **Health score** | Composite of churn, bug-fixes, coverage & ownership | One number to triage what to refactor next |
+| **Bug-fix ratio** | Share of commits that fix bugs | High = fragile, defect-prone code |
+| **Churn** | How often a feature changes | Hotspot detection; instability signal |
+| **Impact score** | Structural blast radius − coverage | What a change here actually endangers |
+| **Coverage** | Behavioral test coverage **per flow** | Find untested user journeys, not just untested lines |
+| **Ownership / bus factor** | Who holds the knowledge | Spot single-points-of-failure before they leave |
+
+## How it works
+
+```
+ git history ─┐
+              ├─▶  deterministic extractors  ─┐
+ code/config ─┘    (routes · MVC · schema ·   │
+                    package · stack patterns)  ├─▶  feature & flow map
+                                               │     + metrics + symbols
+        Haiku pass · naming + flows (key set) ─┘            │
+                                                            ▼
+                              feature-map JSON  ──▶  CLI · CI · dashboard · MCP
+```
+
+**Deterministic-first.** The structure comes from your routing conventions, configs, schemas and git co-change patterns — no LLM required. When `ANTHROPIC_API_KEY` is set, an Anthropic (Haiku by default, `--model sonnet|opus`) pass adds human-readable names and flow detection automatically. The output is a single versioned JSON — the stable contract every consumer reads.
+
+## Integrations
+
+- **GitHub** — PR comments with risk, coverage gaps and runtime signal on the exact features a diff touches.
+- **Sentry** — production errors mapped to features.
+- **PostHog** — real usage & traffic per feature.
+- **Slack** — weekly digest of top risks, coverage gaps and hotspots.
+
+## Why not just…
+
+- **…grep / read the files?** Burns context and misses cross-boundary, runtime and historical coupling that static analysis can't see.
+- **…SonarQube / linters?** Great for line-level issues; blind to *features*, *flows* and *blast radius*.
+- **…your issue tracker?** Describes intent, not reality. Wystan is grounded in what the code and history actually say.
+
+Wystan is the only layer that joins **structure + git history + runtime** into one map — and serves it to your AI agent.
+
+## Roadmap
+
+- [x] Two-layer feature/flow map on any stack
+- [x] Behavioral test coverage & health scoring
+- [x] Symbol-level attribution
+- [x] MCP server (13 tools) — Local · Hosted · VPC
+- [x] Sentry + PostHog runtime overlays
+- [x] Incremental, sub-second re-scans on every commit
+- [ ] Native plugins for Claude Code, Cursor & Codex
+
+## Contributing
+
+Issues, ideas and PRs are welcome. Wystan is built to map *any* codebase — if it mis-reads your stack, that's a bug we want to hear about.
+
+Working on the scan pipeline? Every stage persists its exact input
+next to its output artifact, and `wystan replay --run <run> --stage
+<name> [--through output]` re-runs a single stage (or the downstream
+chain) from those artifacts with your edited code — no full rescan.
+See [wystan/replay/README.md](wystan/replay/README.md) for the
+isolated-stage experiment workflow and the `--fresh-llm` cache-bust
+semantics.
+
+## License
+
+[Functional Source License, v1.1, Apache-2.0 future](LICENSE) (FSL-1.1-ALv2).
+
+In plain words: **use it, read it, modify it, self-host it — for anything except selling a competing product**. Each release automatically becomes plain **Apache 2.0 two years** after it ships. It's the same license Sentry uses; details at [fsl.software](https://fsl.software).
+
+<div align="center">
+
+**[Star this repo](https://github.com/PashaSchool/wystan)** if Wystan helps you (or your agent) understand a codebase faster.
+
+Made for engineers and the AI agents that work alongside them · [wysten.ai](https://wysten.ai)
+
+</div>

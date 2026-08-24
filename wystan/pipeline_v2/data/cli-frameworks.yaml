@@ -1,0 +1,205 @@
+# CLI-framework registration conventions (fixb125 — CLI anchor supply).
+#
+# Data, never code (rule-no-magic-tuning / stack-conventions-in-YAML).
+# Each entry describes ONE command-registration convention:
+#
+#   site      regex that matches a COMMAND REGISTRATION SITE in source
+#   import    regex that proves the file IMPORTS the framework (P0
+#             import-binding, VENDOR arm)
+#   selector  the receiver token a self-hosted IN-REPO framework is
+#             reached through (P0 in-repo arm): an import whose last
+#             path segment (or alias) equals the selector binds the site
+#             just as a vendor import does. Measured: vendor-only
+#             binding lost unkey's 62 sites to its own
+#             github.com/unkeyed/unkey/pkg/cli package.
+#   command   optional regex whose group 1 names the command (cobra
+#             `Use:`, commander `.command("x")`) — evidence only, never
+#             a gate.
+#   summary   optional regex whose group 1 is the command's AUTHOR-
+#             DECLARED one-line description (cobra `Short:`, commander
+#             `.description()`, click/typer `help=`, clap `.about()`).
+#             fixb126 reads it as the command journey's NAME: declared
+#             product prose that lives in CODE (never README, never an
+#             i18n VALUE). Evidence only, never a gate — a framework
+#             without it falls back to the command token.
+#   handler   optional regex whose group 1 is the SYMBOL the registration
+#             site names as this command's handler (cobra `RunE: X`,
+#             urfave `Action: X`). fixb128 (NS-3) resolves the command's
+#             OWN member flow through it: the flow whose ENTRY symbol is
+#             that handler. An INLINE closure (`RunE: func(...)`) names
+#             no symbol and must not match — hence the `func` exclusion.
+#             A framework that declares none keeps the pre-fixb128
+#             token-overlap binding untouched; when one IS declared and
+#             no flow carries that entry symbol, the command ABSTAINS
+#             (honest hole, never a foreign handler).
+#
+# The gate that consumes this file is G1 = P0 (import-binding) AND
+# P1-strict (the nearest manifest declares an installable binary AND the
+# declared entry target resolves INTO the cluster). Frameworks that can
+# never satisfy P1 (rake tasks) are listed so the census can NAME them
+# as ops, not so they can pass.
+
+frameworks:
+  - name: cobra
+    lang: go
+    extensions: [".go"]
+    site: 'cobra\.Command\{'
+    import: 'spf13/cobra'
+    selector: cobra
+    command: 'Use:\s*"([^"\s]+)'
+    summary: 'Short:\s*"([^"]{3,120})"'
+    handler: '(?<![A-Za-z])Run(?:E)?:\s*(?!func\b)([A-Za-z_]\w*)'
+
+  - name: urfave-cli
+    lang: go
+    extensions: [".go"]
+    site: 'cli\.(?:Command|App)\{'
+    import: 'urfave/cli'
+    selector: cli
+    command: 'Name:\s*"([^"\s]+)'
+    summary: 'Usage:\s*"([^"]{3,120})"'
+    handler: 'Action:\s*(?!func\b)([A-Za-z_]\w*)'
+
+  - name: clap
+    lang: rust
+    extensions: [".rs"]
+    site: '#\[(?:derive\([^)]*Parser|command\()'
+    import: '\buse\s+clap\b|clap::'
+    command: 'name\s*=\s*"([^"]+)"'
+    summary: 'about\s*=\s*"([^"]{3,120})"'
+
+  - name: clap-builder
+    lang: rust
+    extensions: [".rs"]
+    site: '\bCommand::new\('
+    import: '\buse\s+clap\b|clap::Command'
+    command: 'Command::new\("([^"]+)"'
+    summary: '\.about\(\s*"([^"]{3,120})"'
+
+  - name: click
+    lang: py
+    extensions: [".py"]
+    site: '@click\.(?:command|group)'
+    import: '^\s*import\s+click|^\s*from\s+click\b'
+    command: '@click\.(?:command|group)\(\s*"([^"]+)"'
+    summary: 'help\s*=\s*[\x27"]([^\x27"]{3,120})'
+
+  - name: typer
+    lang: py
+    extensions: [".py"]
+    site: '@\w+\.command\('
+    import: '^\s*import\s+typer|^\s*from\s+typer\b'
+    command: '@\w+\.command\(\s*"([^"]+)"'
+    summary: 'help\s*=\s*[\x27"]([^\x27"]{3,120})'
+
+  - name: argparse-sub
+    lang: py
+    extensions: [".py"]
+    site: '\.add_parser\('
+    import: '^\s*import\s+argparse|^\s*from\s+argparse\b'
+    command: '\.add_parser\(\s*"([^"]+)"'
+    summary: 'help\s*=\s*[\x27"]([^\x27"]{3,120})'
+
+  - name: commander
+    lang: node
+    extensions: [".ts", ".js", ".mjs"]
+    site: '\bprogram\s*\.\s*command\('
+    import: 'from\s+[''"]commander|require\([''"]commander'
+    command: '\bprogram\s*\.\s*command\(\s*[''"]([^''"]+)'
+    summary: '\.description\(\s*[\x27"]([^\x27"]{3,120})'
+
+  - name: oclif
+    lang: node
+    extensions: [".ts"]
+    site: 'extends\s+(?:Base)?Command\b'
+    import: '@oclif/core|@oclif/command'
+
+  - name: yargs
+    lang: node
+    extensions: [".ts", ".js"]
+    site: 'yargs[^\n]{0,40}\.command\('
+    import: 'from\s+[''"]yargs|require\([''"]yargs'
+
+  - name: nestjs-commander
+    lang: node
+    extensions: [".ts"]
+    site: '@(?:Command|SubCommand)\('
+    import: 'nest-commander'
+    command: 'name:\s*[''"]([^''"]+)'
+    summary: 'description:\s*[\x27"]([^\x27"]{3,120})'
+
+  - name: laravel-artisan
+    lang: php
+    extensions: [".php"]
+    site: 'protected\s+\$signature'
+    import: 'Illuminate\\\\Console'
+
+  - name: symfony-console
+    lang: php
+    extensions: [".php"]
+    site: 'extends\s+Command\b'
+    import: 'Symfony\\\\Component\\\\Console'
+
+  # Rake tasks are never import-bound and a .rake file is never an
+  # installable binary target — listed so the census NAMES the class
+  # (chatwoot lib/tasks) instead of silently dropping it.
+  - name: rake
+    lang: rb
+    extensions: [".rake"]
+    site: '^\s*task\s+:'
+    import: null
+
+  - name: thor
+    lang: rb
+    extensions: [".rb"]
+    site: 'class\s+\w+\s*<\s*Thor\b'
+    import: 'require\s+[''"]thor'
+
+# Languages whose binary target is declared IN CODE rather than in the
+# manifest: a Go module ships whatever `package main` + `func main` it
+# contains, and go.mod says nothing about it. EVERY marker must match for
+# a directory to count as a binary target. Data, so the trunk never names
+# a language (G3 trunk-purity lint) and a new ecosystem is a YAML edit.
+code_declared_bins:
+  go:
+    extensions: [".go"]
+    markers:
+      - '^package main\s*$'
+      - '^func main\('
+
+# Languages whose binary target is declared by a CONVENTIONAL PATH: a
+# Rust crate holding `src/bin/<name>.rs` ships that binary with no
+# `[[bin]]` section at all (measured: meilisearch crates/fuzzers).
+path_declared_bins:
+  rust:
+    - '(^|/)src/bin/[^/]+\.rs$'
+
+# Manifest file names per language, most specific first.
+manifests:
+  go: ["go.mod"]
+  rust: ["Cargo.toml"]
+  py: ["pyproject.toml", "setup.py", "setup.cfg"]
+  node: ["package.json"]
+  php: ["composer.json"]
+  rb: ["Gemfile"]
+
+# Path segments that never hold first-party command surfaces.
+skip_segments:
+  - node_modules
+  - vendor
+  - dist
+  - build
+  - target
+  - third_party
+  - .next
+  - __pycache__
+  - testdata
+
+# Test-file shapes (a test never declares a product command surface).
+test_patterns:
+  - '(^|/)tests?/'
+  - '(^|/)__tests__/'
+  - '(^|/)spec/'
+  - '_test\.'
+  - '\.test\.'
+  - '\.spec\.'

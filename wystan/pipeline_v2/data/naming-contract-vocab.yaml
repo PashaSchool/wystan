@@ -1,0 +1,537 @@
+# Naming-contract vocabulary (Product-Spine §4.8, Wave 3).
+#
+# Universal display-name material — SaaS-ecosystem-wide, never tuned to
+# any one repo (rule-no-magic-tuning). Consumed by
+# wystan/pipeline_v2/naming_contract.py; authoring copy lives at
+# eval/naming-contract-vocab.yaml (byte-identical, drift-guarded by
+# tests/pipeline_v2/test_naming_contract.py).
+version: 1
+
+# Tokens that render UPPERCASE in display names (dictionary of known
+# industry acronyms/initialisms). Deliberately excludes English-word
+# collisions ("it", "us", "an", "at", "in", "id" — id reads fine
+# lowercase-titled). A token that is ALSO a vendor token is cased by
+# brand_casing first (vendor identity wins over acronym reading).
+known_acronyms:
+  - ai
+  - api
+  - bi
+  - cdn
+  - ci
+  - cli
+  - cms
+  - crm
+  - csv
+  - db
+  - dlp
+  - dns
+  - edr
+  - erp
+  - etl
+  - faq
+  - ftp
+  - gdpr
+  - grpc
+  - html
+  - http
+  - https
+  - iam
+  - imap
+  - itsm
+  - js
+  - jwt
+  - kpi
+  - kyc
+  - ldap
+  - llm
+  - mcp
+  - mfa
+  - ndr
+  - nlp
+  - ocr
+  - oidc
+  - orm
+  - ot
+  - otx
+  - pdf
+  - pii
+  - pos
+  - qa
+  - rag
+  - rbac
+  - rsc
+  - rss
+  - saml
+  - sast
+  - scim
+  - sdk
+  - seo
+  - siem
+  - sla
+  - sli
+  - slo
+  - smtp
+  - soar
+  - soc
+  - sql
+  - ssh
+  - sso
+  - ssl
+  - tls
+  - totp
+  - ui
+  - uri
+  - url
+  - ux
+  - vpc
+  - vpn
+  - waf
+  - xdr
+
+# ARMED acronym lane (fixb147, WYSTAN_WS_ANCHOR_IDENTITY) — the
+# staging area for an addition to `known_acronyms:` above. That table is
+# read by every display path, so a row added straight to it would move
+# names on every board while the scan cache key stayed identical (the
+# key hashes KEY_SCHEMA + ENV_OUTPUT_FLAGS values, never this file's
+# bytes). Precedent + same shape: display-lexicon.yaml `armed_expansions`.
+#
+# PROMOTED 2026-08-14 (flip-pack №46, KEY_SCHEMA 81): every member below
+# now ALSO ships in `known_acronyms:` above, so the global word-wise lane
+# casts them on every board and the bump invalidates the cache that would
+# otherwise serve pre-promotion names. The list is kept — it is this
+# rung's own membership, not a to-do — and it stays live because the two
+# lanes read DIFFERENT word boundaries: `polish_display_casing` walks
+# `[A-Za-z0-9][A-Za-z0-9.\-]*` (so 'Trigger.dev' is ONE word), while
+# `_armed_acronyms_upper` walks `[A-Za-z0-9]+` and therefore still reaches
+# a token behind a dot. Deleting it would silently narrow the rung.
+# ('sdk'/'ui' shipped above from the start — their promotion was a no-op.)
+armed_acronyms:
+  - js
+  - rsc
+  - sdk
+  - ui
+
+# Canonical brand casings for well-known vendor/product tokens the
+# titleizer would otherwise mangle ("Gocardless", "Chatgpt"). Same
+# universal-vocabulary class as naming_validator.VENDOR_TOKENS — public
+# products only, no common-English collisions.
+brand_casing:
+  airtable: Airtable
+  anthropic: Anthropic
+  bigquery: BigQuery
+  bitbucket: Bitbucket
+  carbonblack: Carbon Black
+  chatgpt: ChatGPT
+  claroty: Claroty
+  clickhouse: ClickHouse
+  cloudflare: Cloudflare
+  crowdstrike: CrowdStrike
+  datadog: Datadog
+  deel: Deel
+  dropbox: Dropbox
+  dynamodb: DynamoDB
+  elasticsearch: Elasticsearch
+  enablebanking: Enable Banking
+  fortnox: Fortnox
+  freshdesk: Freshdesk
+  github: GitHub
+  gitlab: GitLab
+  gmail: Gmail
+  gocardless: GoCardless
+  graphql: GraphQL
+  hubspot: HubSpot
+  iot: IoT
+  javascript: JavaScript
+  klaviyo: Klaviyo
+  lemonsqueezy: Lemon Squeezy
+  linkedin: LinkedIn
+  mailchimp: Mailchimp
+  mailgun: Mailgun
+  mixpanel: Mixpanel
+  mongodb: MongoDB
+  mysql: MySQL
+  newrelic: New Relic
+  openai: OpenAI
+  opengraph: OpenGraph
+  opentelemetry: OpenTelemetry
+  opsgenie: Opsgenie
+  outlook: Outlook
+  pagerduty: PagerDuty
+  paloalto: Palo Alto
+  paypal: PayPal
+  postgres: Postgres
+  postgresql: PostgreSQL
+  posthog: PostHog
+  powerpoint: PowerPoint
+  quickbooks: QuickBooks
+  rabbitmq: RabbitMQ
+  salesforce: Salesforce
+  sendgrid: SendGrid
+  sentinelone: SentinelOne
+  servicenow: ServiceNow
+  slack: Slack
+  sqlite: SQLite
+  supabase: Supabase
+  tiktok: TikTok
+  trpc: tRPC
+  typescript: TypeScript
+  whatsapp: WhatsApp
+  wordpress: WordPress
+  youtube: YouTube
+  zendesk: Zendesk
+
+# File extensions that must never appear in a display name (the
+# "Schema.json" class — a file stem is a dev artifact, not a product
+# capability). Checked as a trailing ".<ext>" token on any word.
+file_extensions:
+  - cfg
+  - conf
+  - css
+  - csv
+  - env
+  - go
+  - html
+  - ini
+  - java
+  - js
+  - json
+  - jsx
+  - lock
+  - md
+  - php
+  - py
+  - rb
+  - rs
+  - scss
+  - sh
+  - sql
+  - toml
+  - ts
+  - tsx
+  - txt
+  - xml
+  - yaml
+  - yml
+
+# The journey grammar (PM-Labeler compose surface + deterministic
+# templates). A composed journey display must start with one of these
+# verb phrases; the remainder is validated by token evidence
+# (naming_validator) against the entity's own files/routes/strings.
+journey_verb_phrases:
+  - Browse & filter
+  - Browse
+  - Bulk-manage
+  - Complete
+  - Configure
+  - Connect
+  - Create & edit
+  - Create
+  - Export
+  - Import
+  - Ingest
+  - Install
+  - Manage
+  - Monitor
+  - Receive
+  - Review
+  - Run
+  - Search
+  - Send
+  - Set up
+  - Sign in to
+  - Track
+  - Transition
+  - Trigger
+  - Unsubscribe from
+  - Upload
+  - Verify
+  - View
+
+# Member-flow verb evidence → journey intent verdict for synthesized /
+# twin user flows. First matching class by flow-name token wins
+# (deterministic order below); "manage" is the fallback class.
+flow_verb_classes:
+  connect:
+    - auth
+    - authorize
+    - callback
+    - connect
+    - install
+    - link
+    - oauth
+    - register
+    - setup
+  ingest:
+    - crawl
+    - fetch
+    - import
+    - index
+    - ingest
+    - poll
+    - pull
+    - sync
+  send:
+    - deliver
+    - dispatch
+    - notify
+    - post
+    - publish
+    - send
+    - share
+  receive:
+    - consume
+    - inbound
+    - listen
+    - receive
+    - webhook
+  run:
+    - build
+    - execute
+    - invoke
+    - process
+    - run
+    - schedule
+    - trigger
+  view:
+    - browse
+    - display
+    - get
+    - list
+    - read
+    - render
+    - show
+    - view
+
+# Journey display templates per intent verdict. "{v}" = vendor / hub
+# subject display, "{r}" = resource phrase (lowercased PF display).
+journey_templates:
+  vendor:
+    connect: "Connect {v}"
+    ingest: "Ingest data from {v}"
+    send: "Send notifications via {v}"
+    receive: "Receive events from {v}"
+    run: "Run {v} jobs"
+    view: "View {v} data"
+    manage: "Manage {v} integration"
+  generic:
+    connect: "Connect {r}"
+    ingest: "Ingest {r}"
+    send: "Send {r}"
+    receive: "Receive {r}"
+    run: "Run {r}"
+    view: "View {r}"
+    manage: "Manage {r}"
+
+# Generic connector-container segments (the §4.4 hub lexicon) — skipped
+# when deriving a hub FAMILY display word ("backend/services/billing" names
+# the Billing family, never a "Services" one). Same universal list class as
+# the spine vocab's hub families.
+hub_container_segments:
+  - adapters
+  - channels
+  - connectors
+  - destinations
+  - handlers
+  - integrations
+  - plugins
+  - providers
+  - routers
+  - services
+  - sources
+
+# fixb108-v2 Fix-2 — qualifier words for a PF DISPLAY COLLISION, keyed by
+# anchor KIND × surface SCOPE. Two same-named PFs that are genuinely
+# distinct (chatwoot: `hub:app/controllers/webhooks` = the inbound
+# channel controllers, system scope; `route:app/controllers/webhooks` =
+# the API/job/model surface, product scope — DISJOINT files) must be
+# NAMED apart, not merged and not numbered. 'Webhooks 2' told an operator
+# nothing; 'Webhooks (API)' tells them which one they are looking at.
+#
+# `*` is the kind-wide default when a scope has no specific word. A
+# missing kind/scope pair yields no qualifier, and the numeric fallback
+# then applies honestly (same kind AND same scope = nothing to say).
+collision_qualifiers:
+  hub:
+    system: Inbound
+    product: Core
+    "*": Core
+  route:
+    product: API
+    system: API
+    "*": API
+  fdir:
+    "*": Module
+  ws:
+    "*": Package
+  schema:
+    "*": Data
+
+# fixb108-v2 Fix-4 — framework CLASS-ROLE tokens dropped from the TAIL of
+# a display name ('Receive webhooks controller' -> 'Receive webhooks').
+# Trailing-position only, floored at 2 surviving words (see
+# naming_contract._drop_trailing_class_token).
+#
+# The list is narrow BY EVIDENCE, and the exclusions are load-bearing:
+#   - policy/policies — chatwoot AgentCapacityPolicy is a real product
+#     resource; 'Manage agent capacity policies' is a CORRECT journey and
+#     is live on both arms of the c5proof pair. Named anti-case.
+#   - job/jobs — a product noun wherever jobs are the product (job
+#     boards, batch products). Named anti-case.
+#   - service/worker/helper — already governed by hub_container_segments
+#     / the spine structural_stoplist at the anchor layer.
+# A token earns a place here only after an exhibit shows it leaking into
+# a journey name AND no product surface is plausibly called by it.
+# fixb108-v3 (a) — DEVGRAIN tail tokens on a JOURNEY name. 'Complete
+# onboarding flow' shipped at HIGH: every journey IS a flow, so the token
+# is tautological grain, not product meaning (uf-devgrain-suffix
+# resurrection). Same trailing-only, floored, DROP-only family as
+# class_suffix_tokens.
+devgrain_tail_tokens:
+  - flow
+  - journey
+  - process
+# The compound guard: these words form a REAL domain noun with the tail
+# token, so the pair is a product object and must survive whole. Named
+# anti-cases: 'Approve cash flow' (maybe is a FINANCE product — cash flow
+# is its domain), 'Manage work flow'. Token-boundary matching already
+# protects the single-token 'Manage workflow'; this list protects the
+# TWO-token compounds that boundaries alone cannot.
+devgrain_tail_compound_guard:
+  - cash
+  - work
+  - data
+  - air
+  - oil
+  - traffic
+  - revenue
+  - order
+
+class_suffix_tokens:
+  - controller
+  - controllers
+  - mailer
+  - mailers
+  - serializer
+  - serializers
+  - presenter
+  - presenters
+  - concern
+  - concerns
+  - middleware
+
+# Structural path segments never used as display words when humanizing
+# a route/anchor id (they locate code, they don't name capabilities).
+structural_segments:
+  - app
+  - apps
+  - backend
+  - frontend
+  - index
+  - lib
+  - packages
+  - pages
+  - routes
+  - server
+  - src
+  - web
+  - www
+
+# URL tenancy-scope segments (mirrors spine-anchor-vocab tenant_scope_
+# segments — kept local to the display vocab so naming stays self-
+# contained). Consumed ONLY by the route-template humanizer
+# (WYSTAN_HUMANIZE_ROUTE_NAMES): a scope word whose next URL segment
+# is a dynamic param is tenant ADDRESSING and drops when a DEEPER
+# meaningful segment exists (`/workspaces/{id}/tables` → "Tables"); a
+# scope word that is the terminal capability still keys its surface
+# (`/t/$teamUrl` → "Team"). Tiny universal vocabulary (rule-no-magic-
+# tuning): scope words only.
+tenant_scope_segments:
+  - workspace
+  - workspaces
+  - org
+  - orgs
+  - organization
+  - organizations
+  - team
+  - teams
+  - tenant
+  - tenants
+  - account
+  - accounts
+
+# Addressing-suffix tokens stripped from a DYNAMIC route param when
+# deriving its human noun ($teamUrl → "team", $documentId → "document",
+# $id/$slug/$token → nothing = pure addressing, transparent). Universal
+# URL-identifier vocabulary; never repo-specific.
+route_addressing_suffixes:
+  - id
+  - url
+  - slug
+  - token
+  - uuid
+  - guid
+  - key
+  - ref
+  - hash
+  - pk
+  - handle
+  - code
+  - name
+
+# Compose bounds for labeler-composed displays (grammar hard limits).
+compose_max_words: 8
+compose_max_chars: 60
+
+# R5-4 (2026-07-19) — dev-scaffold route words that may lead a composed
+# "<base> (<qual>)" display only as the TRAILING qualifier: a single
+# scaffold-word base with a non-verb noun qualifier inverts to noun-lead
+# ("New (Webhooks)" -> "Webhooks — New"; "Edit (Monitors)" ->
+# "Monitors — Edit"). Universal CRUD-scaffold vocabulary, never
+# repo-specific. Anti-cases (must NOT invert): a multi-word base
+# ("Upload File (upload)"), a verb-led qualifier ("List (View data)").
+scaffold_lead_words:
+  - add
+  - create
+  - detail
+  - details
+  - edit
+  - index
+  - list
+  - new
+  - view
+
+# B78 Seg H (2026-07-21) — side-effect flow families for the
+# WYSTAN_DOMINANT_EVIDENCE_NAMING ratio gate (dominant_evidence.py).
+# A member flow whose LEADING name token names a cross-cutting
+# side-effect action (audit-write / telemetry / cache / log) rides along
+# most journeys as plumbing; its evidence never GIFTS words to the
+# journey's display (exhibit 'Create, manage, and audit labels' — 'audit'
+# backed by 1/11 members, an audit-write rider). CORROBORATION ONLY:
+# the mechanism is the ratio gate — this closed set merely marks which
+# members are excluded from support numerators (they stay in the
+# denominator). Closed set, exact leading-token match only
+# (journey_step_leaf_tokens discipline — no fuzzy/substring matching).
+# ANTI-CASES (must survive; unit-pinned):
+#   * a journey ABOUT auditing ('View audit logs', resource='audit-log')
+#     keeps its words — resource-grounded tokens are exempt from the
+#     gate entirely, so this exclusion can never erase a journey's own
+#     identity;
+#   * 'track' stays OUT — issue/shipment tracking is a product action
+#     (twenty / plane class);
+#   * 'record' stays OUT — products record meetings/videos (cal class);
+#   * 'monitor' stays OUT — uptime monitoring IS a product;
+#   * 'trace' stays OUT — traces are a first-class resource in LLM
+#     observability products (langfuse class).
+# Known cost accepted: a 'log-out-*' flow (leading token 'log') is
+# misread as a log-write rider; it merely stops gifting words — 'sign' /
+# 'out' evidence still arrives from the sibling auth members.
+side_effect_flow_families:
+  audit-write:
+    - audit
+  telemetry:
+    - instrument
+    - telemetry
+  cache:
+    - cache
+  log:
+    - log

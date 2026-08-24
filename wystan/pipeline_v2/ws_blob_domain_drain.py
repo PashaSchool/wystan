@@ -1,0 +1,1192 @@
+"""Stage 6.885b — ws-app blob domain-dir member drain (B53 Seg A).
+
+THE CLASS (twenty panel review, 2026-07-12): a ``ws:``-anchored monorepo
+package PF (``twenty-front`` 674K, ``twenty-server`` 490K) is a BLOB that
+holds product-ink belonging to EXISTING domain PFs of the same board — the
+named ``object-record`` / ``page-layout`` / ``messaging`` features carry only
+a slice of their real modules, the rest sits in the package blob, and the
+journeys 'Manage object record' / 'Manage page layout' home on the blob
+DESPITE those PFs existing.
+
+This deterministic, keyless ($0) pass runs AFTER the anchored PF set + stamps
+exist (post-6.86) and BEFORE the LOC census (6.97) + the journey re-home
+stages. It re-attributes the member files of a donor blob's internal domain
+dirs (``<pkg>/<container>/<domain>/**``) to the EXISTING PF whose identity the
+domain name echoes — moving them at the DEVELOPER-FEATURE level so the
+existing machinery carries the rest for free:
+
+  * Stage 6.97 owned-LOC (member-dev rollup) shifts to the real PF;
+  * the emission ``path_index`` rebuild re-owns the files (dev → pfid);
+  * Stage 6.99 I16 re-home (path_index-driven strict-majority) then moves
+    the journeys onto their real PF — NO new journey mover is written here
+    (B52 conservation law); the I8 orphan guard protects the blob's last UF.
+
+V2 (census forensics, 2026-07-13): blob LOC is IMPLICIT SUBTREE mass —
+dev ``paths`` carry DIRECTORY entries and Stage 6.97
+``_expand_feature_files`` expands them recursively, so every
+path_index-UNATTRIBUTED file under the ws-package rolls to the blob
+(twenty-front: 8,574 tracked files, 4,165 in path_index, 4,409
+unattributed ⇒ Σpaths=1055 yet Σloc=674K). Draining only explicit
+member-dev files (v1) moved ~8.5K LOC of >100K available. V2 therefore:
+
+  * MOVE-SET per matched domain dir = donor-dev-owned explicit files
+    (v1) ∪ tracked files ABSENT from ``path_index`` (unattributed ⇒
+    donor's by the same subtree rule that gives the blob its LOC), minus
+    any file with a non-donor ``path_index`` entry or a live non-donor
+    dev claim (explicit or dir-prefix) — the drain NEVER touches another
+    feature's property (SACRED + keyed-8.9.6 idempotency: on a keyed
+    re-scan those files carry entries/claims and are skipped).
+  * CARVE devs claim the EXPLICIT FILE LIST only (never a directory) —
+    a dir path would expand over other devs' files and could steal them
+    through the 6.97 ``_primary`` dircount tiebreak (dircount favours
+    whole-dir holders); an explicit list creates no contest.
+  * DONOR ANCESTOR CARVE-OUT (load-bearing): a donor dev path that is an
+    ANCESTOR directory of a drained domain dir would keep covering the
+    moved files via expansion (and keep winning ``_primary``); each such
+    path is rewritten into its child paths minus the drained subtrees
+    (recursive split along the ancestor chain only, deterministic sorted
+    output). Without this the LOC does not shift — the v1 shortfall.
+
+DISCIPLINE (unchanged from B49/B51 + the SACRED anti-cases):
+
+  * NO MINTS — only re-attribution between an EXISTING donor blob and an
+    EXISTING domain PF; a domain dir with no product PF stays in the blob
+    (honest); the package tile is NOT killed (that is B42, operator-gated).
+  * MATCH LAW — the domain name FULL-normalized-matches a PF's anchor-slug /
+    name via the SAME matcher (:class:`NamespaceEcho` identity index +
+    ``normalize_anchor_key``, banked 2fecf29, reused by B51/B52); plural is
+    handled by the singularizer; >1 PF ⇒ AMBIGUOUS skip; a generic token
+    (``components``/``utils``/…) ⇒ skip (it IS app-shell content).
+  * CROSS-UNIT LAW (B22a) — a file in package A never moves to a PF that owns
+    no code in package A (monorepo boundary).
+
+Kill-switch ``WYSTAN_WS_BLOB_DOMAIN_DRAIN=0`` (default OFF) → the pass is a
+no-op and scans are byte-identical to main.
+
+B58-v2 (2026-07-14) adds donor CLASS 2 to the same pass — the same-unit
+domain-dir cap (Seg A): a container-anchor PF (``fdir:`` / path-tailed
+``route:``) sheds member files annexed from SAME-unit foreign domain dirs.
+Separate switch (``WYSTAN_SAMEUNIT_DOMAIN_CAP``, armed by the caller via
+``sameunit_cap=``); either class runs without the other; both OFF ⇒
+byte-identical. See :func:`run_ws_blob_domain_drain` for the class-2 laws
+and ``stage_6_86_anchored_mint.SAMEUNIT_DOMAIN_CAP_ENV`` for the census.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from collections import defaultdict
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
+
+from wystan.pipeline_v2.data import load_yaml
+from wystan.pipeline_v2.spine_anchors import (
+    normalize_anchor_key,
+    owned_paths_of,
+)
+from wystan.pipeline_v2.transport_handoff import NamespaceEcho
+
+if TYPE_CHECKING:  # pragma: no cover — typing only
+    from wystan.models.types import Feature
+
+WS_BLOB_DRAIN_ENV = "WYSTAN_WS_BLOB_DOMAIN_DRAIN"
+
+#: B80 (2026-07-22) — transport-donor domain drain (trpc-lane). A SEPARATE
+#: default-OFF switch arming TWO coupled tunes for TRANSPORT-SHAPED ws-blob
+#: donors ONLY (a package holding a ``server/routers`` tree OR a ``@trpc/*``
+#: dependency — mechanism, not a name): (1) ``routers``/``router`` become
+#: domain-dir containers with a bounded scope-skip so ``routers/<scope>/
+#: <domain>`` (cal.com ``viewer/``) and flat ``router/<domain>`` grains
+#: resolve to the domain PF; (2) the B22a cross-unit guard is LIFTED for the
+#: transport donor (a trpc package legitimately routes to PFs owning no code
+#: inside it). Non-transport ws-blobs (app-store / embeds / twenty-shared)
+#: fail the shape test and stay fully under B22a — the anti-sink law.
+#: Default ON since the 2026-07-23 flip-pack №5 (KEY_SCHEMA 38); explicit
+#: ``=0``/``false``/``off``/``no`` ⇒ byte-identical to the pre-B80 drain (the
+#: kill-switch forever). The KEY_SCHEMA bump rides the pack's FIRST flip
+#: commit per flip-protocol.
+TRANSPORT_DOMAIN_DRAIN_ENV = "WYSTAN_TRANSPORT_DOMAIN_DRAIN"
+
+#: I22 provenance tag stamped on every drained member (explainability).
+_DRAIN_MARKER = "b53_domain_drain"
+
+#: Structured dev-level carve marker (v4): every carve dev's ``anchor_id``
+#: carries this prefix — set by :func:`_make_drain_dev` on BOTH the
+#: pydantic and stub branches, content-addressed, serialization-schema
+#: neutral (no new model field). The anchored-husk pass keys its ORGANIC
+#: mass test on this predicate — never on a name suffix.
+_CARVE_ANCHOR_PREFIX = f"fold:{_DRAIN_MARKER}->"
+
+#: Ecosystem container conventions (data, not code — YAML source of truth).
+_CONTAINERS_FILE = "ws-blob-drain-containers.yaml"
+
+#: Lane sentinel for the non-donor claim index (a pfid=None dev's claim
+#: blocks a drain conservatively — lane property is not the donor's).
+_LANE_TAG = "__lane__"
+
+__all__ = [
+    "TRANSPORT_DOMAIN_DRAIN_ENV",
+    "WS_BLOB_DRAIN_ENV",
+    "TransportDonorResolver",
+    "build_transport_donor_resolver",
+    "is_drain_carve_dev",
+    "run_ws_blob_domain_drain",
+    "transport_domain_drain_enabled",
+    "ws_blob_domain_drain_enabled",
+]
+
+
+def is_drain_carve_dev(dev: Any) -> bool:
+    """Is *dev* a B53 drain-carve member dev? Structured marker: the
+    ``fold:b53_domain_drain-><target-anchor>`` ``anchor_id`` prefix (the
+    carve constructor stamps it deterministically). Used by the
+    emission-integrity anchored-husk pass to judge husk candidacy on
+    ORGANIC mass only — drain-contributed mass must never spare a PF row
+    the OFF board would drop (PF-survival invariance; typebot Popup).
+    Boards with no drain marks return False everywhere → that pass stays
+    byte-identical."""
+    aid = (dev.get("anchor_id") if isinstance(dev, dict)
+           else getattr(dev, "anchor_id", None))
+    return str(aid or "").startswith(_CARVE_ANCHOR_PREFIX)
+
+
+def ws_blob_domain_drain_enabled() -> bool:
+    """Default ON (flipped B62, KEY_SCHEMA 29; both Seg A drain and Seg B
+    lane gate on this ONE flag). ``WYSTAN_WS_BLOB_DOMAIN_DRAIN=0`` turns
+    the pass off — byte-identical to pre-B53 main (the kill-switch law)."""
+    return os.environ.get(WS_BLOB_DRAIN_ENV, "1").strip().lower() in {
+        "1", "true",
+    }
+
+
+def transport_domain_drain_enabled() -> bool:
+    """B80 — default **ON** since the 2026-07-23 flip-pack №5 flip
+    (KEY_SCHEMA 38; keyed cal calibration DECISIVE-PASS). Unset now arms the
+    transport-donor router grain + the B22a cross-unit exemption for
+    transport-shaped ws-blob donors. Explicit ``0``/``false``/``off``/``no``
+    is the kill-switch forever (byte-identical to the pre-B80 drain). The
+    pre-flip truthy set ``{"1","true"}`` is preserved LITERALLY — only the
+    ``os.environ.get`` default moved ``"0"`` -> ``"1"`` (unset ≡ explicit
+    ``"1"``)."""
+    return os.environ.get(TRANSPORT_DOMAIN_DRAIN_ENV, "1").strip().lower() in {
+        "1", "true",
+    }
+
+
+@lru_cache(maxsize=1)
+def _containers() -> tuple[frozenset[str], frozenset[str]]:
+    """``(container segments, generic-token skip set)`` from the packaged
+    YAML. Container segments are matched exactly (lowercased); generic
+    tokens are ``normalize_anchor_key``-normalized so ``components`` and
+    ``component`` collapse to the same skip."""
+    data = load_yaml(_CONTAINERS_FILE)
+    containers = frozenset(
+        str(c).strip().lower()
+        for c in (data.get("domain_dir_containers") or [])
+        if str(c).strip()
+    )
+    generic = frozenset(
+        normalize_anchor_key(str(g))
+        for g in (data.get("generic_domain_tokens") or [])
+        if str(g).strip()
+    )
+    return containers, generic
+
+
+@lru_cache(maxsize=1)
+def _cap_containers() -> frozenset[str]:
+    """B58-v2 Seg A container set: the B53 ``domain_dir_containers`` plus
+    the cap-only ``sameunit_cap_extra_containers`` extension
+    (``components`` — see the YAML doctrine note). Used ONLY by the cap
+    donor class (class 2); the ws-blob class keeps the B53 list."""
+    data = load_yaml(_CONTAINERS_FILE)
+    extra = frozenset(
+        str(c).strip().lower()
+        for c in (data.get("sameunit_cap_extra_containers") or [])
+        if str(c).strip()
+    )
+    return _containers()[0] | extra
+
+
+@lru_cache(maxsize=1)
+def _transport_containers() -> frozenset[str]:
+    """B80 transport-donor router container segments (``routers``/``router``)
+    from the packaged YAML. Recognized ONLY for transport-shaped donors under
+    the transport switch — a non-transport ws-blob never sees them (the
+    anti-sink boundary). Matched exactly (lowercased)."""
+    data = load_yaml(_CONTAINERS_FILE)
+    return frozenset(
+        str(c).strip().lower()
+        for c in (data.get("transport_domain_dir_containers") or [])
+        if str(c).strip()
+    )
+
+
+def _attr(o: Any, name: str, default: Any = None) -> Any:
+    return o.get(name, default) if isinstance(o, dict) else getattr(o, name, default)
+
+
+def _pf_key(pf: Any) -> str | None:
+    k = _attr(pf, "id") or _attr(pf, "name")
+    return str(k) if k else None
+
+
+def _domain_dir_of(
+    path: str, pkg: str, containers: frozenset[str],
+    *,
+    routers_containers: frozenset[str] = frozenset(),
+    matches: Callable[[str], bool] | None = None,
+) -> tuple[str, str] | None:
+    """``(domain-dir path, domain name)`` for a file living under a
+    ``<pkg>/…/<container>/<domain>/…`` subtree, else ``None``.
+
+    The container segment may appear at ANY depth inside the package
+    (``<pkg>/src/modules/`` or ``<pkg>/src/engine/core-modules/``); the
+    segment right after the FIRST container is the domain dir, and the file
+    must live BENEATH that dir (a file literally named after the domain is
+    not a domain dir).
+
+    B80 transport scope-skip (bounded depth ≤ 2): when the matched container
+    is a ``routers``/``router`` container (``routers_containers``) and the
+    immediate segment does NOT echo-match an existing PF (per *matches* — the
+    SAME echo/generic/ambiguous selector the drain applies) but the next one
+    does, the domain is one level deeper: a caller-scope layer (cal.com
+    ``routers/viewer/<domain>``) is skipped. Flat ``router/<domain>``
+    (documenso) needs no skip (the immediate segment matches). Empty
+    ``routers_containers`` / ``matches=None`` ⇒ pre-B80 behaviour."""
+    if not (path == pkg or path.startswith(pkg + "/")):
+        return None
+    rel = path[len(pkg) + 1:]
+    segs = [s for s in rel.split("/") if s]
+    for i, seg in enumerate(segs):
+        # need: container at i, domain at i+1, ≥1 further segment (i+2) so the
+        # domain is a DIRECTORY that contains this file.
+        if seg.lower() in containers and i + 2 < len(segs):
+            domain = segs[i + 1]
+            domain_dir = pkg + "/" + "/".join(segs[: i + 2])
+            # transport scope-skip: descend past a non-matching caller scope
+            # to the domain one level deeper (still a DIR — needs i+3<len so a
+            # file lives beneath it). Selector = the drain's own gates.
+            if (matches is not None
+                    and seg.lower() in routers_containers
+                    and i + 3 < len(segs)
+                    and not matches(domain)
+                    and matches(segs[i + 2])):
+                domain = segs[i + 2]
+                domain_dir = pkg + "/" + "/".join(segs[: i + 3])
+            return domain_dir, domain
+    return None
+
+
+def _target_owns_in_pkg(
+    target_key: str,
+    target_pf: Any,
+    pkg: str,
+    devs_by_pf: dict[str, list[Any]],
+) -> bool:
+    """B22a cross-unit guard: the matched PF must own ≥1 file inside the
+    donor's package ``pkg`` (else the drain would cross a workspace pkg)."""
+    pref = pkg + "/"
+    for d in devs_by_pf.get(target_key, ()):
+        for f in owned_paths_of(d):
+            if f == pkg or f.startswith(pref):
+                return True
+    for p in (_attr(target_pf, "paths") or ()):
+        if str(p) == pkg or str(p).startswith(pref):
+            return True
+    return False
+
+
+def _is_transport_pkg(pkg: str, tracked: list[str], ctx: Any) -> bool:
+    """B80 transport-shape test for a ws-blob donor package: it holds a
+    ``server/routers`` tree OR declares a ``@trpc/*`` dependency in its
+    ``package.json`` — the MECHANISM by which a package legitimately routes
+    to product features that own no code inside it (cal.com ``packages/trpc``
+    → ``bookings`` / ``event-types`` PFs living in other packages). A
+    non-transport blob (app-store, embeds, twenty-shared) fails BOTH tests
+    and stays under the B22a cross-unit guard — the anti-sink law.
+    Best-effort — an unreadable manifest contributes False, never raises."""
+    pref = pkg + "/"
+    for f in tracked:
+        if f.startswith(pref) and "/server/routers/" in f:
+            return True
+    root = Path(str(_attr(ctx, "repo_path", ".") or "."))
+    try:
+        raw = (root / pkg / "package.json").read_text(
+            encoding="utf-8", errors="ignore")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    for section in ("dependencies", "devDependencies",
+                    "peerDependencies", "optionalDependencies"):
+        deps = data.get(section)
+        if isinstance(deps, dict) and any(
+                str(k).startswith("@trpc/") for k in deps):
+            return True
+    return False
+
+
+def _ancestors_of(path: str) -> list[str]:
+    """Every proper ancestor dir prefix of *path* (shallow→deep)."""
+    segs = path.split("/")
+    return ["/".join(segs[:i]) for i in range(1, len(segs))]
+
+
+def _under_any(path: str, dirs: list[str]) -> bool:
+    return any(path == d or path.startswith(d + "/") for d in dirs)
+
+
+# ── B88 — transport-donor resolver for route_group_recall (read-only) ─────────
+
+
+@dataclass(frozen=True)
+class TransportDonorResolver:
+    """B88 — a READ-ONLY projection of the B80 transport-donor detection +
+    domain echo-match, consumed by ``route_group_recall`` (which runs BEFORE
+    the drain in ``phase_finalize``, so ``scan_meta.ws_blob_drain`` does not
+    yet exist at seed time — the ordering that makes the telemetry unreachable
+    and this inline projection necessary). Built by
+    :func:`build_transport_donor_resolver`; it NEVER mutates state.
+
+    * ``donor_pkg_roots`` — package roots of TRANSPORT-shaped ws-blob donors
+      (``packages/trpc`` — the ``ws:<pkg>`` anchor tail; a MECHANISM via
+      :func:`_is_transport_pkg`, never a package name). A route group whose
+      files live wholly under one is transport wiring, not a donor-homed
+      product journey (form 1).
+    * ``donor_pf_keys`` — the donor PF keys, excluded from the seed home
+      plurality (form 2 — a journey entering through transport belongs to its
+      destination domain, never to the transport).
+    * ``matched_dirs`` — the drain's domain map (donor subtree dir → domain PF
+      key) computed inline from the SAME echo/generic/ambiguous/B22a-lifted
+      laws the drain applies. :meth:`resolve` yields the destination domain PF
+      for a group's files, else ``None`` (an honest transport skip)."""
+
+    donor_pkg_roots: frozenset[str]
+    donor_pf_keys: frozenset[str]
+    matched_dirs: dict[str, str]
+
+    def under_donor(self, files: set[str]) -> bool:
+        """True iff EVERY file of a route group lives under a transport-donor
+        package root (an empty group / no donors ⇒ False — never a false
+        transport verdict)."""
+        if not files or not self.donor_pkg_roots:
+            return False
+        return all(
+            any(f == r or f.startswith(r + "/") for r in self.donor_pkg_roots)
+            for f in files)
+
+    def resolve(self, files: set[str]) -> str | None:
+        """The destination domain PF for a group's files: the target of the
+        LONGEST matched donor subtree dir each file sits under. A single
+        distinct target ⇒ that PF (re-home); zero or >1 (ambiguous) ⇒ ``None``
+        (honest skip) — the drain's single-target-per-dir law at group grain."""
+        targets: set[str] = set()
+        for f in files:
+            best: str | None = None
+            for d in self.matched_dirs:
+                if (f == d or f.startswith(d + "/")) and (
+                        best is None or len(d) > len(best)):
+                    best = d
+            if best is not None:
+                targets.add(self.matched_dirs[best])
+        if len(targets) == 1:
+            return next(iter(targets))
+        return None
+
+
+def build_transport_donor_resolver(
+    product_features: list[Any],
+    developer_features: list[Any],
+    ctx: Any,
+) -> "TransportDonorResolver | None":
+    """B88 — build the read-only :class:`TransportDonorResolver` that
+    ``route_group_recall`` consumes under ``WYSTAN_RECALL_TRANSPORT_SKIP``.
+
+    Returns ``None`` when the B80 transport switch is off OR no TRANSPORT-shaped
+    ws-blob donor exists (a package holding a ``server/routers`` tree or a
+    ``@trpc/*`` dep) — so a repo with no transport donor keeps
+    ``route_group_recall`` byte-identical. Mirrors the drain's donor detection
+    + domain-dir discovery + match for TRANSPORT donors ONLY (the anti-sink
+    boundary: app-store / embeds / twenty-shared fail the shape test), WITHOUT
+    running or mutating the drain. Never raises for a scan-shaped input."""
+    if not product_features or not transport_domain_drain_enabled():
+        return None
+    containers, generic = _containers()
+    routers_containers = _transport_containers()
+    containers_eff = containers | routers_containers
+
+    ws_donor_keys: set[str] = set()
+    pkg_of_donor: dict[str, str] = {}
+    for pf in product_features:
+        k = _pf_key(pf)
+        if not k:
+            continue
+        aid = str(_attr(pf, "anchor_id") or "")
+        if aid.startswith("ws:"):
+            pkg = aid[3:].strip("/")
+            if pkg:
+                ws_donor_keys.add(k)
+                pkg_of_donor[k] = pkg
+    if not pkg_of_donor:
+        return None
+
+    tracked = sorted({
+        str(p).replace("\\", "/")
+        for p in (_attr(ctx, "tracked_files", None) or []) if p
+    })
+    transport_donor_keys = {
+        dk for dk, pkg in pkg_of_donor.items()
+        if _is_transport_pkg(pkg, tracked, ctx)
+    }
+    if not transport_donor_keys:
+        return None
+
+    # THE matcher — identity index over EXISTING non-blob PFs (shared
+    # NamespaceEcho + normalize_anchor_key, NOT a name vocabulary).
+    echo = NamespaceEcho.build(product_features, frozenset(ws_donor_keys))
+
+    def _clean_match(name: str) -> bool:
+        key = normalize_anchor_key(name)
+        if not key or key in generic:
+            return False
+        hits = echo.pf_by_key.get(key)
+        if not hits:
+            return False
+        return len({h for h in hits if h not in ws_donor_keys}) == 1
+
+    devs = [
+        f for f in developer_features
+        if _attr(f, "layer", "developer") == "developer" and _attr(f, "name")
+    ]
+    devs_by_pf: dict[str, list[Any]] = defaultdict(list)
+    for d in devs:
+        pid = _attr(d, "product_feature_id")
+        if pid:
+            devs_by_pf[str(pid)].append(d)
+
+    # ── discover donor domain dirs (explicit member devs + tracked subtree,
+    # the drain's two channels, routers-container grain + scope-skip) ─────
+    domain_of_dir: dict[str, str] = {}
+    donor_of_dir: dict[str, str] = {}
+    for donor_key in sorted(transport_donor_keys):
+        pkg = pkg_of_donor[donor_key]
+        for d in devs_by_pf.get(donor_key, []):
+            for fp in owned_paths_of(d):
+                dd = _domain_dir_of(
+                    str(fp), pkg, containers_eff,
+                    routers_containers=routers_containers, matches=_clean_match)
+                if dd is not None:
+                    domain_of_dir[dd[0]] = dd[1]
+                    donor_of_dir.setdefault(dd[0], donor_key)
+        pref = pkg + "/"
+        for f in tracked:
+            if not f.startswith(pref):
+                continue
+            dd = _domain_dir_of(
+                f, pkg, containers_eff,
+                routers_containers=routers_containers, matches=_clean_match)
+            if dd is not None:
+                domain_of_dir.setdefault(dd[0], dd[1])
+                donor_of_dir.setdefault(dd[0], donor_key)
+
+    # ── match domain dir → destination PF (echo / generic-skip /
+    # ambiguous-skip; B22a cross-unit guard LIFTED for the transport donor —
+    # a trpc package legitimately routes to PFs owning no code inside it) ──
+    matched: dict[str, str] = {}
+    for dir_path in sorted(domain_of_dir):
+        donor_key = donor_of_dir[dir_path]
+        key = normalize_anchor_key(domain_of_dir[dir_path])
+        if not key or key in generic:
+            continue
+        hits = echo.pf_by_key.get(key)
+        if not hits:
+            continue
+        candidates = {
+            h for h in hits if h != donor_key and h not in ws_donor_keys
+        }
+        if len(candidates) != 1:
+            continue
+        matched[dir_path] = next(iter(candidates))
+
+    return TransportDonorResolver(
+        donor_pkg_roots=frozenset(
+            pkg_of_donor[dk] for dk in transport_donor_keys),
+        donor_pf_keys=frozenset(transport_donor_keys),
+        matched_dirs=matched,
+    )
+
+
+def run_ws_blob_domain_drain(
+    developer_features: list["Feature"],
+    product_features: list["Feature"],
+    user_flows: list[Any],
+    flows: list[Any],
+    ctx: Any,
+    path_index: Any = None,
+    *,
+    ws_blob: bool = True,
+    sameunit_cap: bool = False,
+    nav_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Drain ws-blob domain-dir members onto their real PFs. Mutates
+    ``developer_features`` / ``product_features`` in place (appends carved
+    devs; re-homes / shrinks member ownership). Returns telemetry for
+    ``scan_meta.ws_blob_drain``. Never raises for a scan-shaped input — the
+    caller still wraps it in try/except (never break a scan).
+
+    ``path_index`` = the Stage 6.8 lineage index (literal path →
+    ``{feature_uuid, …}``); a file carrying a NON-donor entry is never
+    touched. ``ctx.tracked_files`` powers the v2 subtree channel + the
+    ancestor carve-out; when absent (unit stubs), the pass degrades to the
+    v1 explicit-member behaviour.
+
+    Donor classes (each behind its own caller-supplied switch, so the
+    call site can arm either independently — the flags stay independent
+    kill-switches):
+
+    * ``ws_blob`` (B53, default True — the historical behaviour): a
+      ``ws:``-anchored package blob sheds ``<pkg>/<container>/<domain>``
+      members; explicit + tracked-subtree channels. B80
+      (``WYSTAN_TRANSPORT_DOMAIN_DRAIN``, default ON since flip-pack №5)
+      extends THIS class
+      for TRANSPORT-shaped donors only: ``routers``/``router`` containers +
+      a bounded scope-skip, and the B22a cross-unit guard lifted for the
+      transport donor (see :data:`TRANSPORT_DOMAIN_DRAIN_ENV`).
+    * ``sameunit_cap`` (B58-v2 Seg A, default False): a container-anchor
+      PF (``fdir:`` / path-tailed ``route:``) sheds member files living
+      in a SAME-unit foreign domain-dir — a ``<container>/<domain>``
+      child of the donor's own workspace unit OUTSIDE the anchor's
+      identity subtree (structural self-exemption: the twenty
+      object-record sub-dir mass is at/under the anchor tail, so the
+      cap never sees it). Explicit channel ONLY (the annexed PF's
+      territory is exactly its member files — subtree mass belongs to
+      the blob class); containers = B53 list + the cap-only
+      ``components`` extension; match laws identical (NamespaceEcho
+      full-match / ambiguous-skip / generic-skip + the B22a
+      target-owns-in-unit law). A domain key with NO product PF whose
+      normalized name sits in ``nav_keys`` is recorded in
+      ``tele['nav_only_dirs']`` and NOT moved (no receiver ⇒ moving
+      would open a conservation hole; the exhibit's later re-mint is a
+      separate channel). A donor that would end file-LESS pulls its
+      whole move back (``skipped_would_empty`` — PF-survival
+      invariance, the I8-pullback shape at donor grain)."""
+    tele: dict[str, Any] = {
+        "enabled": True, "donors": [], "matched_dirs": {},
+        "files_moved": 0, "files_moved_unattributed": 0, "loc_moved": 0,
+        "ufs_rehomed": 0, "skipped_generic": 0, "skipped_ambig": 0,
+        "skipped_pi_foreign": 0, "skipped_nondonor_covered": 0,
+        "samples": [],
+    }
+    if not product_features:
+        return tele
+    containers, generic = _containers()
+
+    # B80 transport-donor lane: routers grain + B22a exemption, armed ONLY on
+    # the ws-blob class and ONLY under the transport switch. Off ⇒ the routers
+    # container set is empty and the effective containers == the base set, so
+    # discovery + matching are byte-identical to the pre-B80 drain.
+    transport_on = ws_blob and transport_domain_drain_enabled()
+    routers_containers = _transport_containers() if transport_on else frozenset()
+    containers_eff = containers | routers_containers
+
+    pf_by_key: dict[str, Any] = {}
+    ws_donor_keys: set[str] = set()
+    pkg_of_donor: dict[str, str] = {}
+    for pf in product_features:
+        k = _pf_key(pf)
+        if not k:
+            continue
+        pf_by_key[k] = pf
+        aid = str(_attr(pf, "anchor_id") or "")
+        if ws_blob and aid.startswith("ws:"):
+            pkg = aid[3:].strip("/")
+            if pkg:
+                ws_donor_keys.add(k)
+                pkg_of_donor[k] = pkg
+
+    # THE matcher (identity index over EXISTING non-blob PFs) — the shared
+    # NamespaceEcho pf_by_key + normalize_anchor_key, NOT a name vocabulary.
+    echo = NamespaceEcho.build(product_features, frozenset(ws_donor_keys))
+
+    def _clean_match(name: str) -> bool:
+        """B80 scope-skip selector: exactly the drain's own gates — a domain
+        name echo-matches a SINGLE non-blob PF, is not a generic token, is
+        not ambiguous (>1 candidate). Reused by ``_domain_dir_of`` so the
+        routers scope-skip introduces NO new vocabulary."""
+        k = normalize_anchor_key(name)
+        if not k or k in generic:
+            return False
+        hits = echo.pf_by_key.get(k)
+        if not hits:
+            return False
+        return len({h for h in hits if h not in ws_donor_keys}) == 1
+
+    devs = [
+        f for f in developer_features
+        if _attr(f, "layer", "developer") == "developer" and _attr(f, "name")
+    ]
+    devs_by_pf: dict[str, list[Any]] = defaultdict(list)
+    for d in devs:
+        pid = _attr(d, "product_feature_id")
+        if pid:
+            devs_by_pf[str(pid)].append(d)
+
+    # ── v2 inputs: tracked population + literal path_index + claim index ─
+    tracked = sorted({
+        str(p).replace("\\", "/")
+        for p in (_attr(ctx, "tracked_files", None) or []) if p
+    })
+    prefix_set: set[str] = set()
+    for f in tracked:
+        prefix_set.update(_ancestors_of(f))
+
+    # B80: which ws-blob donors are TRANSPORT-shaped (server/routers tree or
+    # @trpc/* dep). Only these get the routers grain + the B22a exemption;
+    # every non-transport blob stays under the cross-unit guard (anti-sink).
+    transport_donor_keys: set[str] = set()
+    if transport_on:
+        for _dk, _pkg in pkg_of_donor.items():
+            if _is_transport_pkg(_pkg, tracked, ctx):
+                transport_donor_keys.add(_dk)
+
+    pi_owner: dict[str, str] = {}
+    if isinstance(path_index, dict):
+        for p, e in path_index.items():
+            fu = (e.get("feature_uuid") if isinstance(e, dict)
+                  else _attr(e, "feature_uuid", ""))
+            if fu:
+                pi_owner[str(p)] = str(fu)
+
+    # Live non-donor claim index (the dev ledger is the post-6.8 truth):
+    # every developer-layer, non-facet dev's path claims, tagged by its
+    # pfid (None → lane sentinel). Facets never win 6.97 primary, so their
+    # claims don't block a drain (mirror of the 6.97 non-facet-first rule).
+    from wystan.pipeline_v2.spine_hygiene import is_facet
+    exact_claims: dict[str, set[str]] = defaultdict(set)
+    dir_claims: dict[str, set[str]] = defaultdict(set)
+    for d in devs:
+        if is_facet(d):
+            continue
+        tag = str(_attr(d, "product_feature_id") or _LANE_TAG)
+        for p in (_attr(d, "paths") or []):
+            sp = str(p)
+            exact_claims[sp].add(tag)
+            dir_claims[sp].add(tag)
+
+    def _foreign_claim(f: str, donor_key: str) -> bool:
+        tags = set(exact_claims.get(f, ()))
+        for anc in _ancestors_of(f):
+            tags |= dir_claims.get(anc, set())
+        return any(t != donor_key for t in tags)
+
+    # ── Discover domain dirs (explicit + subtree channels) ──────────────
+    explicit_by_dir: dict[str, set[str]] = defaultdict(set)
+    tracked_by_dir: dict[str, set[str]] = defaultdict(set)
+    domain_of_dir: dict[str, str] = {}
+    donor_of_dir: dict[str, str] = {}
+    donor_uuid_sets: dict[str, frozenset[str]] = {}
+    for donor_key, pkg in sorted(pkg_of_donor.items()):
+        member_devs = devs_by_pf.get(donor_key, [])
+        if not member_devs:
+            continue
+        donor_uuid_sets[donor_key] = frozenset(
+            {str(_attr(d, "uuid") or "") for d in member_devs}
+            | {str(_attr(pf_by_key[donor_key], "uuid") or "")}
+        ) - {""}
+        # explicit channel (v1): donor member devs' owned entries.
+        # B80: transport donors additionally recognize routers containers +
+        # the scope-skip; non-transport donors pass the base container set
+        # and no selector ⇒ pre-B80 discovery.
+        _donor_containers = (
+            containers_eff if donor_key in transport_donor_keys
+            else containers)
+        _donor_routers = (
+            routers_containers if donor_key in transport_donor_keys
+            else frozenset())
+        for d in member_devs:
+            for fp in owned_paths_of(d):
+                dd = _domain_dir_of(
+                    str(fp), pkg, _donor_containers,
+                    routers_containers=_donor_routers, matches=_clean_match)
+                if dd is None:
+                    continue
+                explicit_by_dir[dd[0]].add(str(fp))
+                domain_of_dir[dd[0]] = dd[1]
+                donor_of_dir.setdefault(dd[0], donor_key)
+        # subtree channel (v2): the tracked population under the package —
+        # the same implicit territory whose LOC rolls to the blob at 6.97.
+        pref = pkg + "/"
+        for f in tracked:
+            if not f.startswith(pref):
+                continue
+            dd = _domain_dir_of(
+                f, pkg, _donor_containers,
+                routers_containers=_donor_routers, matches=_clean_match)
+            if dd is None:
+                continue
+            tracked_by_dir[dd[0]].add(f)
+            domain_of_dir.setdefault(dd[0], dd[1])
+            donor_of_dir.setdefault(dd[0], donor_key)
+
+    # ── B58-v2 Seg A — donor class 2: same-unit container-anchor cap ────
+    # Explicit channel ONLY; pkg := the donor's workspace unit; the
+    # anchor's own identity subtree is structurally exempt.
+    cap_donor_keys: set[str] = set()
+    if sameunit_cap:
+        tele["cap_donors"] = []
+        tele["nav_only_dirs"] = {}
+        tele["skipped_would_empty"] = 0
+        from wystan.pipeline_v2.stage_6_86_anchored_mint import (
+            _unit_of,
+            _workspace_unit_roots,
+        )
+        unit_roots = _workspace_unit_roots(ctx)
+        cap_containers = _cap_containers()
+        for donor_key in (sorted(pf_by_key) if unit_roots else ()):
+            if donor_key in pkg_of_donor:
+                continue  # ws-blob donors stay class 1
+            pf = pf_by_key[donor_key]
+            aid = str(_attr(pf, "anchor_id") or "")
+            kind, _, tail = aid.partition(":")
+            tail = tail.strip("/")
+            if kind not in ("fdir", "route") or "/" not in tail:
+                # key-only route anchors carry no identity subtree the
+                # cap could fence against — their over-annexation class
+                # is Seg B's (mint-side canonical page-surface rung).
+                continue
+            unit = _unit_of(tail, unit_roots)
+            if unit is None:
+                continue
+            member_devs = devs_by_pf.get(donor_key, [])
+            if not member_devs:
+                continue
+            found = False
+            for d in member_devs:
+                for fp in owned_paths_of(d):
+                    f = str(fp)
+                    dd = _domain_dir_of(f, unit, cap_containers)
+                    if dd is None:
+                        continue
+                    if (dd[0] == tail or dd[0].startswith(tail + "/")
+                            or tail.startswith(dd[0] + "/")):
+                        continue  # anchor's own identity subtree (SACRED)
+                    explicit_by_dir[dd[0]].add(f)
+                    domain_of_dir.setdefault(dd[0], dd[1])
+                    donor_of_dir.setdefault(dd[0], donor_key)
+                    found = True
+            if found:
+                cap_donor_keys.add(donor_key)
+                pkg_of_donor[donor_key] = unit
+                donor_uuid_sets[donor_key] = frozenset(
+                    {str(_attr(d, "uuid") or "") for d in member_devs}
+                    | {str(_attr(pf, "uuid") or "")}
+                ) - {""}
+                tele["cap_donors"].append(donor_key)
+
+    # ── Match laws (unchanged from v1/B49/B51) ──────────────────────────
+    matched: dict[str, str] = {}  # domain-dir → target PF key
+    for dir_path in sorted(domain_of_dir):
+        donor_key = donor_of_dir[dir_path]
+        key = normalize_anchor_key(domain_of_dir[dir_path])
+        if not key:
+            continue
+        if key in generic:
+            tele["skipped_generic"] += 1
+            continue
+        hits = echo.pf_by_key.get(key)
+        if not hits:
+            # B58-v2 nav-only rung: a cap-donor domain with NO product PF
+            # but a nav-declared key is TELEMETRY, never a move (no
+            # receiver ⇒ no conservation-safe destination). The keyed
+            # exhibit: RefApp components/api-keys — the api-keys PF does
+            # not exist on the annexed board, only the nav entry does.
+            if (donor_key in cap_donor_keys and nav_keys
+                    and key in nav_keys):
+                tele["nav_only_dirs"][dir_path] = key
+            continue  # no product surface — the domain stays in the blob
+        candidates = {
+            h for h in hits if h != donor_key and h not in ws_donor_keys
+        }
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            tele["skipped_ambig"] += 1
+            continue
+        target_key = next(iter(candidates))
+        target_pf = pf_by_key.get(target_key)
+        if target_pf is None:
+            continue
+        pkg = pkg_of_donor[donor_key]
+        if not _target_owns_in_pkg(target_key, target_pf, pkg, devs_by_pf):
+            # B22a cross-unit boundary — LIFTED only for a transport-shaped
+            # donor (a trpc package routes to PFs owning no code in it); a
+            # non-transport donor stays fenced (the anti-sink law).
+            if not (transport_on and donor_key in transport_donor_keys):
+                continue
+        matched[dir_path] = target_key
+
+    if not matched:
+        return tele
+
+    # ── Move-set per matched dir ─────────────────────────────────────────
+    drain_map: dict[str, str] = {}           # file → target PF key
+    unattributed_moved: set[str] = set()
+    dir_files: dict[str, list[str]] = {}
+    for dir_path in sorted(matched):
+        donor_key = donor_of_dir[dir_path]
+        target_key = matched[dir_path]
+        donor_uuids = donor_uuid_sets.get(donor_key, frozenset())
+        moved_here: set[str] = set()
+        # (a) explicit donor-dev-owned FILES (a dir entry's files arrive
+        # via the tracked channel; the entry itself is dropped in the
+        # rewrite — carve lists must stay explicit files).
+        for f in explicit_by_dir.get(dir_path, ()):
+            if tracked and f in prefix_set:
+                continue  # directory entry, not a file
+            moved_here.add(f)
+        # (b) unattributed tracked files (v2 subtree rule).
+        for f in sorted(tracked_by_dir.get(dir_path, ())):
+            if f in moved_here:
+                continue
+            fu = pi_owner.get(f)
+            if fu is not None:
+                if fu in donor_uuids:
+                    moved_here.add(f)  # donor-explicit via path_index
+                else:
+                    tele["skipped_pi_foreign"] += 1
+                continue
+            if _foreign_claim(f, donor_key):
+                tele["skipped_nondonor_covered"] += 1
+                continue
+            moved_here.add(f)
+            unattributed_moved.add(f)
+        if not moved_here:
+            continue
+        for f in moved_here:
+            drain_map.setdefault(f, target_key)
+        dir_files[dir_path] = sorted(moved_here)
+
+    # ── B58-v2 would-empty guard (PF-survival invariance) ───────────────
+    # A cap donor whose ENTIRE explicit file set would leave dies as a PF
+    # row the OFF board keeps — the drain must never change which PFs
+    # survive. Pull the whole donor's move back (I8-pullback shape at
+    # donor grain; refusal is success).
+    if cap_donor_keys:
+        for donor_key in sorted(cap_donor_keys):
+            donor_dirs = [dp for dp in dir_files
+                          if donor_of_dir[dp] == donor_key]
+            if not donor_dirs:
+                continue
+            all_files = {
+                str(fp)
+                for d in devs_by_pf.get(donor_key, [])
+                for fp in owned_paths_of(d)
+            }
+            moved = {f for dp in donor_dirs for f in dir_files[dp]}
+            if all_files and not (all_files - moved):
+                for dp in donor_dirs:
+                    for f in dir_files[dp]:
+                        drain_map.pop(f, None)
+                    dir_files.pop(dp)
+                tele["skipped_would_empty"] += 1
+
+    if not drain_map:
+        return tele
+
+    donors_hit = {donor_of_dir[dp] for dp in dir_files}
+    drained_dirs_by_donor: dict[str, list[str]] = defaultdict(list)
+    for dp in dir_files:
+        drained_dirs_by_donor[donor_of_dir[dp]].append(dp)
+
+    # ── Execute: dev-ledger surgery (the 6.97 LOC authority) ─────────────
+    used_names = {str(_attr(d, "name")) for d in devs}
+    new_devs: list[Any] = []
+    for donor_key in sorted(donors_hit):
+        drained_dirs = sorted(drained_dirs_by_donor[donor_key])
+        for d in devs_by_pf.get(donor_key, []):
+            _rewrite_paths(d, drained_dirs, drain_map, tracked, prefix_set)
+        # per-target carve devs (explicit file lists — the no-contest law).
+        by_target: dict[str, list[str]] = defaultdict(list)
+        for dir_path in drained_dirs:
+            by_target[matched[dir_path]].extend(dir_files[dir_path])
+        member_devs = sorted(devs_by_pf.get(donor_key, []),
+                             key=lambda x: str(_attr(x, "name") or ""))
+        shell = member_devs[0] if member_devs else pf_by_key[donor_key]
+        donor_pf = pf_by_key.get(donor_key)
+        for target_key in sorted(by_target):
+            files_t = sorted(set(by_target[target_key]))
+            carved = _make_drain_dev(
+                shell, pf_by_key[target_key], target_key, files_t,
+                used_names)
+            used_names.add(str(_attr(carved, "name")))
+            new_devs.append(carved)
+            _widen_pf(pf_by_key[target_key], files_t, target_key)
+        if donor_pf is not None:
+            all_moved = {f for fs in by_target.values() for f in fs}
+            _shrink_pf(donor_pf, all_moved)
+
+    developer_features.extend(new_devs)
+
+    tele["donors"] = sorted(donors_hit)
+    # B80 telemetry — ADDED ONLY when the transport lane is armed AND fired,
+    # so the OFF/pre-B80 tele shape (and thus scan_meta) is byte-identical.
+    if transport_on and transport_donor_keys:
+        hit = sorted(dk for dk in transport_donor_keys if dk in donors_hit)
+        if hit:
+            tele["transport_donors"] = hit
+    tele["matched_dirs"] = {
+        d: {
+            "pf": matched[d],
+            "files": len(dir_files.get(d, ())),
+            "loc": _count_loc({f: "" for f in dir_files.get(d, ())}, ctx),
+        }
+        for d in sorted(dir_files)
+    }
+    tele["files_moved"] = len(drain_map)
+    tele["files_moved_unattributed"] = len(unattributed_moved)
+    tele["loc_moved"] = _count_loc(drain_map, ctx)
+    # Drain-time PROJECTION of the Stage-6.99 I16 effect (the authoritative
+    # count is scan_meta.i16_rehome.rehomed): journeys homed on a donor whose
+    # member-flow entries are now strict-majority drained.
+    tele["ufs_rehomed"] = _project_rehomes(
+        user_flows, developer_features, drain_map, donors_hit)
+    tele["samples"] = [
+        {"dir": d, "pf": matched[d], "files": len(dir_files[d])}
+        for d in list(sorted(dir_files))[:20]
+    ]
+    return tele
+
+
+# ── move mechanics (mirror provenance_rehome / lane_excavation) ───────────
+
+
+def _split_dir(
+    path: str, drained_under: list[str], tracked: list[str],
+    prefix_set: set[str],
+) -> list[str]:
+    """Recursive ancestor split: the child paths of directory *path* minus
+    the drained subtrees (deterministic sorted). A child that itself
+    contains a drained dir is split further; a child that IS one is
+    dropped."""
+    pref = path + "/"
+    children = sorted({
+        pref + f[len(pref):].split("/", 1)[0]
+        for f in tracked if f.startswith(pref)
+    })
+    out: list[str] = []
+    for c in children:
+        if any(c == d for d in drained_under):
+            continue  # the drained subtree leaves the donor entirely
+        deeper = [d for d in drained_under if d.startswith(c + "/")]
+        if deeper and c in prefix_set:
+            out.extend(_split_dir(c, deeper, tracked, prefix_set))
+        else:
+            out.append(c)
+    return out
+
+
+def _rewrite_paths(
+    dev: Any, drained_dirs: list[str], drain_map: dict[str, str],
+    tracked: list[str], prefix_set: set[str],
+) -> None:
+    """Apply the v2 surgery to one donor dev's ``paths`` + ``member_files``:
+    drop moved files and any entry at/under a drained dir; split ancestor
+    DIRECTORY entries into children minus the drained subtrees (the donor
+    ancestor carve-out — without it 6.97 expansion keeps covering the moved
+    files and the LOC never shifts)."""
+    def _rewrite_one(p: str) -> list[str] | None:
+        """``None`` → keep as-is; list → replacement entries (may be [])."""
+        if p in drain_map:
+            return []  # moved explicit file
+        if _under_any(p, drained_dirs):
+            return []  # entry inside a drained subtree
+        under = [d for d in drained_dirs if d.startswith(p + "/")]
+        if under and tracked:
+            return _split_dir(p, under, tracked, prefix_set)
+        return None
+
+    new_paths: list[str] = []
+    for p in (_attr(dev, "paths") or []):
+        rep = _rewrite_one(str(p))
+        if rep is None:
+            new_paths.append(str(p))
+        else:
+            new_paths.extend(rep)
+    dev.paths = list(dict.fromkeys(new_paths))  # dedup, order-stable
+
+    mfs = _attr(dev, "member_files") or []
+    kept: list[Any] = []
+    for m in mfs:
+        mp = m.get("path") if isinstance(m, dict) else getattr(m, "path", None)
+        if mp is None:
+            kept.append(m)
+            continue
+        rep = _rewrite_one(str(mp))
+        if rep is None:
+            kept.append(m)
+            continue
+        for child in rep:
+            if isinstance(m, dict):
+                mm: Any = dict(m)
+                mm["path"] = child
+            elif hasattr(m, "model_copy"):
+                mm = m.model_copy(update={"path": child})
+            else:  # pragma: no cover — exotic stub member
+                continue
+            kept.append(mm)
+    dev.member_files = kept
+
+
+def _make_drain_dev(
+    shell: Any, target_pf: Any, target_key: str,
+    files: list[str], used_names: set[str],
+) -> Any:
+    """A carved member dev under ``target_pf`` claiming ``files`` as primary
+    (content-derived uuid, ``split_from`` lineage, ``fold:`` anchor, no
+    flows) — mirrors ``provenance_rehome._make_rehome_dev`` with the B53
+    marker. The paths are an EXPLICIT FILE LIST by construction (the
+    no-contest law). Supports pydantic Features and lightweight stubs."""
+    base = f"{target_key}-{_DRAIN_MARKER}"
+    name = base
+    n = 2
+    while name in used_names:
+        name = f"{base}{n}"
+        n += 1
+    uuid = hashlib.sha256(
+        f"ws-blob-drain-v1|{target_key}|{'|'.join(sorted(files))}".encode(
+            "utf-8")).hexdigest()[:32]
+    anchor = f"fold:{_DRAIN_MARKER}->{_attr(target_pf, 'anchor_id') or target_key}"
+    evidence = f"{_DRAIN_MARKER}: drained into '{target_key}'"
+
+    if hasattr(shell, "model_copy"):
+        from wystan.models.types import MemberFile
+        members = [
+            MemberFile(path=p, role="anchor", confidence=1.0, primary=True,
+                       evidence=evidence)
+            for p in sorted(files)
+        ]
+        return shell.model_copy(deep=True, update={
+            "name": name, "display_name": name,
+            "paths": sorted(files), "member_files": members,
+            "product_feature_id": target_key,
+            "description": f"{_DRAIN_MARKER} carve into '{target_key}'.",
+            "uuid": uuid, "split_from": getattr(shell, "uuid", None),
+            "anchor_id": anchor, "shared_reason": None,
+            "previous_names": [], "merged_from": [],
+            "total_commits": 0, "bug_fixes": 0, "bug_fix_ratio": 0.0,
+            "flows": [], "shared_participants": [], "shared_attributions": [],
+            "symbol_attributions": [], "hotspot_files": [], "participants": [],
+            "history": None,
+        })
+
+    from types import SimpleNamespace
+    ch: Any = SimpleNamespace()
+    ch.layer = "developer"
+    ch.name = name
+    ch.display_name = name
+    ch.uuid = uuid
+    ch.paths = sorted(files)
+    ch.member_files = [
+        {"path": p, "role": "anchor", "confidence": 1.0, "primary": True,
+         "evidence": evidence}
+        for p in sorted(files)
+    ]
+    ch.flows = []
+    ch.product_feature_id = target_key
+    ch.anchor_id = anchor
+    ch.shared_reason = None
+    ch.split_from = _attr(shell, "uuid")
+    return ch
+
+
+def _widen_pf(pf: Any, files: list[str], target_key: str) -> None:
+    """Add ``files`` to the PF's ``paths`` + ``member_files`` (so PF scope +
+    validators see them regardless of member-dev traversal)."""
+    seen_paths = set(_attr(pf, "paths") or [])
+    pf.paths = list(_attr(pf, "paths") or []) + [
+        p for p in files if p not in seen_paths]
+    mf_out = list(_attr(pf, "member_files") or [])
+    seen_mf = {
+        (m.get("path") if isinstance(m, dict) else getattr(m, "path", None))
+        for m in mf_out
+    }
+    evidence = f"{_DRAIN_MARKER}: drained into '{target_key}'"
+    if mf_out and isinstance(mf_out[0], dict):
+        for p in sorted(files):
+            if p not in seen_mf:
+                seen_mf.add(p)
+                mf_out.append({"path": p, "role": "anchor", "confidence": 1.0,
+                               "primary": True, "evidence": evidence})
+    else:
+        from wystan.models.types import MemberFile
+        for p in sorted(files):
+            if p not in seen_mf:
+                seen_mf.add(p)
+                mf_out.append(MemberFile(
+                    path=p, role="anchor", confidence=1.0, primary=True,
+                    evidence=evidence))
+    pf.member_files = mf_out
+
+
+def _shrink_pf(pf: Any, moved: set[str]) -> None:
+    """Drop ``moved`` from the donor PF's explicit ``paths`` +
+    ``member_files``. Directory entries stay — PF paths never drive the
+    6.97 LOC when member devs exist; the dev ledger is the authority."""
+    pf.paths = [p for p in (_attr(pf, "paths") or []) if p not in moved]
+    kept = []
+    for m in (_attr(pf, "member_files") or []):
+        p = m.get("path") if isinstance(m, dict) else getattr(m, "path", None)
+        if p not in moved:
+            kept.append(m)
+    pf.member_files = kept
+
+
+def _count_loc(drain_map: dict[str, str], ctx: Any) -> int:
+    """Non-blank-line count of the drained files (mirrors 6.97's counting).
+    Best-effort — an unreadable file contributes 0, never raises."""
+    root = Path(str(_attr(ctx, "repo_path", ".") or "."))
+    total = 0
+    for f in drain_map:
+        try:
+            text = (root / f).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        total += sum(1 for ln in text.splitlines() if ln.strip())
+    return total
+
+
+def _project_rehomes(
+    user_flows: list[Any], developer_features: list[Any],
+    drain_map: dict[str, str], donors_hit: set[str],
+) -> int:
+    """Projected count of donor-homed journeys whose member-flow entries are
+    now strict-majority drained (the Stage-6.99 I16 move, projected)."""
+    flow_by_uuid: dict[str, Any] = {}
+    for f in developer_features:
+        for fl in (_attr(f, "flows") or []):
+            u = _attr(fl, "uuid")
+            if u:
+                flow_by_uuid[str(u)] = fl
+    count = 0
+    for uf in user_flows:
+        home = _attr(uf, "product_feature_id")
+        if not home or str(home) not in donors_hit:
+            continue
+        chk = drained = 0
+        for fid in (_attr(uf, "member_flow_ids") or []):
+            fl = flow_by_uuid.get(str(fid))
+            ep = _attr(fl, "entry_point_file") if fl is not None else None
+            if not ep:
+                continue
+            chk += 1
+            if str(ep) in drain_map:
+                drained += 1
+        if chk and drained * 2 > chk:
+            count += 1
+    return count

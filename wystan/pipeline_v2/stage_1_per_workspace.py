@@ -1,0 +1,847 @@
+"""Stage 1 — per-workspace extractor dispatch (S3).
+
+Polyglot monorepos (NestJS backend + Next/Vite frontend + Rust WASM,
+etc.) historically tripped over Stage 1: the global extractor pass
+saw a top-level ``stack="js-generic"`` (or worse, "unknown") and
+emitted zero deterministic anchors. Stage 4's LLM fallback then
+synthesised 100% of features, blowing past the 50% warn threshold
+and producing 0 deterministic flows.
+
+This module wraps the existing Stage 1 extractors with a per-workspace
+dispatcher that:
+
+  1. Activates ONLY when the repo is a polyglot monorepo
+     (audited_stack == "monorepo-polyglot" OR ctx.monorepo with ≥2
+     workspaces whose ``stack`` slugs differ).
+  2. For each workspace, builds a scoped ``ScanContext`` where
+     ``tracked_files`` is the subset of files under that workspace's
+     path, ``stack`` is the workspace's own inferred stack, and
+     ``monorepo`` is False (so the extractors don't try to fan out
+     further).
+  3. Runs the registered extractors against each scoped context.
+  4. Merges anchors across workspaces — when two workspaces emit the
+     same slug, we keep them separate ONLY if their paths are fully
+     disjoint AND each has ≥3 paths (signalling distinct features).
+     Otherwise we coalesce, mirroring Stage 2's normal behaviour.
+
+Workspace synthesis fallback
+============================
+
+Some polyglot repos (infisical, supabase) don't declare workspaces in
+any package manager manifest — they just have ``backend/`` and
+``frontend/`` directories side-by-side. Stage 0's
+``detect_workspace`` returns ``detected=False`` for these. When the
+auditor *does* identify the repo as polyglot, we synthesise
+workspaces from a conservative set of conventional top-level directory
+names (``backend``, ``frontend``, ``server``, ``client``, ``api``,
+``web``, ``app``, ``apps``, ``packages``, ``services``, ``cli``,
+``wasm``, ``ee``) — each one that contains a manifest file
+(``package.json`` / ``Cargo.toml`` / ``pyproject.toml`` / ``go.mod``)
+becomes a synthetic ``Workspace`` with its own per-package stack
+detection. NO HEURISTIC NAMES — we always require a manifest as proof
+the directory is actually its own package.
+
+This module does NOT touch the global Stage 1 implementation. When it
+activates the orchestrator skips the global pass; otherwise the global
+pass runs as before.
+
+No LLM calls. No network calls.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+from wystan.pipeline_v2.extractors.base import (
+    AnchorCandidate,
+    AnchorExtractor,
+)
+from wystan.pipeline_v2.stage_0_intake import (
+    ScanContext,
+    Workspace,
+    _read_json,
+    detect_stack,
+)
+from wystan.pipeline_v2.stage_1_extractors import (
+    _discover_extractors,
+    _safe_extract,
+    merge_profile_extractors,
+)
+
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
+
+
+# Conservative whitelist of directory names we consider candidates for
+# a synthetic workspace when the repo has no declared workspaces.
+# ORDER doesn't matter — each candidate must additionally have a
+# manifest file at its root to be promoted.
+_SYNTHETIC_WORKSPACE_DIRS: tuple[str, ...] = (
+    "backend",
+    "frontend",
+    "server",
+    "client",
+    "api",
+    "web",
+    "app",
+    "apps",
+    "packages",
+    "services",
+    "cli",
+    "wasm",
+    "ee",
+    "core",
+    "admin",
+    "worker",
+    "workers",
+    "platform",
+    "gateway",
+    "sdk",
+    "sdks",
+)
+
+# Manifest filenames that prove a directory is its own package.
+_MANIFEST_FILENAMES: tuple[str, ...] = (
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "go.mod",
+    "Gemfile",
+    "composer.json",
+    "pom.xml",
+    "build.gradle",
+)
+
+
+# ── Public data types ─────────────────────────────────────────────────────
+
+
+@dataclass
+class WorkspaceExtractionReport:
+    """Telemetry for one workspace's per-workspace extractor pass."""
+
+    name: str
+    path: str
+    inferred_stack: str | None
+    extractors_fired: list[str]
+    anchors_emitted: int
+
+
+# ── Activation ────────────────────────────────────────────────────────────
+
+
+_NOISE_STACKS = {"js-generic", "python-lib", "ruby", "unknown", ""}
+
+# Declared-workspace UNION gate (onyx shape, 2026-07-19).
+# Default OFF. When armed, ``run_stage_1_per_workspace`` unions declared
+# workspaces that span only a MINORITY of tracked files with the
+# non-overlapping results of :func:`synthesise_workspaces`. See
+# :func:`workspace_union_enabled` / :func:`_declared_covers_minority`.
+WORKSPACE_UNION_ENV = "WYSTAN_WORKSPACE_UNION"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def workspace_union_enabled() -> bool:
+    """Return True when the declared-workspace union gate is armed.
+
+    Default **ON** since the 2026-07-21 pack-2 flip (KEY_SCHEMA 33; keyed
+    A/B onyx green — fallback 57.1→36.5%, web-residual 2114→0; anti-cases
+    langfuse/typebot byte-identical even armed). Unset ≡ explicit ``1``;
+    an explicit value outside ``{1, true, yes, on}`` (``=0``/``false``/
+    ``off``) leaves Stage 1 byte-identical to the pre-gate behaviour —
+    explicit off stays a valid kill-switch forever.
+
+    The union only fires when this returns True AND the declared
+    workspaces span a minority of tracked files
+    (:func:`_declared_covers_minority`).
+    """
+    return os.environ.get(WORKSPACE_UNION_ENV, "1").strip().lower() in _TRUTHY
+
+
+def _distinct_interesting_stacks(workspaces: list[Workspace]) -> int:
+    stacks = {
+        (w.stack or "").lower()
+        for w in workspaces
+        if (w.stack or "").strip()
+    }
+    # Filter out the noise stacks that don't change extractor activation.
+    return len(stacks - _NOISE_STACKS)
+
+
+def should_activate_per_workspace(ctx: ScanContext) -> bool:
+    """Return True when per-workspace dispatch should replace global Stage 1.
+
+    Conditions (any one):
+      1. Auditor flagged the repo as ``monorepo-polyglot``.
+      2. ``ctx.monorepo`` is True AND ``ctx.workspaces`` contains ≥2
+         workspaces with DIFFERENT non-empty stack slugs (proper
+         polyglot monorepo even without auditor verdict).
+      3. UNDECLARED multi-app monorepo (the infisical shape, 2026-06-12):
+         no declared workspaces at all, but :func:`synthesise_workspaces`
+         finds ≥2 conventional app dirs (backend/, frontend/, ...) with
+         their own manifests AND ≥2 distinct non-noise stacks among them.
+         Without this probe the synthesis fallback was unreachable —
+         it lived inside the dispatch that this gate never enabled, so
+         repos like infisical scanned with ZERO route/package anchors
+         (and therefore no flows and no LOC downstream).
+    """
+    audited = (ctx.audited_stack or "").lower()
+    if audited == "monorepo-polyglot":
+        return True
+
+    if ctx.workspaces:
+        if not ctx.monorepo:
+            return False
+        return _distinct_interesting_stacks(list(ctx.workspaces)) >= 2
+
+    # No declared workspaces — probe the conservative synthesis list.
+    # Cheap: walks only whitelisted top-level dirs that carry manifests.
+    synthetic = synthesise_workspaces(ctx)
+    return len(synthetic) >= 2 and _distinct_interesting_stacks(synthetic) >= 2
+
+
+# ── Workspace synthesis fallback ──────────────────────────────────────────
+
+
+def _has_manifest(dir_path: Path) -> str | None:
+    """Return the first manifest filename present at ``dir_path``, or None."""
+    for fname in _MANIFEST_FILENAMES:
+        if (dir_path / fname).is_file():
+            return fname
+    return None
+
+
+def synthesise_workspaces(ctx: ScanContext) -> list[Workspace]:
+    """Build a list of synthetic workspaces from conventional dir names.
+
+    Walks the immediate children of ``ctx.repo_path`` whose name is in
+    ``_SYNTHETIC_WORKSPACE_DIRS`` AND which contain a manifest file.
+    For ``apps/`` and ``packages/`` (and ``services/``) we recurse one
+    level deeper since those are container directories — each immediate
+    child is treated as a workspace.
+
+    Returns an empty list when nothing qualifies. Caller is responsible
+    for deciding whether the synthesised list is preferable to the
+    existing (possibly empty) ``ctx.workspaces``.
+    """
+    out: list[Workspace] = []
+    seen_paths: set[str] = set()
+
+    def _emit(rel_path: str, ws_root: Path) -> None:
+        if rel_path in seen_paths:
+            return
+        seen_paths.add(rel_path)
+        ws_files = [
+            f for f in ctx.tracked_files
+            if f == rel_path or f.startswith(rel_path + "/")
+        ]
+        if not ws_files:
+            return
+        pkg_json = _read_json(ws_root / "package.json")
+        stack, _signals = detect_stack(ws_root, [
+            # detect_stack expects workspace-relative paths
+            f[len(rel_path) + 1:] if f.startswith(rel_path + "/") else f
+            for f in ws_files
+        ])
+        out.append(
+            Workspace(
+                name=ws_root.name,
+                path=rel_path,
+                package_json=pkg_json,
+                stack=stack,
+                files=ws_files,
+            ),
+        )
+
+    for child in sorted(ctx.repo_path.iterdir()):
+        if not child.is_dir():
+            continue
+        name = child.name
+        if name not in _SYNTHETIC_WORKSPACE_DIRS:
+            continue
+
+        # Container directories: treat each subchild as its own workspace.
+        if name in ("apps", "packages", "services", "sdks", "workers"):
+            for sub in sorted(child.iterdir()):
+                if not sub.is_dir():
+                    continue
+                if _has_manifest(sub) is None:
+                    continue
+                rel = f"{name}/{sub.name}"
+                _emit(rel, sub)
+            continue
+
+        # Direct workspace candidates.
+        if _has_manifest(child) is None:
+            continue
+        _emit(name, child)
+
+    return out
+
+
+# ── Declared-workspace union gate ─────────────────────────────────────────
+
+
+def _dir_overlaps(a: str, b: str) -> bool:
+    """True when two workspace paths are the same dir or one nests the
+    other (directory-prefix overlap). Used to keep the union disjoint."""
+    a = a.rstrip("/")
+    b = b.rstrip("/")
+    if a == b:
+        return True
+    return a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def _declared_covers_minority(
+    workspaces: list[Workspace], tracked_files: list[str],
+) -> bool:
+    """True when declared workspaces span a strict MINORITY of tracked files.
+
+    The onyx shape: the root ``package.json`` enumerates peripheral
+    packages (``widget/``, ``desktop/`` — ~1.6% of tracked) while the
+    product bulk (``web/``, ``cli/``) is undeclared and would otherwise
+    fall into the js-generic leftover pass.
+
+    Scale-invariant ratio gate — ``covered * 2 < total`` (no magic
+    number, no per-repo threshold). Returns False when there is nothing
+    to measure or no declared paths exist (callers must not union in
+    those cases).
+    """
+    if not tracked_files:
+        return False
+    prefixes = tuple(
+        w.path.rstrip("/") + "/" for w in workspaces if w.path
+    )
+    if not prefixes:
+        return False
+    covered = sum(
+        1
+        for f in tracked_files
+        if any(f == p[:-1] or f.startswith(p) for p in prefixes)
+    )
+    return covered * 2 < len(tracked_files)
+
+
+def _union_synthesised(
+    declared: list[Workspace], ctx: ScanContext,
+) -> list[Workspace]:
+    """Synthesised workspaces whose path is disjoint from every declared
+    workspace — the non-overlapping union additions.
+
+    Reuses :func:`synthesise_workspaces` (the infisical synthesis
+    mechanism) verbatim; introduces NO new extractors. A synthesised
+    workspace whose directory equals or nests/​is-nested-by any declared
+    workspace is dropped so the merged list stays path-disjoint.
+    """
+    declared_paths = [w.path for w in declared if w.path]
+    additions: list[Workspace] = []
+    for w in synthesise_workspaces(ctx):
+        if not w.path:
+            continue
+        if any(_dir_overlaps(w.path, d) for d in declared_paths):
+            continue
+        additions.append(w)
+    return additions
+
+
+# ── Scoped ScanContext construction ───────────────────────────────────────
+
+
+def _scoped_ctx(ctx: ScanContext, ws: Workspace) -> ScanContext:
+    """Build a ScanContext narrowed to a single workspace's files.
+
+    The scoped context tells the extractors:
+      - ``stack`` is the workspace's own inferred stack
+      - ``monorepo`` is True with a SINGLE-workspace list so
+        existing extractors that branch on ``ctx.monorepo and
+        ctx.workspaces`` (route, package) read THIS workspace's
+        manifest + files, not the root.
+      - ``tracked_files`` is the subset under the workspace path —
+        also populated on the singleton Workspace.files so
+        per-workspace extractors that iterate ctx.workspaces see
+        consistent file scope.
+      - ``audited_stack`` carries the workspace's own stack so
+        gate-by-audited-stack extractors (rust-workspace,
+        python-library, go-router) activate when appropriate.
+    """
+    files = list(ws.files) if ws.files else [
+        f for f in ctx.tracked_files
+        if f == ws.path or f.startswith(ws.path.rstrip("/") + "/")
+    ]
+    # Ensure workspace carries the file list for downstream extractors.
+    if not ws.files:
+        ws = Workspace(
+            name=ws.name,
+            path=ws.path,
+            package_json=ws.package_json,
+            stack=ws.stack,
+            files=files,
+        )
+    return ScanContext(
+        repo_path=ctx.repo_path,
+        stack=ws.stack,
+        monorepo=True,
+        workspaces=[ws],
+        tracked_files=files,
+        commits=ctx.commits,
+        stack_signals=[f"workspace={ws.name} stack={ws.stack}"],
+        workspace_manager=ctx.workspace_manager,
+        run_id=ctx.run_id,
+        run_dir=ctx.run_dir,
+        audited_stack=ws.stack,  # treat workspace stack as primary
+        secondary_stacks=(),
+        extractor_hints=(),
+        auditor_confidence=None,
+    )
+
+
+# ── Anchor merging across workspaces ──────────────────────────────────────
+
+
+def _paths_disjoint(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
+    return not (set(a) & set(b))
+
+
+def _merge_anchors_across_workspaces(
+    per_ws_results: list[tuple[str, dict[str, list[AnchorCandidate]]]],
+) -> dict[str, list[AnchorCandidate]]:
+    """Merge per-workspace extractor outputs into a single Stage-1 dict.
+
+    Args:
+        per_ws_results: list of ``(workspace_name, stage1_out_dict)``.
+
+    Returns:
+        A dict matching the global ``stage_1_extractors`` shape —
+        keyed by extractor name (``route`` / ``mvc`` / ...) with a
+        list of ``AnchorCandidate``.
+
+    Coalescing rule per (source, slug):
+      - If only one workspace emitted it → keep as-is.
+      - If multiple workspaces emitted it AND paths are pairwise
+        disjoint AND every emission has ≥3 paths → keep all (rename
+        to ``<workspace>-<slug>`` to avoid Stage 2 collapsing them).
+      - Otherwise → merge into one candidate whose paths are the union
+        of all contributing paths, summing confidence (capped at 0.95).
+    """
+    # (source, slug) -> list[(ws_name, candidate)]
+    grouped: dict[tuple[str, str], list[tuple[str, AnchorCandidate]]] = defaultdict(list)
+    errors: dict[str, str] = {}
+
+    for ws_name, stage1_out in per_ws_results:
+        # "_errors" carries a dict[str, str] payload, not anchor candidates.
+        ext_errs = cast("dict[str, str]", stage1_out.get("_errors") or {})
+        for k, v in ext_errs.items():
+            errors[f"{ws_name}:{k}"] = v
+        for source, candidates in stage1_out.items():
+            if source == "_errors":
+                continue
+            for cand in candidates:
+                grouped[(source, cand.name)].append((ws_name, cand))
+
+    merged: dict[str, list[AnchorCandidate]] = defaultdict(list)
+
+    # B67 twin-slug routes preservation (flag-gated for OFF byte-identity).
+    # Both rebuild paths below construct NEW AnchorCandidates and historically
+    # DROPPED the explicit ``routes`` (and ``route_groups``) fields — any
+    # same-(source, slug) candidates that coalesce lose their routes_index
+    # rows silently. twenty's B67 forensics: every cron has a same-slug job
+    # twin (crons/jobs/X.cron.job.ts + jobs/X.job.ts -> two 1-path candidates
+    # -> coalesce -> routes gone; 22 of 27 dropped rows). The same hole eats
+    # any DSL-routed extractor's twins on monorepos (FastAPI/Express) — but
+    # restoring them un-gated would change OFF-world boards, so the general
+    # cleanup rides the B67 flip; until then preservation is armed only by
+    # WYSTAN_JOBS_ENTRIES.
+    from wystan.pipeline_v2.extractors.jobs_entries import (
+        JobsEntryExtractor,
+        jobs_entries_enabled,
+    )
+    from wystan.pipeline_v2.extractors.server_api_entries import (
+        SERVER_API_ENTRY_SOURCE,
+        server_api_entries_enabled,
+    )
+    # B66 rides the same armed path: NestJS/tRPC/GraphQL entries are heavily
+    # monorepo (twenty packages/twenty-server, cal apps/api/v2), so same-slug
+    # twins that coalesce here would otherwise LOSE their explicit routes before
+    # they reach routes_index.
+    #
+    # ORIGIN-GATED, not blanket. Preservation is keyed to each candidate's
+    # BIRTH source — every extractor stamps ``cand.source == <its name>`` per
+    # the base.AnchorExtractor contract, and the group key below IS that source
+    # — so ONLY candidates minted by an armed extractor keep their routes
+    # through a coalesce. A blanket ``A or B`` boolean also preserved UNARMED
+    # sources' routes: on python monorepos the ``route`` extractor's internal
+    # FastAPI candidates (backend/**/*.py) that OFF-world DROP at coalesce would
+    # survive whenever either flag was on — a board-wide ON-world regression on
+    # stacks entirely outside this flag's scope (onyx routes_index 56->208).
+    # Each flag arms ONLY its own source key; both unset -> empty set ->
+    # byte-identical OFF world (kill-switch law).
+    from wystan.pipeline_v2.extractors.spa_router import (
+        SPA_PAGE_SOURCE,
+        spa_router_entries_enabled,
+    )
+    # B65-v3 rides the same armed path: vue file-based pages emit ONE
+    # candidate per (file, slug), so a monorepo like hoppscotch produces
+    # same-slug 1-path twins by construction (profile.vue +
+    # profile/{index,teams,tokens}.vue -> four 'profile' candidates;
+    # 'enter'/'settings' twins across workspaces). Unarmed, the coalesce
+    # dropped their routes silently: live ON forensics = 28 emitted route
+    # rows -> 10 delivered (12 candidates coalesced into 6 route-less
+    # groups). Origin-gated like B66/B67 — arms ONLY the spa-page source.
+    # S4-a rides the same armed path: an app-router keyless candidate carries
+    # its route in ``.routes`` with the page/route file as its single path, so
+    # two same-slug pages across workspaces (or a slug shared with the leftover
+    # scope) coalesce to a route-less group unless the source is armed. Arms
+    # ONLY the approuter source; unset -> not in the set -> byte-identical OFF.
+    from wystan.pipeline_v2.extractors.approuter_keyless import (
+        APPROUTER_SOURCE,
+        approuter_keyless_enabled,
+    )
+    armed_sources: set[str] = set()
+    if jobs_entries_enabled():
+        armed_sources.add(JobsEntryExtractor.name)
+    if server_api_entries_enabled():
+        armed_sources.add(SERVER_API_ENTRY_SOURCE)
+    if spa_router_entries_enabled():
+        armed_sources.add(SPA_PAGE_SOURCE)
+    if approuter_keyless_enabled():
+        armed_sources.add(APPROUTER_SOURCE)
+    # S4b rides the same origin-gated path: armed go-router candidates carry
+    # explicit DSL routes (gorilla/chi/gin/ServeMux) that a same-slug
+    # coalesce on a Go monorepo would otherwise drop before routes_index.
+    # Arms ONLY the go-router source key (ce821a5 law).
+    from wystan.pipeline_v2.extractors.go_router import (
+        GoRouterExtractor,
+        go_extraction_enabled,
+    )
+    if go_extraction_enabled():
+        armed_sources.add(GoRouterExtractor.name)
+
+    def _routes_union(
+        cands: list[AnchorCandidate],
+    ) -> tuple[tuple[str, str, str], ...]:
+        out: list[tuple[str, str, str]] = []
+        seen_r: set[tuple[str, str, str]] = set()
+        for c in cands:
+            for r in (c.routes or ()):
+                if r not in seen_r:
+                    seen_r.add(r)
+                    out.append(r)
+        return tuple(out)
+
+    for (source, slug), items in grouped.items():
+        if len(items) == 1:
+            merged[source].append(items[0][1])
+            continue
+
+        # Origin gate: routes survive a coalesce ONLY when this group's source
+        # was minted by an armed extractor. All candidates in a group share the
+        # same source (it is the group key), so one membership test decides the
+        # whole group — no cross-source mixing is possible inside a group.
+        preserve = source in armed_sources
+
+        # Check disjoint + chunky enough to keep separate.
+        paths_lists = [c.paths for _, c in items]
+        all_pairwise_disjoint = all(
+            _paths_disjoint(paths_lists[i], paths_lists[j])
+            for i in range(len(paths_lists))
+            for j in range(i + 1, len(paths_lists))
+        )
+        all_chunky = all(len(p) >= 3 for p in paths_lists)
+
+        if all_pairwise_disjoint and all_chunky:
+            for ws_name, cand in items:
+                renamed = AnchorCandidate(
+                    name=f"{ws_name}-{cand.name}",
+                    paths=cand.paths,
+                    source=cand.source,
+                    confidence_self=cand.confidence_self,
+                    display_name=cand.display_name,
+                    rationale=(
+                        f"{cand.rationale} [workspace={ws_name}]"
+                    ),
+                    routes=cand.routes if preserve else (),
+                    route_groups=(
+                        cand.route_groups if preserve else ()
+                    ),
+                )
+                merged[source].append(renamed)
+        else:
+            # Coalesce — union paths, average-cap confidence.
+            paths_union: list[str] = []
+            seen: set[str] = set()
+            for c in (c for _, c in items):
+                for p in c.paths:
+                    if p not in seen:
+                        seen.add(p)
+                        paths_union.append(p)
+            conf = min(
+                max((c.confidence_self for _, c in items), default=0.5) + 0.05,
+                0.95,
+            )
+            contributing_wss = sorted({ws for ws, _ in items})
+            merged[source].append(
+                AnchorCandidate(
+                    name=slug,
+                    paths=tuple(paths_union),
+                    source=source,
+                    confidence_self=conf,
+                    rationale=(
+                        f"per-workspace merged from "
+                        f"workspaces={contributing_wss}"
+                    ),
+                    routes=(
+                        _routes_union([c for _, c in items])
+                        if preserve else ()
+                    ),
+                ),
+            )
+
+    # Ensure all source keys appear (even if empty) for telemetry.
+    for ws_name, stage1_out in per_ws_results:
+        for source in stage1_out.keys():
+            if source == "_errors":
+                continue
+            merged.setdefault(source, [])
+
+    out: dict[str, list[AnchorCandidate]] = dict(merged)
+    if errors:
+        out["_errors"] = errors  # type: ignore[assignment]
+    return out
+
+
+# ── Public orchestration entry point ──────────────────────────────────────
+
+
+@dataclass
+class PerWorkspaceResult:
+    stage1_out: dict[str, list[AnchorCandidate]]
+    workspaces_processed: list[WorkspaceExtractionReport]
+    workspaces_used: list[Workspace]
+    synthesised_workspaces: bool
+    leftover_files_scanned: int = 0
+
+
+def run_stage_1_per_workspace(
+    ctx: ScanContext,
+    extractors: list[AnchorExtractor] | None = None,
+    *,
+    profile: object | None = None,
+) -> PerWorkspaceResult:
+    """Run Stage 1 extractors per workspace and merge.
+
+    Args:
+        ctx: Stage 0 output (post-auditor).
+        extractors: optional explicit registry. ``None`` → discover.
+        profile: the ACTIVE framework profile — its optional Stage-1
+            extractor overrides are merged into the registry exactly as
+            in the global pass (:func:`merge_profile_extractors`); a
+            ``None`` / DefaultProfile is a strict no-op.
+
+    Returns:
+        ``PerWorkspaceResult`` containing the merged Stage-1 dict
+        (matches ``stage_1_extractors`` shape) plus per-workspace
+        telemetry. Caller decides whether to use ``stage1_out`` or
+        ignore the per-workspace pass entirely (e.g. if no workspaces
+        materialised).
+
+    Raises nothing — failure of an individual extractor on one
+    workspace is captured in ``stage1_out["_errors"]`` (namespaced
+    ``<workspace>:<extractor>``) and does not kill the pass.
+    """
+    if extractors is None:
+        extractors = _discover_extractors()
+    extractors = merge_profile_extractors(extractors, profile, ctx)
+
+    # Source the workspace list — declared first, synthesised second.
+    workspaces = list(ctx.workspaces or [])
+    synthesised = False
+    if not workspaces:
+        workspaces = synthesise_workspaces(ctx)
+        synthesised = bool(workspaces)
+    elif workspace_union_enabled() and _declared_covers_minority(
+        workspaces, ctx.tracked_files,
+    ):
+        # Declared workspaces span a minority of tracked files (the onyx
+        # shape — root package.json enumerates widget/ + desktop/ while
+        # the product bulk in web/ + cli/ is undeclared). Union the
+        # declared list with the non-overlapping synthesised workspaces
+        # (reuse of the infisical synthesis mechanism; no new extractors)
+        # so the bulk is scoped to its own stack instead of dissolving in
+        # the js-generic leftover pass. Flag-gated
+        # (WYSTAN_WORKSPACE_UNION, default ON since the 2026-07-21
+        # pack-2 flip, KEY_SCHEMA 33); explicit =0 ⇒ byte-identical
+        # to base because this branch never runs (kill-switch forever).
+        additions = _union_synthesised(workspaces, ctx)
+        if additions:
+            workspaces = workspaces + additions
+            synthesised = True
+
+    if not workspaces:
+        # No workspaces at all — return an empty result so caller can
+        # fall back to global Stage 1.
+        return PerWorkspaceResult(
+            stage1_out={},
+            workspaces_processed=[],
+            workspaces_used=[],
+            synthesised_workspaces=False,
+        )
+
+    # Compute LEFTOVER files — tracked_files not under any workspace.
+    # These need a separate pass so we don't lose anchors for code
+    # that lives outside the declared workspace tree (e.g.
+    # ``packages/db/`` when the workspace list only enumerated
+    # ``apps/*`` because pnpm-workspace.yaml's ``packages/**/*`` glob
+    # wasn't fully expanded by Stage 0).
+    ws_prefixes = tuple(
+        (w.path.rstrip("/") + "/") for w in workspaces if w.path
+    )
+    leftover_files = [
+        f for f in ctx.tracked_files
+        if not any(f == p[:-1] or f.startswith(p) for p in ws_prefixes)
+    ]
+
+    per_ws_results: list[tuple[str, dict[str, list[AnchorCandidate]]]] = []
+    reports: list[WorkspaceExtractionReport] = []
+
+    for ws in workspaces:
+        scoped = _scoped_ctx(ctx, ws)
+        if not scoped.tracked_files:
+            reports.append(
+                WorkspaceExtractionReport(
+                    name=ws.name,
+                    path=ws.path,
+                    inferred_stack=ws.stack,
+                    extractors_fired=[],
+                    anchors_emitted=0,
+                ),
+            )
+            continue
+
+        ws_out: dict[str, list[AnchorCandidate]] = {}
+        errors: dict[str, str] = {}
+        fired: list[str] = []
+        total_anchors = 0
+        for ext in extractors:
+            name, candidates, error = _safe_extract(ext, scoped)
+            if error is not None:
+                errors[name] = error
+                ws_out[name] = []
+                continue
+            assert candidates is not None
+            ws_out[name] = candidates
+            if candidates:
+                fired.append(name)
+                total_anchors += len(candidates)
+        if errors:
+            ws_out["_errors"] = errors  # type: ignore[assignment]
+
+        per_ws_results.append((ws.name, ws_out))
+        reports.append(
+            WorkspaceExtractionReport(
+                name=ws.name,
+                path=ws.path,
+                inferred_stack=ws.stack,
+                extractors_fired=fired,
+                anchors_emitted=total_anchors,
+            ),
+        )
+
+    # ── LEFTOVER pass: files outside any workspace ──
+    # Run extractors against a ScanContext whose tracked_files is the
+    # leftover set, with ``stack`` cleared and ``monorepo=False``.
+    # We treat the leftover scope as a synthetic ``__leftover__``
+    # workspace so its emissions go through the same merge logic
+    # (potential name collisions with workspace-emitted anchors are
+    # coalesced).
+    if leftover_files:
+        leftover_ctx = ScanContext(
+            repo_path=ctx.repo_path,
+            stack=ctx.stack,
+            monorepo=False,
+            workspaces=None,
+            tracked_files=leftover_files,
+            commits=ctx.commits,
+            stack_signals=["leftover scope"],
+            workspace_manager=None,
+            run_id=ctx.run_id,
+            run_dir=ctx.run_dir,
+            audited_stack=None,
+            secondary_stacks=(),
+            extractor_hints=(),
+            auditor_confidence=None,
+        )
+        leftover_out: dict[str, list[AnchorCandidate]] = {}
+        leftover_errors: dict[str, str] = {}
+        leftover_fired: list[str] = []
+        leftover_total = 0
+        for ext in extractors:
+            name, candidates, error = _safe_extract(ext, leftover_ctx)
+            if error is not None:
+                leftover_errors[name] = error
+                leftover_out[name] = []
+                continue
+            assert candidates is not None
+            leftover_out[name] = candidates
+            if candidates:
+                leftover_fired.append(name)
+                leftover_total += len(candidates)
+        if leftover_errors:
+            leftover_out["_errors"] = leftover_errors  # type: ignore[assignment]
+        per_ws_results.append(("__leftover__", leftover_out))
+        reports.append(
+            WorkspaceExtractionReport(
+                name="__leftover__",
+                path="(uncovered files)",
+                inferred_stack=None,
+                extractors_fired=leftover_fired,
+                anchors_emitted=leftover_total,
+            ),
+        )
+
+    merged = _merge_anchors_across_workspaces(per_ws_results)
+
+    # B74 Seg A — repo-wide route-table pass (mirrors the global-path
+    # fold in ``stage_1_extractors``). MUST run on the FULL context:
+    # route tables are a cross-workspace surface — the table lives in a
+    # shared package (twenty-shared AppPath) while its router consumers
+    # live in an app package (twenty-front), so the scoped per-workspace
+    # passes above can never join them (the twenty KS forensics exhibit:
+    # armed scan, 0 rows). Flag-gated inside; [] on unset keeps the
+    # merged dict byte-identical and never adds a source key.
+    try:
+        from wystan.pipeline_v2.extractors.spa_router import (
+            SPA_PAGE_SOURCE,
+            route_table_candidates,
+        )
+
+        table_cands = route_table_candidates(ctx)
+        if table_cands:
+            merged.setdefault(SPA_PAGE_SOURCE, []).extend(table_cands)
+    except ImportError:  # pragma: no cover — missing extractor is non-fatal
+        pass
+
+    return PerWorkspaceResult(
+        stage1_out=merged,
+        workspaces_processed=reports,
+        workspaces_used=workspaces,
+        synthesised_workspaces=synthesised,
+        leftover_files_scanned=len(leftover_files),
+    )
+
+
+__all__ = [
+    "PerWorkspaceResult",
+    "WorkspaceExtractionReport",
+    "run_stage_1_per_workspace",
+    "should_activate_per_workspace",
+    "synthesise_workspaces",
+    "workspace_union_enabled",
+]

@@ -1,0 +1,88 @@
+# Tests (not shipped in this repo)
+tests/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+wheels/
+
+# Node
+node_modules/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.pyright/
+
+# featuremap output
+.featuremap/
+.wystan
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Secrets
+.env
+.env.local
+.env.*
+*.key
+
+# Hatch
+.hatch/
+
+# Internal mission docs (not for public)
+memory/
+
+# Landing page screenshots
+*.png
+*.webp
+# …but keep committed brand/README assets
+!assets/
+!assets/**
+
+# Waitlist data
+waitlist.json
+
+.pypirc
+# Likewise: only the root docs/, so nested docs directories stay visible.
+/docs/
+
+# eval/ lives ONLY locally / in the private repo (operator directive 2026-07-11).
+# The leading slash is MANDATORY: without it the pattern also catches tests/eval/
+# (runner + fixtures, 36 files), which must stay in the repo. In the old repo those
+# remained tracked despite the rule — moving to a clean git would have silently
+# dropped them.
+/eval/
+
+# worker lives ONLY in the private wystan-app repo (operator directive 2026-07-12)
+worker/
+benchmarks/
+**/feature-map-final.json
+**/feature-map-*.json
+feature-map-*.json
+.wystan/
+.wystan/feature-map.json

@@ -1,0 +1,168 @@
+stack: rails-app
+display_name: Ruby on Rails Application
+
+# Activation: Stage 0.5 Stack Auditor labels the repo `rails-app`.
+# The five Rails extractors below ALL self-skip otherwise — there is
+# no fallback heuristic (a Rails app without the audited tag is rare
+# enough that we don't want to risk false-positive activation on a
+# random Ruby project).
+detection:
+  any:
+    - audited_stack_equals: "rails-app"
+    - audited_stack_in_secondary: "rails-app"
+
+# ── rails_routes ───────────────────────────────────────────────────────
+# config/routes.rb conventions. We do NOT need a Ruby AST — the four
+# patterns below cover ~95% of real-world routes.rb files.
+routes:
+  file: "config/routes.rb"
+  patterns:
+    # `resources :users` / `resources :users, only: [:index]`
+    resources_block:    'resources\s+:([a-zA-Z_]+)'
+    # `resource :profile` (singular — single-row resource)
+    resource_singular:  'resource\s+:([a-zA-Z_]+)'
+    # `get "/foo" => "users#show"`  or  `get :foo, to: "users#show"`
+    explicit_verb:      '(?:get|post|put|patch|delete)\s+[\''"]?[/:]?([a-zA-Z_][\w/]*)[\''"]?\s*(?:=>|,\s*to:)'
+    # `namespace :api do … end` — surfaces a sub-feature
+    namespace_block:    'namespace\s+:([a-zA-Z_]+)'
+  confidence: 0.95
+
+  # ── B108 route-SUPPLY (WYSTAN_RAILS_ROUTES_SUPPLY, default OFF) ────
+  # The `patterns` above yield feature SLUGS only; they never carried a
+  # (pattern, method, handler-file) triple, so `AnchorCandidate.routes`
+  # stayed empty and `build_routes_index` Pass A skipped every Rails
+  # candidate — no route row ever reached `routes_index` on a Rails board
+  # (P8 forensics). This block declares the Rails ROUTING CONVENTION —
+  # framework facts (RESTful action → HTTP method, namespace/scope
+  # nesting, controller autoload layout), NOT any repo's paths — so the
+  # supply pass can resolve each declaration to the controller file that
+  # HANDLES it. The handler file (never `config/routes.rb`, which is a
+  # declaration, not a member — anti-case A1) is what every downstream
+  # consumer keys on.
+  supply:
+    # Controller autoload layout. `dir_marker` is matched anywhere in the
+    # path so Rails ENGINES (a repo's `<engine>/app/controllers/…` root)
+    # resolve with the same rule as the main app — no per-repo root list.
+    controller_dir_marker: "app/controllers/"
+    controller_suffix: "_controller.rb"
+
+    # Nesting frames. `namespace` contributes BOTH a module segment and a
+    # URL segment; `scope module:` contributes only a module; `scope
+    # '<path>'` / `scope path: '<path>'` only a URL segment.
+    scope_patterns:
+      namespace:     '^\s*namespace\s+:?[''"]?([a-zA-Z_]\w*)'
+      scope_module:  '^\s*scope\s+module:\s*:?[''"]?([a-zA-Z_]\w*)'
+      scope_path:    '^\s*scope\s+(?:path:\s*)?[''"]([\w\-/]+)[''"]'
+
+    # Handler references on an explicit verb / resource line.
+    handler_patterns:
+      to_kw:         'to:\s*[''"]([\w/]+)#(\w+)'
+      fat_arrow:     '=>\s*[''"]([\w/]+)#(\w+)'
+      controller_kw: 'controller:\s*[''"]?:?([\w/]+)'
+      module_kw:     'module:\s*:?[''"]?(\w+)'
+
+    # Declaration grammar.
+    resource_pattern:   '^\s*(resources|resource)\s+:([a-zA-Z_]\w*)(.*)$'
+    verb_pattern:       '^\s*(get|post|put|patch|delete|match)\s+(.*)$'
+    member_block:       '^\s*member\s+do\b'
+    collection_block:   '^\s*collection\s+do\b'
+    block_open:         '\bdo\b\s*$'
+    only_pattern:       'only:\s*(%i\[[^\]]*\]|\[[^\]]*\]|:\w+)'
+    except_pattern:     'except:\s*(%i\[[^\]]*\]|\[[^\]]*\]|:\w+)'
+    path_kw_pattern:    'path:\s*[''"]([\w\-/]+)[''"]'
+    # Leading `.` admitted so well-known URLs ('.well-known/…') keep their
+    # real pattern instead of collapsing to the scope root.
+    bare_target:        '^[:''"]?/?([a-zA-Z_.][\w/:\.\-]*)'
+    # fixb108-v2 Fix-1 — the ACTION-SYMBOL form. `get :trial` names an
+    # action on the enclosing resource; `get 'trial'` / `get '/trial'`
+    # names a URL of its own. `bare_target` deliberately accepts both (it
+    # strips the leading ':'), so this pattern restores the distinction
+    # the resource-fold needs. Ruby symbol only — a quoted string never
+    # matches, so a genuine path route is untouched.
+    action_symbol:      '^:(\w+)'
+
+    # Anti-case A8 — lines that route to something that is NOT a
+    # controller. A mounted engine / rack app and a bare redirect have no
+    # handler file to attribute; emitting one would be a guess (FP).
+    skip_patterns:
+      - '^\s*mount\s'
+      - '(?:to:|=>)\s*redirect\s*\('
+      - '(?:to:|=>)\s*proc\s*[{(]'
+
+    # RESTful action → HTTP method(s). Rails framework fact (the router's
+    # own table), not a tunable.
+    rest_actions:
+      index:   [GET]
+      new:     [GET]
+      show:    [GET]
+      edit:    [GET]
+      create:  [POST]
+      update:  [PATCH, PUT]
+      destroy: [DELETE]
+    # `resources` (plural) draws 7 actions; `resource` (singular) draws 6
+    # — no `index`, and its member routes carry no `:id` segment.
+    plural_actions:   [index, new, create, show, edit, update, destroy]
+    singular_actions: [new, create, show, edit, update, destroy]
+    # Which of those act on ONE member (URL takes the id segment) vs the
+    # collection.
+    member_actions:   [show, edit, update, destroy]
+    # URL suffix an action appends to its base (absent → no suffix).
+    action_suffix:
+      new:  "new"
+      edit: "edit"
+    # `match` with no `via:` — Rails defaults to all verbs; we claim only
+    # the two that carry a verb family.
+    match_methods: [GET, POST]
+    member_id_segment: ":id"
+    nested_id_suffix: "_id"
+
+# ── rails_models ───────────────────────────────────────────────────────
+# app/models/**/*.rb — each ActiveRecord model is one anchor. We also
+# capture has_many / belongs_to / has_one for future Stage 2 edge use.
+models:
+  glob: "app/models/**/*.rb"
+  class_pattern: 'class\s+([A-Z]\w*)\s*<\s*(?:ApplicationRecord|ActiveRecord::Base)'
+  association_patterns:
+    has_many:    'has_many\s+:([a-zA-Z_]+)'
+    belongs_to:  'belongs_to\s+:([a-zA-Z_]+)'
+    has_one:     'has_one\s+:([a-zA-Z_]+)'
+  confidence: 0.85
+
+# ── rails_views ────────────────────────────────────────────────────────
+# app/views/<resource>/**/*.{erb,haml,html.erb,slim} — one anchor per
+# parent resource directory.
+views:
+  base_dir: "app/views"
+  extensions: [".erb", ".haml", ".slim", ".html.erb"]
+  # Layouts and shared partial dirs are not resource folders.
+  skip_dirs:
+    - "layouts"
+    - "shared"
+    - "application"
+  confidence: 0.80
+
+# ── rails_jobs ─────────────────────────────────────────────────────────
+# app/jobs/**/*.rb — ActiveJob / Sidekiq workers.
+jobs:
+  glob: "app/jobs/**/*.rb"
+  class_pattern: 'class\s+([A-Z]\w*)\s*<\s*(?:ApplicationJob|ActiveJob::Base|Sidekiq::Job|Sidekiq::Worker)'
+  confidence: 0.85
+
+# ── rails_stimulus ─────────────────────────────────────────────────────
+# app/javascript/controllers/*_controller.js — Stimulus controllers.
+stimulus:
+  base_dirs:
+    - "app/javascript/controllers"
+    - "app/javascript/src/controllers"
+  filename_suffix: "_controller.js"
+  content_pattern: 'extends\s+Controller'
+  confidence: 0.80
+
+# ── Cross-extractor merger (Stage 2 enhancement) ───────────────────────
+# When multiple Rails extractors emit anchors for the same resource
+# noun (singular ↔ plural), they MUST collapse into one feature.
+# Stage 2 reads `cross_extractor_merge.enabled` and uses the
+# `rails_resource` normalizer.
+cross_extractor_merge:
+  enabled: true
+  normalizer: rails_resource

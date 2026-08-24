@@ -1,0 +1,76 @@
+{
+  "_comment": "StackProfile snapshot gate lock (spec Gap 3). Digests are sha256 of the NORMALIZED deterministic-only scan JSON (wystan.tools.normalize_scan) of each pinned LOCAL clone at the pinned commit. Regenerate with `python -m wystan.tools.snapshot_gate --update`. Paths are machine-local pins (the corpus clones are not vendored); CI boxes without the clones skip the gate. days=3650 pins the git window to the full clone so digests do not rot as calendar time passes.",
+  "version": 1,
+  "scan_config": {
+    "days": 3650,
+    "llm": "hard-off (no ANTHROPIC_API_KEY in child env; all LLM caches disabled)"
+  },
+  "repos": {
+    "formbricks": {
+      "path": "~/workspace/_wystan-testrepos/formbricks",
+      "commit_sha": "f5921c66d54745130a7bf4225dba8eb5a309f905",
+      "profile": "next-app-router",
+      "digest": "sha256:de822992ca67f5822fa6140199654cb9c2039e44e1aaf5f56472756530dc30bd"
+    },
+    "dub": {
+      "path": "~/workspace/_wystan-testrepos/dub",
+      "commit_sha": "263fff9ed0c82d59bbb7684fd888e41ed298d531",
+      "profile": "next-app-router",
+      "digest": "sha256:bae60fa3ab34744a4730f2ed2f60d32c1a6632f2ec761d3152b68cc52f17292e"
+    },
+    "traefik": {
+      "path": "~/workspace/_wystan-freshblood/traefik",
+      "commit_sha": "6e4f397357787d8c841bf92588866d8a04e4a683",
+      "profile": "default",
+      "digest": "sha256:06b6e282dc7c87c10d3b7b670d7000ffe9f4b17187c82dd436494fa810907a6a"
+    },
+    "polar": {
+      "path": "~/workspace/_wystan-tier1/polar",
+      "commit_sha": "aef390d613b2649cccdfc680eb9cc2b0b00c3940",
+      "profile": "hybrid(default+fastapi-family+next-app-router)",
+      "digest": "sha256:59edeaa99631a80639999263cc77d22cc1cbb07a7a93860bf64ae37b28478463"
+    },
+    "dispatch": {
+      "path": "~/workspace/_wystan-tier1/dispatch",
+      "commit_sha": "dd2837e82a0bf5565b1b4b4b91ea30b7262d4061",
+      "profile": "hybrid(default+fastapi-family)",
+      "digest": "sha256:04cc9601c51d1a819c765ca11baca36b68bd3670c6847c8cb2a79c19f30dde64"
+    },
+    "fastapi-template": {
+      "path": "~/workspace/_wystan-tier1/fastapi-template",
+      "commit_sha": "3685fb66259fa12f8436ae7f88379fd64ca7cdbd",
+      "profile": "fastapi-family",
+      "digest": "sha256:9b1a134d3c6b31b595bae69dc9bf6b05ea025cf165984e283279229321dfe9db"
+    },
+    "litestar": {
+      "path": "~/workspace/_wystan-freshblood/litestar",
+      "commit_sha": "64aa8476273ef3dbacf37b2504ee716624d24812",
+      "profile": "fastapi-family",
+      "digest": "sha256:c0226d564acd464e9119429694d937b28d9abc32f362b2a20858acddeb126ab8"
+    },
+    "saleor": {
+      "path": "~/workspace/_wystan-tier1/saleor",
+      "commit_sha": "f03b30eb612ba3a93a8cc144687325320519ee0a",
+      "profile": "django",
+      "digest": "sha256:0185876a42f81231b8deb21505c7ab7446ea4045ef544c39d5e34bf512a592d6"
+    },
+    "weblate": {
+      "path": "~/workspace/_wystan-tier1/weblate",
+      "commit_sha": "16a3c863ee5330c8c209d4f9bf52e2236bb0b795",
+      "profile": "django",
+      "digest": "sha256:56cea33d4c375592c4fd53cead4549b8888dfc777d8ad13b4852d338abc9faf7"
+    },
+    "dittofeed": {
+      "path": "~/workspace/_wystan-tier1/dittofeed",
+      "commit_sha": "52b2bee909744d07dd5d409fd3974d4b95c66766",
+      "profile": "next-pages-react",
+      "digest": "sha256:fcc770e2a5c562fa81ac4d5683f2f78018fa18706940d94734a933bcb1c9fad8"
+    },
+    "opensign": {
+      "path": "~/workspace/_wystan-freshblood/opensign",
+      "commit_sha": "f2ada473027e9b36e0af7a459ebe703b83bc2e25",
+      "profile": "next-pages-react",
+      "digest": "sha256:50463b86f9af77b7bdac8300a81f82d7b24a1ae27ae6716366b3458b3d5e5e64"
+    }
+  }
+}

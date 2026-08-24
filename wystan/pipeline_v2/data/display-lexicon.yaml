@@ -1,0 +1,119 @@
+# PF display lexicon (fixb133 M3, WYSTAN_PF_DISPLAY_LEXICON).
+#
+# CORROBORATIVE data only — the MECHANISM decides *when* a base is dressed
+# (whole cleaned segment equals a key, display channel only, route-derived
+# tiers only); this file supplies nothing but the universal SPELLING
+# (mechanisms-over-vocabularies law, precedent: data/cli-frameworks.yaml).
+#
+# ADMISSION RULE (hard): an entry must be universal web/protocol/product
+# vocabulary that means the same thing in every repository on earth.
+# Per-repo entries are FORBIDDEN — if a term only makes sense on one
+# board, the fix is a mechanism, not a row here.
+#
+# Authoring copy: eval/display-lexicon.yaml (byte-identical).
+version: 1
+
+# ── expansions ────────────────────────────────────────────────────────────
+# An opaque abbreviation that must never stand alone as a product-feature
+# name (doctrine law 4). Applied ONLY when the WHOLE cleaned base segment
+# equals the key — never as a substring, so 'api-key' -> "API Key" is
+# untouched by the 'api'-shaped world.
+expansions:
+  sso: Single Sign-On
+  scim: SCIM Provisioning
+  2fa: Two-Factor Authentication
+  two-factor: Two-Factor Authentication
+  mfa: Multi-Factor Authentication
+  utm: UTM Campaigns
+  oidc: OpenID Connect
+  saml: SAML Single Sign-On
+  oauth: OAuth Sign-In
+  smtp: SMTP Email
+  dns: DNS
+  jwt: JWT Tokens
+  acl: Access Control
+  rbac: Role-Based Access Control
+  i18n: Internationalization
+  a11y: Accessibility
+  ui: User Interface
+
+# ── armed_expansions (WYSTAN_PF_LEXICON_ARMED, default OFF) ────────────
+# The staging lane for a lexicon addition. The M3 applier ships default ON,
+# so a row added straight to `expansions:` would move displays on every
+# board while the scan cache key stayed identical (the key hashes
+# KEY_SCHEMA + repo identity + engine version + the ENV_OUTPUT_FLAGS
+# values — never this file's bytes). KEY_SCHEMA moves in flip commits only,
+# so an addition lands HERE, and the flip commit promotes it into
+# `expansions:` above and carries the bump.
+#
+# Currently EMPTY: flip-pack №43 (KEY_SCHEMA 78) promoted `ui: User
+# Interface` — the lane's first tenant — into the shipped table. The
+# carrier is kept for the next addition; while empty the flag governs
+# nothing and the merge is a no-op.
+armed_expansions: {}
+
+# ── deictics ──────────────────────────────────────────────────────────────
+# A pronoun is not a product name (doctrine law 6). Same whole-segment rule.
+deictics:
+  me: My Account
+  my: My Account
+  self: My Account
+  own: My Account
+  account: My Account
+  profile-me: My Account
+
+# ── dev_vocab ─────────────────────────────────────────────────────────────
+# Bases that collide with ENGINEERING vocabulary and therefore read as a
+# dev concern until qualified (doctrine law 5). Consumed by the M2
+# qualifier rung (WYSTAN_PF_ROUTE_QUALIFIER_RUNG) as a QUALIFY trigger —
+# it never renames anything on its own, and it never invents a qualifier
+# when the anchor supplies no evidence (honesty floor, law 7).
+dev_vocab:
+  - performance
+  - console
+  - record
+  - verify
+  - env
+  - context
+  - telemetry
+  - debug
+  - cache
+  - queue
+  - worker
+
+# ── plural_only ───────────────────────────────────────────────────────────
+# English nouns that have NO product-readable singular: naively stripping
+# the trailing 's' yields broken English ('settings' -> "Setting Profile",
+# 'news' -> "New"). When one of these is used as a QUALIFIER it is kept
+# verbatim ("Settings Profile", "Analytics Overview"). Universal English
+# convention, not a product vocabulary — kept deliberately small; a noun
+# whose singular reads fine ('boards' -> "Board Shares") is NOT listed.
+plural_only:
+  - settings
+  - analytics
+  - credentials
+  - preferences
+  - news
+  - docs
+  - metrics
+  - insights
+
+# ── acronyms ──────────────────────────────────────────────────────────────
+# The subset of the expansion keys that are INITIALISMS: when such a token
+# survives inside a longer phrase (rather than standing alone and being
+# expanded) it renders uppercase, so 'SSO' and 'UTM' can no longer disagree
+# about casing on the same board. Excludes keys whose canonical spelling is
+# NOT all-caps ('OAuth' is brand-cased; 'i18n' / 'a11y' / '2fa' are
+# numeronyms that read lowercase).
+acronyms:
+  - sso
+  - scim
+  - mfa
+  - utm
+  - oidc
+  - saml
+  - smtp
+  - dns
+  - jwt
+  - acl
+  - rbac

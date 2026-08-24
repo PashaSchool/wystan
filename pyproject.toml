@@ -1,0 +1,213 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wystan"
+dynamic = ["version"]
+description = "Map features in any codebase from git history alone. No Jira required."
+readme = "README.md"
+license = { text = "FSL-1.1-ALv2" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Wystan" },
+]
+keywords = [
+    "git", "features", "technical-debt", "code-analysis",
+    "engineering-metrics", "bug-fix-ratio", "health-score",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer>=0.12.0",
+    "gitpython>=3.1.40",
+    "rich>=13.7.0",
+    "pydantic>=2.5.0",
+    "anthropic>=0.25.0",
+    # Stack pattern YAML loader — used by Stage 1 stack-gated extractors
+    # (go_router, rust_workspace, python_library) to read patterns
+    # from eval/stacks/*.yaml.
+    "pyyaml>=6.0",
+    # JSON5 parser — Stage 6.3 reads tsconfig.json files that legally
+    # carry comments + trailing commas (JSONC) and occasionally the
+    # full JSON5 superset (unquoted keys, single quotes). The
+    # regex-strip-then-json.loads approach used in
+    # analyzer/import_graph.py is brittle and silently returns {} on
+    # parse failure, masking missing path aliases.
+    "json5>=0.9",
+]
+
+[project.optional-dependencies]
+watch = ["watchdog>=4.0.0"]
+trace = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+]
+# Sprint D2 — Stage 6.6 Branch Slicer requires tree-sitter parsers for
+# every language we want to extract intra-symbol conditional ranges
+# from (if/ternary/switch/try/catch/match-arm). Optional: when the
+# extras are not installed, Stage 6.6 reports active=False and the
+# rest of the pipeline runs unchanged. Install via:
+#
+#     pip install -e '.[ast]'         (from the repo root)
+#     pip install 'wystan[ast]'   (from a published wheel)
+#
+# Bundles the `trace` languages (ts/tsx/js) plus python/go/rust.
+ast = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-python>=0.23.0",
+    "tree-sitter-go>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+]
+
+[project.urls]
+Homepage = "https://wysten.ai"
+Repository = "https://github.com/PashaSchool/wystan"
+Issues = "https://github.com/PashaSchool/wystan/issues"
+
+[project.scripts]
+wystan = "wystan.cli:main"
+
+# Stage 1 extractor plugin group. The orchestrator at
+# ``wystan.pipeline_v2.stage_1_extractors`` discovers extractors
+# via this group; customers can register their own by adding a
+# module that defines an ``AnchorExtractor``-compatible class and
+# declaring an entry-point in the same group.
+[project.entry-points."wystan.extractors"]
+route          = "wystan.pipeline_v2.extractors.route:RouteFileExtractor"
+mvc            = "wystan.pipeline_v2.extractors.mvc:MVCControllerExtractor"
+schema         = "wystan.pipeline_v2.extractors.schema:SchemaDomainExtractor"
+package        = "wystan.pipeline_v2.extractors.package:PackageAnchorExtractor"
+config         = "wystan.pipeline_v2.extractors.config:ConfigAsProductExtractor"
+# Sprint A4 — stack-gated extractors.
+go-router      = "wystan.pipeline_v2.extractors.go_router:GoRouterExtractor"
+rust-workspace = "wystan.pipeline_v2.extractors.rust_workspace:RustWorkspaceExtractor"
+python-library = "wystan.pipeline_v2.extractors.python_library:PythonLibraryExtractor"
+js-library     = "wystan.pipeline_v2.extractors.js_library:JsLibraryExtractor"
+# FastAPI decorator-route extractor — emits explicit routes consumed by
+# build_routes_index Pass A. Self-skips on non-FastAPI repos.
+fastapi-route  = "wystan.pipeline_v2.extractors.fastapi:FastApiRouteExtractor"
+# Sprint S3.1 — Fastify code-based router. Self-skips on non-Fastify.
+route-fastify  = "wystan.pipeline_v2.extractors.fastify:FastifyRouteExtractor"
+# Express code-based router. Self-skips on non-Express (incl. NestJS,
+# which wraps Express but owns its own route conventions).
+route-express  = "wystan.pipeline_v2.extractors.express:ExpressRouteExtractor"
+# Sprint Rails — five Rails-app extractors. Each self-skips unless the
+# Stage 0.5 auditor labelled the repo ``rails-app``.
+rails-routes   = "wystan.pipeline_v2.extractors.rails_routes:RailsRoutesExtractor"
+rails-models   = "wystan.pipeline_v2.extractors.rails_models:RailsModelsExtractor"
+rails-views    = "wystan.pipeline_v2.extractors.rails_views:RailsViewsExtractor"
+rails-jobs     = "wystan.pipeline_v2.extractors.rails_jobs:RailsJobsExtractor"
+rails-stimulus = "wystan.pipeline_v2.extractors.rails_stimulus:RailsStimulusExtractor"
+
+# Sprint C4 — Stage 6.4 framework-aware linker plugin group. The
+# orchestrator at ``wystan.pipeline_v2.stage_6_4_framework_enrich``
+# discovers linkers via this group; customers can register additional
+# linkers (Server Actions, tRPC, Zustand, ...) by adding a module that
+# defines a ``FrameworkLinker``-compatible class and declaring an
+# entry-point in the same group.
+[project.entry-points."wystan.framework_linkers"]
+nextjs-http-route = "wystan.framework_linkers.nextjs_http_route:NextjsHttpRouteLinker"
+nextjs-server-actions = "wystan.framework_linkers.nextjs_server_actions:NextjsServerActionsLinker"
+trpc-procedure = "wystan.framework_linkers.trpc_procedure:TrpcProcedureLinker"
+store-mutation = "wystan.framework_linkers.store_mutation:StoreMutationLinker"
+
+# Framework Knowledge Layer (Phase 1) — per-framework structural-profile
+# plugin group. The registry at
+# ``wystan.pipeline_v2.profiles._registry`` discovers profiles via
+# this group; adding a framework = one module implementing
+# ``FrameworkProfile`` + one line here, with ZERO core changes (OCP).
+# The built-in ``DefaultProfile`` is injected unconditionally by the
+# registry, so it is intentionally NOT listed here.
+[project.entry-points."wystan.profiles"]
+# Deterministic per-framework profiles register here (Phase 2+). One line
+# per stack; the core never changes (OCP).
+next-app-router = "wystan.pipeline_v2.profiles.next_app_router:NextAppRouterProfile"
+fastapi-family = "wystan.pipeline_v2.profiles.fastapi_family:FastApiFamilyProfile"
+django = "wystan.pipeline_v2.profiles.django:DjangoProfile"
+next-pages-react = "wystan.pipeline_v2.profiles.next_pages_react:NextPagesReactProfile"
+
+[tool.hatch.envs.default]
+dependencies = [
+    "pytest>=7.4.0",
+    "pytest-cov",
+    "mypy",
+    "types-PyYAML",
+]
+
+[tool.hatch.envs.default.scripts]
+test = "pytest tests/"
+
+# Single source of truth for the version: ``wystan/__init__.py``.
+# The runtime reads it back via importlib.metadata (scan_result_cache
+# folds it into the cache key), so the two must never drift.
+[tool.hatch.version]
+path = "wystan/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+# Engine ships only `wystan` from this wheel.
+packages = ["wystan"]
+
+# Runtime data (stack patterns + dependency-anchors.yaml) at
+# wystan/pipeline_v2/data/** ships automatically — `packages = ["wystan"]`
+# already includes non-.py files under the package, and the data is loaded
+# hermetically via importlib.resources. A previous force-include of the same
+# path re-added these files at the SAME wheel location, producing duplicate ZIP
+# entries that PyPI rejects ("Duplicate filename in local headers") — removed.
+
+# Lenient, scoped type-checking: only pipeline_v2 is enforced (CI runs
+# `mypy wystan/pipeline_v2`). NOT strict mode — intentionally.
+[tool.mypy]
+python_version = "3.11"
+files = ["wystan/pipeline_v2"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+addopts = [
+    "--cov=wystan",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-report=html:htmlcov",
+    "--cov-config=pyproject.toml",
+    "-q",
+]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests that build a wheel / fresh venv (deselect with '-m \"not slow\"')",
+]
+
+[tool.coverage.run]
+source = ["wystan"]
+omit = [
+    "wystan/cli.py",
+    "wystan/digest/*",
+    "wystan/output/reporter.py",
+    "wystan/analyzer/evolve.py",
+    "wystan/analyzer/incremental.py",
+]
+
+[tool.coverage.report]
+fail_under = 65
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]
+precision = 1
+
+[tool.coverage.html]
+directory = "htmlcov"

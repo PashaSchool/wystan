@@ -1,0 +1,338 @@
+"""B34 Tier 1 — lazy-import edge collection ($0, deterministic).
+
+Operator exhibit (2026-07-10): RefApp's `Uncovered: ERP — Freshdesk
+routes` marker exists because `backend/services/erp/factory.py`
+resolves the vendor client via FUNCTION-LEVEL imports inside
+if-branches (`from services.erp.freshdesk import FreshdeskClient`
+under `if target == "freshdesk":`). The module-level import graph has
+no edge to the connector, so no reachability consumer can see it.
+
+This module collects those edges — `kind="lazy"` — WITHOUT changing any
+existing traversal:
+
+  * **Python**: a real ``ast`` walk (not regex). An ``import`` /
+    ``from … import`` whose enclosing scope is a function (or any
+    non-module scope) is a lazy edge. Imports under
+    ``if TYPE_CHECKING:`` are EXCLUDED (type-only, not reachability).
+    Imports inside a ``try:`` whose handler catches ``ImportError`` /
+    ``ModuleNotFoundError`` are marked ``optional=True`` (vendored /
+    optional deps) — edge exists, consumers may ignore.
+  * **TS/JS**: literal dynamic specifiers only — ``import('x')``,
+    non-top-level ``require('x')`` — no expression evaluation.
+
+Targets resolve to repo-relative files via a deterministic suffix index
+built from the tracked-file list (Python dotted-module candidates; TS
+path-suffix candidates tolerant of ``./``/``../``/``@/`` prefixes).
+Unresolved targets (external packages) are dropped — this is a
+REPO-INTERNAL reachability surface.
+
+Emission: side-channel only (stage artifact + in-memory input for the
+B34 Tier-2 dispatch-registry stage). Scan JSON is untouched — with
+``WYSTAN_LAZY_IMPORT_EDGES=0`` (default) the collection never runs
+unless Tier 2 requests it in memory.
+
+Determinism: tracked files are processed in sorted order; every output
+list is sorted; no set iteration on the emitted path.
+"""
+
+from __future__ import annotations
+
+import ast
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+__all__ = [
+    "LAZY_IMPORT_EDGES_ENV",
+    "DISPATCH_RESOLVER_ENV",
+    "LazyImportEdge",
+    "lazy_import_edges_enabled",
+    "dispatch_resolver_enabled",
+    "collect_lazy_import_edges",
+    "build_py_module_index",
+    "build_ts_suffix_index",
+    "ts_lazy_binding_specs",
+]
+
+LAZY_IMPORT_EDGES_ENV = "WYSTAN_LAZY_IMPORT_EDGES"
+
+#: B64 — dynamic-dispatch resolver kill-switch. Default OFF: every B64
+#: mechanism (import-tree lazy edge, route-helper const-fold, registry
+#: {key: Component}) is inert and its subsystem's output is byte-identical
+#: to pre-B64. Shared by ``stage_6_3_import_tree`` and the react-router SPA
+#: profile so ONE env var arms the whole feature. Registered in
+#: ``scan_result_cache.ENV_OUTPUT_FLAGS``; no KEY_SCHEMA bump.
+DISPATCH_RESOLVER_ENV = "WYSTAN_DISPATCH_RESOLVER"
+
+#: Bounded read — route/service modules are small; this only guards
+#: pathological blobs (mirrors the census bound).
+_MAX_BYTES = 1_500_000
+
+_PY_EXT = (".py",)
+_TS_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+_TS_DYNAMIC_RE = re.compile(r"\bimport\(\s*['\"]([^'\"]+)['\"]")
+_TS_REQUIRE_RE = re.compile(r"^(\s*).*?\brequire\(\s*['\"]([^'\"]+)['\"]")
+
+
+def lazy_import_edges_enabled() -> bool:
+    """Default ON since the 2026-07-10 keyed RefApp OFF/ON A/B (markers 3->1,
+    both exhibit classes dissolved, validator 8->7, gauntlet CLEAR both
+    sides). ``=0`` restores the pre-B34 artifact byte-identically."""
+    return os.environ.get(LAZY_IMPORT_EDGES_ENV, "1").strip() in {
+        "1", "true", "True",
+    }
+
+
+def dispatch_resolver_enabled() -> bool:
+    """Default **ON** since the 2026-07-27 flip-pack №8 flip (KEY_SCHEMA 41;
+    keyless outline proof — the forgotten-flip: ``lazy(() => import(...))``
+    route sub-trees [~87 % of outline] become reachable, dispatch routes
+    born). Arms all three B64 mechanisms at once. Unset now arms; explicit
+    ``0`` / ``false`` / ``no`` / ``off`` keeps every consuming subsystem
+    byte-identical to pre-B64 (kill-switch forever). Only the
+    ``os.environ.get`` default moved ``"0"`` -> ``"1"`` (unset ≡ explicit
+    ``"1"``); the kill-switch alias set is preserved LITERALLY."""
+    return os.environ.get(DISPATCH_RESOLVER_ENV, "1").strip().lower() not in {
+        "", "0", "false", "no", "off",
+    }
+
+
+#: A ``const|let|var NAME = <wrapper>(() => import("<spec>"))`` binding —
+#: ANY wrapper around a dynamic import counts (``lazy``, ``React.lazy``,
+#: project ``lazyWithRetry``/``createLazyComponent``): resolution is the
+#: filter, so no wrapper name-list is needed. The bounded ``{0,200}`` gap
+#: keeps the match local to one declaration (mirrors the SPA profile's
+#: ``_LAZY_IMPORT_RE`` — kept in sync).
+_TS_LAZY_BINDING_RE = re.compile(
+    r"""\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;]{0,200}?"""
+    r"""import\(\s*['"]([^'"]+)['"]\s*\)""",
+)
+
+
+def ts_lazy_binding_specs(source: str) -> dict[str, str]:
+    """``{local_name: specifier}`` for every lazy-import CONST BINDING in a
+    TS/JS source (``const Page = lazy(() => import("./Page"))``).
+
+    Only NAMED bindings are returned — a bare ``import("./x")`` with no
+    local name has nothing for an identifier-matching traversal to hook
+    onto, and is left to the side-channel :func:`collect_lazy_import_edges`.
+    Deterministic: first binding for a name wins (source order)."""
+    out: dict[str, str] = {}
+    for m in _TS_LAZY_BINDING_RE.finditer(source):
+        out.setdefault(m.group(1), m.group(2))
+    return out
+
+
+@dataclass(frozen=True)
+class LazyImportEdge:
+    """One function-level / dynamic import: ``src`` lazily loads ``target``.
+
+    ``target_file`` is the repo-relative resolution (``None`` never
+    happens on emitted edges — unresolved targets are dropped).
+    """
+
+    src: str
+    target: str          # dotted module (py) / specifier (ts), as written
+    target_file: str
+    lang: str            # "py" | "ts"
+    optional: bool = False
+    kind: str = "lazy"
+
+
+# ── target resolution indexes ───────────────────────────────────────────
+
+
+def build_py_module_index(files: list[str]) -> dict[str, str]:
+    """dotted-module-candidate → repo file (shortest-suffix candidates
+    included so ``services.erp.freshdesk`` resolves regardless of the
+    backend root). First (sorted) writer wins — deterministic."""
+    index: dict[str, str] = {}
+    for rel in sorted(files):
+        if not rel.endswith(".py"):
+            continue
+        stem = rel[:-3]
+        if stem.endswith("/__init__"):
+            stem = stem[: -len("/__init__")]
+        parts = stem.replace("\\", "/").split("/")
+        for i in range(len(parts)):
+            index.setdefault(".".join(parts[i:]), rel)
+    return index
+
+
+def _ts_norm(spec: str) -> str | None:
+    spec = spec.split("?")[0]
+    spec = re.sub(r"\.(ts|tsx|js|jsx|mjs|cjs)$", "", spec)
+    spec = re.sub(r"^(\.\./)+|^\./", "", spec)
+    spec = re.sub(r"^[@~]/", "", spec)
+    parts = [p for p in spec.split("/") if p and p != "."]
+    if not parts:
+        return None
+    return "/".join(parts[-3:])
+
+
+def build_ts_suffix_index(files: list[str]) -> dict[str, str]:
+    """path-suffix key → repo file for TS/JS modules (`/index` folded)."""
+    index: dict[str, str] = {}
+    for rel in sorted(files):
+        if not rel.endswith(_TS_EXT):
+            continue
+        stem = re.sub(r"\.(ts|tsx|js|jsx|mjs|cjs)$", "", rel)
+        cands = [stem]
+        if stem.endswith("/index"):
+            cands.append(stem[: -len("/index")])
+        for c in cands:
+            parts = c.split("/")
+            for k in (3, 2, 1):
+                if len(parts) >= k:
+                    index.setdefault("/".join(parts[-k:]), rel)
+    return index
+
+
+# ── Python AST walk ─────────────────────────────────────────────────────
+
+
+def _resolve_relative(src_rel: str, level: int, module: str | None) -> str:
+    """Absolute dotted module for a relative ``from . import`` in ``src_rel``."""
+    parts = src_rel[:-3].replace("\\", "/").split("/")
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    else:
+        parts = parts[:-1]
+    hops = max(level - 1, 0)
+    if hops:
+        parts = parts[:-hops] if hops < len(parts) else []
+    tail = module.split(".") if module else []
+    return ".".join([*parts, *tail])
+
+
+def _py_lazy_imports(text: str, src_rel: str) -> list[tuple[str, bool]]:
+    """(dotted_module, optional) for every function-scoped import.
+
+    TYPE_CHECKING subtrees are skipped entirely; ``try`` bodies whose
+    handlers catch ImportError/ModuleNotFoundError mark ``optional``.
+    Relative imports resolve against ``src_rel``'s package path.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+
+    out: list[tuple[str, bool]] = []
+
+    def _is_type_checking(test: ast.expr) -> bool:
+        return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+            isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+        )
+
+    def _handler_catches_import_error(node: ast.Try) -> bool:
+        for h in node.handlers:
+            types: list[ast.expr] = []
+            if h.type is None:
+                return True  # bare except swallows ImportError too
+            if isinstance(h.type, ast.Tuple):
+                types = list(h.type.elts)
+            else:
+                types = [h.type]
+            for t in types:
+                name = t.attr if isinstance(t, ast.Attribute) else getattr(
+                    t, "id", "",
+                )
+                if name in ("ImportError", "ModuleNotFoundError"):
+                    return True
+        return False
+
+    def walk(node: ast.AST, in_func: bool, optional: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.If) and _is_type_checking(child.test):
+                # Type-only imports: skip the body, keep walking orelse.
+                for sub in child.orelse:
+                    walk(sub, in_func, optional)
+                continue
+            child_in_func = in_func or isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+            )
+            child_optional = optional or (
+                isinstance(child, ast.Try)
+                and _handler_catches_import_error(child)
+            )
+            if in_func and isinstance(child, ast.ImportFrom):
+                if child.level == 0 and child.module:
+                    out.append((child.module, optional))
+                elif child.level > 0:
+                    resolved = _resolve_relative(
+                        src_rel, child.level, child.module,
+                    )
+                    if resolved:
+                        out.append((resolved, optional))
+            elif in_func and isinstance(child, ast.Import):
+                for alias in child.names:
+                    out.append((alias.name, optional))
+            walk(child, child_in_func, child_optional)
+
+    walk(tree, in_func=False, optional=False)
+    return out
+
+
+# ── public entry point ──────────────────────────────────────────────────
+
+
+def collect_lazy_import_edges(
+    repo_path: Path | str,
+    tracked_files: list[str],
+) -> list[LazyImportEdge]:
+    """Collect resolved repo-internal lazy-import edges, sorted."""
+    root = Path(repo_path)
+    files = [str(f).replace("\\", "/") for f in tracked_files]
+    py_index = build_py_module_index(files)
+    ts_index = build_ts_suffix_index(files)
+
+    edges: list[LazyImportEdge] = []
+    for rel in sorted(files):
+        if not rel.endswith(_PY_EXT + _TS_EXT):
+            continue
+        p = root / rel
+        try:
+            if p.stat().st_size > _MAX_BYTES:
+                continue
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if rel.endswith(".py"):
+            for module, optional in _py_lazy_imports(text, rel):
+                target = py_index.get(module)
+                if target and target != rel:
+                    edges.append(LazyImportEdge(
+                        src=rel, target=module, target_file=target,
+                        lang="py", optional=optional,
+                    ))
+        else:
+            for line in text.splitlines():
+                for spec in _TS_DYNAMIC_RE.findall(line):
+                    key = _ts_norm(spec)
+                    target = ts_index.get(key) if key else None
+                    if target and target != rel:
+                        edges.append(LazyImportEdge(
+                            src=rel, target=spec, target_file=target,
+                            lang="ts",
+                        ))
+                m = _TS_REQUIRE_RE.match(line)
+                if m and m.group(1) != "":
+                    key = _ts_norm(m.group(2))
+                    target = ts_index.get(key) if key else None
+                    if target and target != rel:
+                        edges.append(LazyImportEdge(
+                            src=rel, target=m.group(2), target_file=target,
+                            lang="ts",
+                        ))
+    # Deterministic, deduplicated.
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[LazyImportEdge] = []
+    for e in sorted(edges, key=lambda e: (e.src, e.target_file, e.target)):
+        k = (e.src, e.target_file, e.target)
+        if k in seen:
+            continue
+        seen.add(k)
+        unique.append(e)
+    return unique

@@ -1,0 +1,71 @@
+# Vue Single-File Component (SFC) flow grammar — consumed by
+# wystan/analyzer/ast_extractor.py::_parse_vue_file, GATED behind
+# WYSTAN_VUE_SFC_FLOWS (default OFF). Authoring mirror lives at
+# eval/stacks/vue.yaml (local-only); this packaged copy is the one the
+# engine loads via load_stack_yaml("vue").
+#
+# "Mechanisms not vocabularies": the entries below are structural Vue-API
+# grammar, NOT per-repo name dictionaries. Adding a Vue reactivity
+# primitive = edit here, no Python change.
+#
+# GRAIN. A ``.vue`` SFC is HTML-ish: one or more ``<script>`` blocks (the
+# modern form is ``<script setup>``), a ``<template>``, and ``<style>``.
+# In ``<script setup>`` EVERY top-level binding is auto-exposed to the
+# template — there is no ``export`` keyword — so a top-level
+# ``const save = () => …`` / ``function onSubmit() …`` is the Vue analogue
+# of a TS ``export`` (the exposed surface). Options-API ``methods: { … }``
+# entries, ``export``-marked names in a plain ``<script>``, and template
+# ``@event="handler"`` bindings are handlers too. All become flow-
+# candidates so a feature composed of ``.vue`` files clears Stage 3's
+# MIN_EXPORTS_FOR_FLOW_DETECTION gate.
+
+confidence: 0.8
+
+# Vue reactivity / macro vocab. A top-level ``const x = ref(0)`` is STATE,
+# not a handler — such bindings never match the arrow/function decl
+# regexes anyway (the initializer is a call, not ``=>``/``function``);
+# this list only excludes the rare case where one of these names is itself
+# declared as a function, and filters template-handler noise.
+reactivity_primitives:
+  - ref
+  - reactive
+  - computed
+  - watch
+  - watchEffect
+  - watchPostEffect
+  - shallowRef
+  - shallowReactive
+  - toRef
+  - toRefs
+  - readonly
+  - defineProps
+  - defineEmits
+  - defineExpose
+  - withDefaults
+
+# Composable convention: a ``useX()`` call is a Vue composable — a named
+# unit of behaviour. Composables are normally DECLARED in ``composables/
+# *.ts`` (already parsed by the TS path); this prefix is documented here
+# for corroboration and future composable-aware anchoring.
+composable_prefix: use
+
+# ── Route conventions (documentation — no NEW extractor here) ────────────
+# File-based page roots where the directory tree encodes the URL are
+# ALREADY owned by the SpaRouter Seg A grammar (stacks/spa-router.yaml
+# ``vue:`` roots) for non-Nuxt Vue SPAs (hoppscotch ``pages/``), and by
+# the filesystem RouteFileExtractor ``nuxt`` grammar for Nuxt. Listed here
+# only so the convention is version-controlled; re-extracting them would
+# double-count (SACRED no-dup law).
+route_roots_file_based:
+  - ["src", "pages"]
+  - ["pages"]
+
+# Config-based MODULE routing (directus ``defineModule({ routes: [{ path,
+# component }] })``) is NOT file-path encoded — the URL lives in the
+# config object, not the filename — so file-path route anchoring would be
+# WRONG for ``routes/`` trees. Flow-seed for those ``.vue`` files is still
+# delivered by _parse_vue_file (their handlers cross the export gate);
+# a config-parse route-ANCHOR extractor for defineModule is a separate,
+# out-of-scope concern.
+route_roots_config_based_note:
+  - routes

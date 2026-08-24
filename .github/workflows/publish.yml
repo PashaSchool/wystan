@@ -1,0 +1,65 @@
+name: publish
+
+# Trusted Publishing (OIDC) — no API token is stored anywhere.
+# The PyPI publisher is registered against: owner PashaSchool,
+# repo wystan, workflow publish.yml, environment pypi. Renaming this
+# file or the environment breaks the trust link.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Validate metadata
+        run: uvx twine check dist/*
+
+      # Packaging smoke test: a wheel that imports but cannot reach its
+      # YAML data is the failure mode this catches. The data is loaded
+      # via importlib.resources, so it only resolves from a real install.
+      - name: Smoke-test the wheel
+        run: |
+          uv venv /tmp/smoke --python 3.11
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/wystan --help
+          /tmp/smoke/bin/python - <<'PY'
+          import importlib.resources as r
+          import wystan
+          data = r.files("wystan.pipeline_v2") / "data"
+          count = sum(1 for _ in data.iterdir())
+          assert count > 0, "runtime data missing from wheel"
+          print(f"wystan {wystan.__version__} — {count} data entries")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

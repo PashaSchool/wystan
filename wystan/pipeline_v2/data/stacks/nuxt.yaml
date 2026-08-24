@@ -1,0 +1,40 @@
+# Nuxt stack descriptor. Nuxt apps ARE Vue SFC apps — their ``.vue``
+# flow-candidate grammar is identical to stacks/vue.yaml and is parsed by
+# the SAME wystan/analyzer/ast_extractor.py::_parse_vue_file (gated
+# behind WYSTAN_VUE_SFC_FLOWS). This file records the Nuxt-specific
+# conventions that DIFFER from a plain Vue SPA; it does NOT introduce a
+# new route extractor.
+#
+# "Mechanisms not vocabularies": structural Nuxt-API grammar, not per-repo
+# names.
+
+confidence: 0.8
+
+# Nuxt inherits the Vue SFC grain (see stacks/vue.yaml) — script-setup
+# top-level bindings + Options-API methods + template @handlers are the
+# flow-candidates. Repeated here so the loader has a self-contained doc.
+inherits: vue
+
+# Nuxt auto-imported composables (behaviour units). Documented for
+# corroboration; declarations live in TS files parsed by the TS path.
+composable_prefix: use
+nuxt_composables:
+  - useAsyncData
+  - useFetch
+  - useLazyFetch
+  - useState
+  - useRoute
+  - useRouter
+  - useRuntimeConfig
+  - useHead
+  - useSeoMeta
+
+# ── Route convention (already owned — no NEW extractor) ──────────────────
+# Nuxt file-based routing (``pages/**/*.vue``, ``_param`` + ``[param]``
+# dynamics) is ALREADY owned by the filesystem RouteFileExtractor ``nuxt``
+# grammar (see stacks/spa-router.yaml Seg A note: "Nuxt trees self-skip —
+# the filesystem RouteFileExtractor's nuxt grammar already owns them").
+# Re-extracting here would double-count (SACRED no-dup law). Recorded for
+# version-controlled visibility only.
+route_root_file_based:
+  - pages
