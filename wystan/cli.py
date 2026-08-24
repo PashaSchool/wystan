@@ -52,17 +52,24 @@ app = typer.Typer(
 console = Console()
 
 
-# Subcommand names that must NOT be swallowed by the default-command
-# router. Anything else on a bare invocation is treated as scan input
-# (a repo path and/or scan flags). Keep this in sync with the
-# @app.command() definitions below. ``scan-v2`` stays routable as the
-# deprecated alias of ``scan`` (the Fly worker contract still spells it
-# out; drop it only after one full release with the alias live).
-_KNOWN_SUBCOMMANDS = frozenset({
-    "update", "evolve", "refresh", "watch", "watch-status", "watch-stop",
-    "pull", "suggest-config", "scan", "scan-v2", "classify-shape",
-    "version", "replay",
-})
+def _known_subcommands() -> frozenset[str]:
+    """Subcommand names that must NOT be swallowed by the default router.
+
+    Read from Typer's registry instead of a hand-kept list. The hand-kept
+    list silently lost ``partition-plan``, so that command was rewritten
+    into ``scan partition-plan <repo>`` and became unreachable; deriving
+    the names means adding a command can no longer forget the router.
+    Hidden commands (``pull``, the deprecated ``scan-v2`` alias) are
+    registered like any other and are picked up here too.
+    """
+    names: set[str] = set()
+    for command in app.registered_commands:
+        name = command.name
+        if not name and command.callback is not None:
+            name = command.callback.__name__.replace("_", "-")
+        if name:
+            names.add(name)
+    return frozenset(names)
 
 
 def _route_default_to_scan(argv: list[str]) -> list[str]:
@@ -78,7 +85,7 @@ def _route_default_to_scan(argv: list[str]) -> list[str]:
     if not argv:
         return argv
     first = argv[0]
-    if first in _KNOWN_SUBCOMMANDS:
+    if first in _known_subcommands():
         return argv
     if first in ("-h", "--help"):
         return argv
