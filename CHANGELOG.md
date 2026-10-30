@@ -65,6 +65,22 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   throughout: provenance survives, the coverage claim does not.
   Explicit `0` remains the kill-switch for both flags forever.
 
+## [0.0.1] – 2026-08-24
+
+First release published under the **`wystan`** name. The package was
+re-released on PyPI after the rebrand (faultline → dynvo → wystan) and the
+public repository was re-initialised, so the version line starts over at
+0.0.1: `wystan/__init__.py` is the single source of truth for the version
+(`[tool.hatch.version]`), and git tag `v0.0.1` marks this release.
+
+---
+
+## Pre-rebrand history
+
+The entries below record how the engine evolved before it was published as
+`wystan`. Those versions shipped under the previous package names and were
+never released to PyPI as `wystan`, so they carry no PyPI links.
+
 ## [1.0.0] – 2026-06-01
 
 First stable release. The engine and the AI-agent MCP server are now separate,
@@ -179,18 +195,5 @@ independently versioned packages.
 
 ---
 
-[Unreleased]: https://github.com/PashaSchool/wystan/compare/main...HEAD
-[1.0.0]: https://pypi.org/project/wystan/1.0.0/
-[0.11.0]: https://pypi.org/project/wystan/0.11.0/
-[0.10.0]: https://pypi.org/project/wystan/0.10.0/
-[0.9.1]: https://pypi.org/project/wystan/0.9.1/
-[0.9.0]: https://pypi.org/project/wystan/0.9.0/
-[0.8.0]: https://pypi.org/project/wystan/0.8.0/
-[0.7.0]: https://pypi.org/project/wystan/0.7.0/
-[0.6.0]: https://pypi.org/project/wystan/0.6.0/
-[0.5.0]: https://pypi.org/project/wystan/0.5.0/
-[0.4.0]: https://pypi.org/project/wystan/0.4.0/
-[0.3.0]: https://pypi.org/project/wystan/0.3.0/
-[0.2.1]: https://pypi.org/project/wystan/0.2.1/
-[0.2.0]: https://pypi.org/project/wystan/0.2.0/
-[0.1.0]: https://pypi.org/project/wystan/0.1.0/
+[Unreleased]: https://github.com/PashaSchool/wystan/compare/v0.0.1...HEAD
+[0.0.1]: https://pypi.org/project/wystan/0.0.1/
