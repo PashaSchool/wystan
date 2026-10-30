@@ -15,7 +15,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_API_BASE = "https://wysten.ai/api/cloud"
+_DEFAULT_API_BASE = "https://wystan.ai/api/cloud"
 
 
 def _api_base() -> str:
