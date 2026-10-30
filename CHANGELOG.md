@@ -10,6 +10,18 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
 
 ## [Unreleased]
 
+## [0.0.2] – 2026-10-30
+
+### Fixed
+- `engine_version()` (scan-result cache key) could never read the hatch-dynamic
+  version from `pyproject.toml` and silently fell back to installed-dist
+  metadata; it now follows `[tool.hatch.version].path` to `__version__`.
+- ~40 stale docstrings and comments brought back in line with the code
+  (finalize pass list, flags documented "default OFF" after being flipped ON,
+  health-curve centre 55%, content-derived lineage ids, four framework
+  linkers, every LLM-bearing stage listed in `wystan scan --help`).
+- CHANGELOG and `uv.lock` aligned with the 0.0.x version line.
+
 ### Changed
 - **Flip-pack №46 (KEY_SCHEMA 81) — a published workspace gets to say what
   it is, and a CLI journey has to prove it points at its own code.** Three
@@ -195,5 +207,6 @@ independently versioned packages.
 
 ---
 
-[Unreleased]: https://github.com/PashaSchool/wystan/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/PashaSchool/wystan/compare/v0.0.2...HEAD
+[0.0.2]: https://pypi.org/project/wystan/0.0.2/
 [0.0.1]: https://pypi.org/project/wystan/0.0.1/
