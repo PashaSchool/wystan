@@ -39,8 +39,9 @@ UNCOVERED registry target:
     ``Uncovered:`` marker for the PF dissolves NATURALLY once the PF
     has member flows; no marker suppression anywhere.
 
-Kill-switch: ``WYSTAN_DISPATCH_REGISTRY_FLOWS=0`` (default) — the
-stage never runs, output byte-identical. Deterministic: sorted file
+Kill-switch: ``WYSTAN_DISPATCH_REGISTRY_FLOWS=0`` (the flag defaults ON
+since the 2026-07-10 B34-b re-flip) — the stage never runs, output
+byte-identical. Deterministic: sorted file
 walks, sorted targets, dedup by (feature, name). Telemetry via stage
 artifact/log only.
 """

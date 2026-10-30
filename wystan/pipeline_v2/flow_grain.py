@@ -1,4 +1,5 @@
-"""Seg D — flow-grain laws T1-T4 (B71, ``WYSTAN_FLOW_GRAIN``, default OFF).
+"""Seg D — flow-grain laws T1-T4 (B71, ``WYSTAN_FLOW_GRAIN``, default ON
+since the 2026-07-16 horizon-1 flip; ``=0`` kill-switch).
 
 Census class E (docs/anchor-arc/naming-grain-census-20260716.md): ~64% of the
 8920-flow corpus is helper-grain, and a large share is minted at the WRONG grain

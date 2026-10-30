@@ -4,9 +4,11 @@ Each linker is a class that implements :class:`FrameworkLinker` and
 adapts ONE framework-specific coupling pattern into a uniform
 :class:`FrameworkLink` stream consumed by Stage 6.4.
 
-v1 (Sprint C4) ships :class:`NextjsHttpRouteLinker` only. Future
-linkers — Server Actions, Zustand, Redux, tRPC — plug in via Python
-entry-points under the ``wystan.framework_linkers`` group:
+v1 (Sprint C4) shipped :class:`NextjsHttpRouteLinker` only; the
+built-in registry now also carries the Next.js Server Actions, tRPC
+procedure and store-mutation (Zustand / Redux / Jotai / Valtio /
+Nanostores) linkers — see :mod:`_discovery`. Linkers plug in via
+Python entry-points under the ``wystan.framework_linkers`` group:
 
 .. code-block:: toml
 

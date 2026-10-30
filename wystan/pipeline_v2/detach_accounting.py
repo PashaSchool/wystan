@@ -77,9 +77,9 @@ leaves the board; the pass only ADDS lane rows and REPAIRS scalar
 cross-references. A journey is never re-homed (that is a product decision
 owned by the rehome family, not by an accountant).
 
-Flag ``WYSTAN_DETACH_ACCOUNTING`` default **OFF** (armed-only; the
-KEY_SCHEMA bump rides the flip commit). OFF / unset ⇒ ``None`` before any
-read or mutation ⇒ no ``scan_meta`` key ⇒ byte-identical.
+Flag ``WYSTAN_DETACH_ACCOUNTING`` default **ON** (flip-pack #19, KS54;
+unset ≡ ``1``). Explicit ``0`` ⇒ ``None`` before any read or mutation ⇒
+no ``scan_meta`` key ⇒ byte-identical.
 """
 
 from __future__ import annotations

@@ -19,10 +19,13 @@ cover:
     Redux, Pinia, ...).
   * **tRPC procedures** referenced by namespace string.
 
-Each pattern is framework-specific. v1 (Sprint C4) ships ONE linker
+Each pattern is framework-specific. v1 (Sprint C4) shipped ONE linker
 covering the biggest gap — Next.js App Router fetch URL → route.ts
-handler resolution. The orchestrator is built to support N linkers
-plugged in via Python entry-points without touching this file.
+handler resolution; the built-in registry now carries four (Next.js
+HTTP route, Next.js Server Actions, tRPC procedure, store mutation —
+see :mod:`wystan.framework_linkers._discovery`). The orchestrator
+supports N linkers plugged in via Python entry-points without touching
+this file.
 
 Algorithm
 =========

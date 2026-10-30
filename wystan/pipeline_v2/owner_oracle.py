@@ -36,9 +36,9 @@ SACRED invariants (S1 spec):
   * The graveyard stays buried: co-commit / name-attribution are NEVER
     election inputs.
 
-Flag: ``WYSTAN_OWNER_ORACLE`` (default OFF). Unset / ``0`` → every consumer
-keeps its shipped first-claimant path → byte-identical output. The KEY_SCHEMA
-bump rides the SEPARATE later flip commit only (path_index consumers shift).
+Flag: ``WYSTAN_OWNER_ORACLE`` (default ON since the 2026-07-19 S*-pack
+flip, KEY_SCHEMA 32). Explicit ``0`` → every consumer keeps its shipped
+first-claimant path → byte-identical output.
 """
 
 from __future__ import annotations

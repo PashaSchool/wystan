@@ -10,8 +10,10 @@ quality-affecting scan decision. Outputs:
   * extends ``scan_meta`` with ``lineage_feature_stats`` +
     ``lineage_flow_stats`` for telemetry.
 
-When ``base_scan`` is ``None``, every feature/flow gets a fresh
-uuid4 (cold-scan default).
+When ``base_scan`` is ``None``, every feature/flow gets a freshly
+minted CONTENT-DERIVED uuid (sha256 of namespace + name + per-name
+sequence, see ``lineage._mint_uuid``) — stable across runs on identical
+input (cold-scan default).
 """
 
 from __future__ import annotations

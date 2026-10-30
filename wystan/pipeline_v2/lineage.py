@@ -12,8 +12,10 @@ Cold-scan principle (memory/rule-cold-scan.md) compliance
 This module does NOT introduce engine-side persistence. The base
 scan is an EXPLICIT input passed via ``--base-scan-path`` on the CLI
 (or via the ``base_scan`` kwarg in tests). When no base scan is
-supplied the algorithm mints fresh uuid4s for everything — which is
-the cold-case behaviour. Lineage metadata is layered on TOP of the
+supplied the algorithm mints fresh CONTENT-DERIVED uuids for everything
+(sha256 of namespace + name + per-name sequence via :func:`_mint_uuid`,
+so identical input yields identical ids) — which is the cold-case
+behaviour. Lineage metadata is layered on TOP of the
 existing scan output; no scan-time decision is altered by base-scan
 contents.
 
@@ -35,7 +37,7 @@ base feature B. Then classify:
     ``related_threshold``. The HIGHEST-overlap base wins (its UUID
     reused); the others are recorded in ``merged_from=[uuid,...]``.
   * pure-new — no base feature reaches ``related_threshold`` → mint
-    a new uuid4.
+    a new content-derived uuid (:func:`_mint_uuid`).
 
 Both directions (split + merge) are computed simultaneously; the
 algorithm prioritises the rename / carry-forward path before the

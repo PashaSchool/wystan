@@ -85,7 +85,8 @@ if TYPE_CHECKING:
 
 SPA_ROUTER_ENTRIES_ENV = "WYSTAN_SPA_ROUTER_ENTRIES"
 
-#: B74 Seg A — SPA route-table extraction (default OFF). Sub-arm of the
+#: B74 Seg A — SPA route-table extraction (default ON; ``=0`` disables).
+#: Sub-arm of the
 #: spa-router family: arming it adds route-table candidates to the SAME
 #: ``spa-page`` source (no new ``extractor_hits`` key), so every B65-v4
 #: downstream fence (6.86 spa-page mint priority/floor/mass fence) covers

@@ -60,10 +60,10 @@ held SYNTHESIZED shells drop with named telemetry (B95/devgrain
 precedent). Flows stay on their primary devs; the bipartite store is
 untouched.
 
-Flag ``WYSTAN_GENERIC_CONTAINER_DEMOTE`` default **OFF** (armed-only;
-KEY_SCHEMA bump rides the flip commit, the flag-addition law). OFF /
-unset ⇒ ``None`` before any mutation, no ``scan_meta`` key ⇒
-byte-identical (kill-switch). Deterministic, $0 LLM, no network.
+Flag ``WYSTAN_GENERIC_CONTAINER_DEMOTE`` default **ON** (KEY_SCHEMA 51,
+2026-08-02; unset ≡ ``1``). Explicit ``0`` ⇒ ``None`` before any
+mutation, no ``scan_meta`` key ⇒ byte-identical (kill-switch forever).
+Deterministic, $0 LLM, no network.
 """
 
 from __future__ import annotations

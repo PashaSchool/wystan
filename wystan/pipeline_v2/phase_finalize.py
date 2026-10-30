@@ -1,16 +1,56 @@
-"""Per-tree pipeline phase — lineage, late flow passes, output.
+"""Per-tree pipeline phase — lineage, UF/PF/journey passes, output.
 
 Extracted from ``run.py`` (refactor/run-decomposition) as straight-line
 code — same stage order, same StageLogger stage indexes/names, same
-artifact filenames, same lazy (function-local) imports.
+artifact filenames, same lazy (function-local) imports. The body has
+since grown to ~90 ordered passes (grep the ``# ── `` section markers
+for the authoritative list). Major stage families, in run order:
 
-  - Stage 6.8  — lineage + indexes (UUID stamping, path/routes index)
+  - Stage 6.8  — lineage + indexes (content-derived uuid stamping,
+    path/routes index); 6.8b system/background-flow classification;
+    6.85 product-surface taxonomy (Layer-1 tagging); 6.55 page-interior
+    structure
   - Incremental scan bookkeeping (head SHA + metric carry-forward)
-  - Stage 3.5  — flow expansion (deterministic call-graph)
-  - Stage 6.9  — test-file output-tree strip
-  - Stage 6.7  — User-Flow rollup ($0 LLM)
-  - Stage 6.7c — Mega-UF semantic split (additive Sonnet)
-  - Stage 6.7b — User-Flow LLM refiner (additive Haiku)
+  - Stage 3.5  — flow expansion (deterministic call-graph) + 6.55 part 2
+  - Stage 6.9 / 6.9b / 6.9c — test-file, generated-code and
+    schema-monolith output-tree strips
+  - Stage 6.86 — anchored PF minting (replaces the Stage 8 PF layer on
+    the anchored path), lane excavation, cross-PF split, twin merge
+  - Stage 0.7 exit gate — UF-synthesis suppression
+  - Stage 6.865 — post-grain flow re-derivation
+  - Stage 6.7 / 6.7a / 6.7c / 6.7b — User-Flow rollup ($0), deterministic
+    pre-clustering, Mega-UF semantic split (Sonnet), UF LLM refiner (Haiku)
+  - §4.5 conservation (anchored keyless path)
+  - Stage 6.7d — LLM product/journey abstraction (opt-in)
+  - Recall / re-home passes (CLI command journeys, route-group seeds,
+    UF-evidence lane re-homing, provenance re-home, 6.885b blob drain)
+  - Stage 6.88 — sibling-anchor unification + journey lattice
+  - Stage 6.98 / 6.98b — E2E-journey truth + orphan-journey synthesis
+  - Stage 6.985 / 6.986 / 6.987 / 6.987b — transport handoff, mega-PF
+    nav re-home, devgrain-leaf + route-stub demotes
+  - Stage 6.95 — per-entity git-history timeline; 6.96 impact-over-time
+  - Stage 6.6  — monorepo assembly view
+  - UF identity keeper; file lane (shared-infrastructure); B15 leaf rails
+  - Stage 6.97 / 6.97b / 6.97c / 6.97d / 6.97e — LOC family
+    (feature / journey / flow / engineering metrics / PF rollup)
+  - Emission integrity (I2 / I12 / I14 round-trip guarantee)
+  - Stage 6.87 — display-name contract; spray generalization; Law C
+    rescore; fold-coherence
+  - Stage 6.7e — journey-evidence adjudicator (keyed only)
+  - Stage 6.985d, 6.99 / 6.99b / 6.9945 / 6.995 / 6.996 / 6.997 / 6.997a,
+    6.9965 / 6.9964 / 6.9966 / 6.9967 — dispatch homing, re-home,
+    attach, affinity, foreignness and conservation passes; I14 re-derive
+  - Stage 6.998 — metrics recompute-on-emission; cost refresh;
+    degradation + cache telemetry stamps
+  - flow_name_v2 (B30 verb+resource naming) + de-collision + snapshots
+  - Terminal classification (6.995 4-way) + plumbing-UF reclassification
+  - S3 arbiter; nav-parent / section-landing / settings-frame /
+    capability / orphan-UF / tier-2 / technical-husk demotes
+  - B97 emission HARD gate — the last barrier before census + Stage 7
+  - PF slug sanitize, owner-ledger reconciliation, detachment accounting,
+    6.9975 PF-loc re-roll, landing + lineage audits
+  - Metric-ownership gates (fixb124 PF / fixb127 flow)
+  - fixb145 synth conversion (pre-output seam)
   - Stage 7    — output (FeatureMap assembly + writer)
 
 ``scan_meta`` is updated IN PLACE (lineage stats, incremental meta,
@@ -131,9 +171,14 @@ def run_finalize_phase(
     # keeps Stage 6.865 un-entered.
     stage3_unit_snapshot: dict[str, list[str]] | None = None,
 ) -> Path:
-    """Run Stage 6.8 → 3.5 → 6.9 → 6.7/6.7c/6.7b → 6.95 → 7 and write output.
+    """Run the finalize phase (Stage 6.8 lineage → 3.5 flow expansion →
+    6.9x strips → 6.86 anchored mint → 6.7 UF family → recall/re-home
+    passes → 6.95/6.96 history → LOC family → emission integrity →
+    naming contract → 6.99x re-home/demote passes → B97 hard gate →
+    ownership gates → Stage 7) and write output.
 
-    Body moved verbatim from ``run_pipeline_v2``. Returns the written
+    See the module docstring for the full ordered family list. Body
+    moved verbatim from ``run_pipeline_v2``. Returns the written
     FeatureMap path.
     """
     # ── Stage 6.8 — lineage + indexes (Sprint 1, 2026-05-23) ──────
@@ -440,11 +485,11 @@ def run_finalize_phase(
     scan_meta["stage_6_55_page_interior"] = dict(interior_telemetry)
 
     # ── Stage 6.9 — test-file output-tree strip ────────────────────
-    # "Post-everything tree hygiene": despite the 6.9 label this is
-    # wired to run LAST (after every Stage 6.x metric pass, after Stage
-    # 8 analyst + Stage 8.5 backfill, and after Stage 3.5 flow expansion
-    # which populates loc_nodes/loc_edges) so it sees the fully-enriched
-    # tree and cannot disturb any upstream computation. It removes
+    # Tree hygiene: runs after the Stage 6 metric passes, the Stage 8
+    # analyst + Stage 8.5 backfill (phase_layer2) and Stage 3.5 flow
+    # expansion (which populates loc_nodes/loc_edges), but EARLY within
+    # this finalize phase — before the 6.86 anchored mint, the 6.7 UF
+    # family and every later re-home/naming pass. It removes
     # test-file entries from the OUTPUT TREE only and NEVER recomputes a
     # metric scalar — coverage_pct/health/bug_fix_ratio are computed in
     # Stage 6 WITH the test files on purpose. Disable with
@@ -3181,8 +3226,11 @@ def run_finalize_phase(
     platform_infrastructure: list[dict[str, Any]] | None = None
 
     # ── Emission integrity — referential round-trip guarantee ($0) ──
-    # Runs LAST, after every UF / PF / flow / loc mutation, so the emitted
-    # JSON is self-consistent by construction:
+    # Runs after the UF / PF / flow / LOC mutation families above. It is
+    # NOT the last pass: the naming contract, the 6.99x re-home/demote
+    # passes and the ownership gates follow, and the B97 emission HARD
+    # gate (further below) is the final barrier before Stage 7. It makes
+    # the emitted JSON self-consistent at this seam:
     #   * I2  — drop phantom features (marker-only paths, 0 loc/loc_shared,
     #           0 flows); workspace anchors + shared-platform are exempt.
     #   * I12 — every user_flows[].product_feature_id ∈ emitted PF key-set
@@ -3235,7 +3283,7 @@ def run_finalize_phase(
         # contract as everything else in this block.
         from wystan.pipeline_v2.indexes import build_path_index
 
-        # ── S1 owner-oracle (flag-gated, default OFF) ───────────────────
+        # ── S1 owner-oracle (flag-gated, default ON since the S*-pack flip) ─
         # Compute the deterministic owner election ONCE here — post-devgrain,
         # post-emission-integrity, so it runs over the SETTLED final dev
         # membership — and feed it to the path_index refresh (R1) and the
@@ -3824,7 +3872,7 @@ def run_finalize_phase(
             scan_meta.setdefault("warnings", []).append(
                 f"post-uf-rehome failed ({exc}); UF homes left as-is")
 
-    # ── Stage 6.9945 — orphan-flow ATTACH (default OFF) ─────────────────
+    # ── Stage 6.9945 — orphan-flow ATTACH (default ON, flip-pack №13) ───
     # The deterministic INVERSE of build_orphan_flow_gaps: fold each
     # unambiguous orphan-UI cohort into the ONE co-located journey that
     # already owns its feature-dir (sub-component flows the 6.7d journey
@@ -5534,7 +5582,8 @@ def run_finalize_phase(
         )
 
     # ── B97 — emission HARD gate (WYSTAN_EMISSION_HARD_GATE, default
-    # OFF, armed-only) — the LAST barrier before census + Stage 7 ─────────
+    # ON since flip-pack #16; =0 kill-switch) — the LAST barrier before
+    # census + Stage 7 ─────────────────────────────────────────────────
     # Operator mandate 2026-08-02: a trust-law violation physically cannot
     # leave the engine, regardless of which upstream stage regressed. E1
     # LOC-real (recompute → repair, else demote/keep+name), E2 zero-member
@@ -5542,7 +5591,7 @@ def run_finalize_phase(
     # keys), E3b route-param monster names. The gate NEVER orphans a real
     # journey — journey-holding violations are kept and loudly named in
     # telemetry. Runs after EVERYTHING (post-B96) so no later mint/rename
-    # can bypass it. OFF / unset ⇒ None, no scan_meta key ⇒ byte-identical.
+    # can bypass it. Explicit 0 ⇒ None, no scan_meta key ⇒ byte-identical.
     try:
         from wystan.pipeline_v2.emission_hard_gate import (
             run_emission_hard_gate,

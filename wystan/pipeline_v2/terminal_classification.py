@@ -58,8 +58,9 @@ holds trivially. A row that survives is trimmed to its residue spans
 (``loc`` recomputed via the 6.97b union) — the classified fractions'
 original spans ride in the trace.
 
-Kill-switch ``WYSTAN_TERMINAL_CLASSIFICATION`` (default OFF) → the
-stage never runs: ``coverage_gaps[]`` and ``scan_meta`` stay
+Kill-switch ``WYSTAN_TERMINAL_CLASSIFICATION=0`` (the flag defaults ON
+since the 2026-07-16 horizon-1 flip) → the stage never runs:
+``coverage_gaps[]`` and ``scan_meta`` stay
 byte-identical to main (the ``why_unresolved`` model field is omitted
 from dumps when ``None``).
 """

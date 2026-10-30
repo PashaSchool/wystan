@@ -65,8 +65,8 @@ high-xref bucket is shared-infra). A PF is a demotable capability iff ALL hold:
   and non-vocab (leg c) anyway. Kept as the probe-mandated negative leg,
   unit-verified on a synthetic high-fan-in fixture.
 
-Flag ``WYSTAN_CAPABILITY_SHARED_REHOME`` default OFF (armed-only; the
-KEY_SCHEMA bump rides a later flip). OFF / unset ⇒ returns ``None`` before any
+Flag ``WYSTAN_CAPABILITY_SHARED_REHOME`` default ON (KEY_SCHEMA 42,
+2026-07-28; unset ≡ ``1``). Explicit ``0`` ⇒ returns ``None`` before any
 mutation, writes no ``scan_meta`` key ⇒ byte-identical to the pre-B95 engine
 (kill-switch). Deterministic, $0 LLM, no network, read-only over the settled
 PF / UF / dev / bipartite lists (mutating in place only for demoted rows).

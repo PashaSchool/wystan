@@ -16,6 +16,15 @@ Public surface (built up incrementally as stages land on the
     Stage 5 — :func:`stage_5_postprocess`   (naming-discipline + slug)
     Stage 6 — :func:`stage_6_metrics`       (commit + coverage enrichment)
     Stage 7 — :func:`stage_7_output`        (FeatureMap assembly + writer)
+
+The orchestration in ``run.py`` additionally runs Stage 0.5 (stack
+auditor), the Stage 6.x enrichment family (``phase_enrich.py``: 6.3
+import tree, 6.4 framework linkers, 6.5 product clusterer, ...), Stage 8
+Layer 2 (``phase_layer2.py``: analyst / clusterer + 8.5-8.9.x passes)
+and the finalize phase (``phase_finalize.py``: 6.8 lineage, 3.5 flow
+expansion, 6.86 anchored mint, 6.7 User-Flow family, LOC / naming /
+re-home / gate passes, then Stage 7). Those modules are not re-exported
+here; see ``run.py`` / ``phase_*.py``.
 """
 
 from wystan.pipeline_v2.extractors import (

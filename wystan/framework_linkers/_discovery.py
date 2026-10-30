@@ -10,11 +10,12 @@ Mirrors the Stage 1 extractor discovery pattern in
      nothing (typical for editable installs that haven't been
      re-installed since the entry-point was added).
 
-The default registry currently contains exactly one linker —
-:class:`NextjsHttpRouteLinker`. Future C5+ sprints will append to
-the registry by adding one ``_try(...)`` call AND one entry-point
-line — they MUST NOT modify the existing protocols or the Stage 6.4
-orchestrator core.
+The default registry currently contains four linkers —
+:class:`NextjsHttpRouteLinker` (C4), :class:`NextjsServerActionsLinker`
+and :class:`TrpcProcedureLinker` (D1 / C5+C7), and
+:class:`StoreMutationLinker` (C6). New linkers append to the registry
+by adding one ``_try(...)`` call AND one entry-point line — they MUST
+NOT modify the existing protocols or the Stage 6.4 orchestrator core.
 """
 
 from __future__ import annotations

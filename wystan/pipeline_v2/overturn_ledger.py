@@ -10,8 +10,8 @@ found: freeze after ``6.86-mint``+``excavation`` absorbs 94.7–98.2 % of the
 overturns, and **post-freeze multi-writer conflicts are ZERO on keyless**.
 
 This module installs the ledger + arbiter behind
-``WYSTAN_OVERTURN_ARBITER`` (default **OFF** — unset/=0 is byte-identical
-to main, the write path is untouched). When ON:
+``WYSTAN_OVERTURN_ARBITER`` (default **ON** — unset ≡ ``1``; explicit
+``=0`` is byte-identical to pre-S3, the write path is untouched). When ON:
 
 * An observer wraps ``Feature.__setattr__`` / ``UserFlow.__setattr__`` and
   RECORDS every ``product_feature_id`` overturn (kind, old, new, the writing

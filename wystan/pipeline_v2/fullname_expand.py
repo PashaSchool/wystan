@@ -11,8 +11,9 @@ GROUNDED in what the maintainer wrote inside the repo, never invented.
 
 Sibling of :mod:`manifest_display` (the B27 template): an ENV gate, bounded
 best-effort file reads, ``lru_cache``, never a crash, always a fall-through.
-Kill-switch: ``WYSTAN_PF_FULLNAME_LAW`` (default **OFF**) — unset restores
-the pre-B56 display byte-identically.
+Kill-switch: ``WYSTAN_PF_FULLNAME_LAW`` (default **ON** since B62,
+KEY_SCHEMA 29) — ``0``/``false``/``off`` restores the pre-B56 display
+byte-identically.
 
 DISPLAY CHANNEL ONLY (the B16/B27/B50 pattern): the naming contract feeds this
 as a ranked display-name override; ``ProductFeature.name`` slugs, ``anchor_id``,

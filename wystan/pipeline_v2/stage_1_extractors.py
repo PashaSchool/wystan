@@ -174,7 +174,8 @@ def _load_default_extractors() -> list[AnchorExtractor]:
     # nexus), tRPC procedures, and koa/hono routers — server surfaces whose URL
     # lives in decorators/DSL calls, not the filesystem, so their flows/journeys
     # mint. Registration is FLAG-GATED (WYSTAN_SERVER_API_ENTRIES, default
-    # OFF) for the same reason as B67: scan_meta.extractor_hits serializes EVERY
+    # ON since the horizon-1 flip; =0 unregisters) for the same reason as
+    # B67: scan_meta.extractor_hits serializes EVERY
     # registered source key, so an unconditionally-registered-but-inert extractor
     # would still grow the OFF board by one key. The extract() gate is a second
     # guard.
@@ -195,8 +196,9 @@ def _load_default_extractors() -> list[AnchorExtractor]:
     # in non-Nuxt Vue SPAs) and react-router code configs (JSX <Route> trees /
     # createBrowserRouter arrays, lazy target = entry), so SPA page surfaces
     # mint flows/journeys and the partition surface-detect sees them.
-    # Registration is FLAG-GATED (WYSTAN_SPA_ROUTER_ENTRIES, default OFF)
-    # for the same reason as B66/B67: scan_meta.extractor_hits serializes
+    # Registration is FLAG-GATED (WYSTAN_SPA_ROUTER_ENTRIES, default ON
+    # since the B65-v4 / horizon-1 flip; =0 unregisters) for the same
+    # reason as B66/B67: scan_meta.extractor_hits serializes
     # EVERY registered source key. The extract() gate is a second guard.
     try:
         from wystan.pipeline_v2.extractors.spa_router import (
@@ -216,8 +218,9 @@ def _load_default_extractors() -> list[AnchorExtractor]:
     # (cal apps/web, composite replaces the stock route source) and the
     # polyglot leftover (onyx web/, leftover pass runs stock route with the
     # js-generic root tag). Registration is FLAG-GATED
-    # (WYSTAN_APPROUTER_KEYLESS, default OFF) for the same reason as
-    # B65-v3/B66/B67: scan_meta.extractor_hits serializes EVERY registered
+    # (WYSTAN_APPROUTER_KEYLESS, default ON since the S*-pack flip; =0
+    # unregisters) for the same reason as B65-v3/B66/B67:
+    # scan_meta.extractor_hits serializes EVERY registered
     # source key, so an unconditionally-registered-but-inert extractor would
     # still grow the OFF board by one key. The extract() gate is a second
     # guard.
@@ -384,9 +387,12 @@ def stage_1_extractors(
     Args:
         ctx: Stage 0 output.
         extractors: optional explicit registry. When ``None`` (default)
-            we discover via Python entry-points and fall back to the
-            built-in 5. Tests pass an explicit list to keep the unit
-            under control.
+            we discover via Python entry-points and MERGE them with the
+            built-in first-party registry (``_load_default_extractors``:
+            route / mvc / schema / package / config plus the Rails, Go,
+            Rust, Python/JS-library and flag-gated jobs / server-API /
+            SPA-router / App-Router extractors). Tests pass an explicit
+            list to keep the unit under control.
         max_workers: thread pool size. ``None`` lets ``ThreadPoolExecutor``
             pick a sensible default based on the number of extractors.
         profile: the ACTIVE framework profile (highest ``detects()`` win),
