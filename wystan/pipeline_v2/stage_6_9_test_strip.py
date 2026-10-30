@@ -1,10 +1,12 @@
 """Stage 6.9 — test-file output-tree strip (deterministic, no LLM).
 
-This stage is *post-everything tree hygiene*. Despite the ``6_9`` label
-it is wired to run LAST in :mod:`wystan.pipeline_v2.run` — after every
-Stage 6.x metric pass, after the Stage 8 analyst + Stage 8.5 member
-backfill, and after Stage 3.5 flow expansion (which populates
-``loc_nodes`` / ``loc_edges``) — immediately before ``stage_7_output``.
+This stage is *tree hygiene*. It is wired in
+:mod:`wystan.pipeline_v2.phase_finalize` after the Stage 6 metric
+passes, after the Stage 8 analyst + Stage 8.5 member backfill
+(``phase_layer2``), and after Stage 3.5 flow expansion (which populates
+``loc_nodes`` / ``loc_edges``) — but EARLY within the finalize phase:
+before the Stage 6.86 anchored mint, the 6.7 User-Flow family and the
+many later re-home / naming / gate passes that precede ``stage_7_output``.
 
 What it does
 ------------

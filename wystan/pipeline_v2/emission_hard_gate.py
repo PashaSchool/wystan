@@ -41,9 +41,10 @@ THE CHECKS (exhibit-grounded, deterministic, $0):
      dev-layer residual. Real journeys → kept + named (renaming would mean
      INVENTING a name deterministically — refused; the violation is loud).
 
-Flag ``WYSTAN_EMISSION_HARD_GATE`` default **OFF** (armed-only; the
-flip rides its own commit per the flip law). OFF / unset ⇒ ``None`` before
-any mutation, no ``scan_meta`` key ⇒ byte-identical (kill-switch).
+Flag ``WYSTAN_EMISSION_HARD_GATE`` default **ON** since flip-pack #16
+(KEY_SCHEMA 51, 2026-08-02; unset ≡ explicit ``1``). Explicit ``0`` ⇒
+``None`` before any mutation, no ``scan_meta`` key ⇒ byte-identical
+(kill-switch forever).
 Deterministic, no LLM, no network; sorted iteration everywhere.
 """
 

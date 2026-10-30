@@ -880,9 +880,14 @@ def scan(
     """Run the Wystan scan pipeline (deterministic extractors + Haiku flows).
 
     The code-grounded scanner (pipeline v2, introduced 2026-05-18).
-    Stages 0..7 run in order; Stage 3 + Stage 4 are the only LLM calls.
-    Output: a single FeatureMap JSON with developer_features populated
-    and product_features empty (Layer 2 is deferred).
+    Stages 0..8 run in order. Extractors and most enrichment are
+    deterministic; the LLM calls are Stage 0.5 (stack auditor), Stage 3
+    (flows) + Stage 4 (residual), the Stage 6.7b/6.7c/6.7d/6.7e
+    User-Flow refiner/splitter/abstraction/adjudicator passes, the
+    Stage 8 analyst (skipped by default on the anchored path), Stage
+    8.9.5 component split and the personas pass. Output: a single
+    FeatureMap JSON with developer_features, product_features (Layer 2)
+    and user_flows populated.
     """
     from wystan.pipeline_v2.run import run_pipeline_v2, resolve_model
 

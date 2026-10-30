@@ -38,12 +38,20 @@ Hard rules respected
 
 Dispatcher
 ==========
-``run.py`` reads ``WYSTAN_STAGE_8_MODE`` from the environment
+``phase_layer2.py`` reads ``WYSTAN_STAGE_8_MODE`` from the environment
 (matches the singular ``WYSTAN_*`` convention used by Stage 6.3 /
 6.4 / 6.6):
 
-    * ``"haiku-clusterer"`` (DEFAULT, safety): legacy Stage 8.
-    * ``"analyst"``: this module.
+    * ``"analyst"`` (DEFAULT since the 2026-05-21 corpus validation):
+      this module.
+    * ``"haiku-clusterer"``: legacy Stage 8, retained as the cheap
+      fallback + automatic recovery path when Sonnet errors.
+
+Even in ``"analyst"`` mode the Sonnet call is SKIPPED by default on
+the anchored path (``anchored_analyst_skip_active``): the Stage 6.86
+anchored mint in ``phase_finalize`` owns the PF layer there, so
+Stage 8 becomes a deterministic pass-through.
+``WYSTAN_STAGE_8_ANALYST_SKIP_ANCHORED=0`` restores the call.
 
 The mode is surfaced in ``scan_meta.stage_8.mode`` so downstream
 tools can attribute lift to either path.

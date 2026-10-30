@@ -195,8 +195,10 @@ def run_enrich_phase(
     # bridge: HTTP route handlers reached via fetch URL strings, Server
     # Actions across the network boundary, store mutations dispatched
     # by string action type, tRPC procedures referenced by namespace
-    # string. v1 ships ONE linker — Next.js HTTP route. Future linkers
-    # plug in via Python entry-points without modifying Stage 6.4 core.
+    # string. v1 shipped ONE linker (Next.js HTTP route); the built-in
+    # registry now carries four (HTTP route, Server Actions, tRPC,
+    # store mutation). Further linkers plug in via Python entry-points
+    # without modifying Stage 6.4 core.
     # NO LLM, NO network — pure file IO + regex.
     write_stage_input(run_dir, 6, "framework_enrich", {
         "ctx": ctx,

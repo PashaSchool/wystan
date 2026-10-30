@@ -17,8 +17,9 @@ doctrine): a PF with a techno name ∧ no nav ∧ a real UF ∧ UF entry owners
 The emptied techno PF is then honestly demoted by B96 (the
 attach→reparent→demote order in finalize).
 
-Flag ``WYSTAN_TIER2_JOURNEY_REPARENT`` default OFF (armed-only).
-Unset ≡ 0 byte-identical. $0, deterministic.
+Flag ``WYSTAN_TIER2_JOURNEY_REPARENT`` default ON since flip-pack #18
+(KEY_SCHEMA 53; unset ≡ ``1``). Explicit ``0`` ⇒ byte-identical. $0,
+deterministic.
 """
 
 from __future__ import annotations

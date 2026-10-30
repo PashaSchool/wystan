@@ -27,9 +27,10 @@ Unresolved targets (external packages) are dropped — this is a
 REPO-INTERNAL reachability surface.
 
 Emission: side-channel only (stage artifact + in-memory input for the
-B34 Tier-2 dispatch-registry stage). Scan JSON is untouched — with
-``WYSTAN_LAZY_IMPORT_EDGES=0`` (default) the collection never runs
-unless Tier 2 requests it in memory.
+B34 Tier-2 dispatch-registry stage). Scan JSON is untouched.
+``WYSTAN_LAZY_IMPORT_EDGES`` defaults ON (since the 2026-07-10 keyed
+RefApp A/B); with ``=0`` the collection never runs unless Tier 2
+requests it in memory.
 
 Determinism: tracked files are processed in sorted order; every output
 list is sorted; no set iteration on the emitted path.
@@ -57,10 +58,11 @@ __all__ = [
 
 LAZY_IMPORT_EDGES_ENV = "WYSTAN_LAZY_IMPORT_EDGES"
 
-#: B64 — dynamic-dispatch resolver kill-switch. Default OFF: every B64
-#: mechanism (import-tree lazy edge, route-helper const-fold, registry
-#: {key: Component}) is inert and its subsystem's output is byte-identical
-#: to pre-B64. Shared by ``stage_6_3_import_tree`` and the react-router SPA
+#: B64 — dynamic-dispatch resolver kill-switch. Default ON since flip-pack
+#: №8 (2026-07-27); with ``=0`` every B64 mechanism (import-tree lazy edge,
+#: route-helper const-fold, registry {key: Component}) is inert and its
+#: subsystem's output is byte-identical to pre-B64. Shared by
+#: ``stage_6_3_import_tree`` and the react-router SPA
 #: profile so ONE env var arms the whole feature. Registered in
 #: ``scan_result_cache.ENV_OUTPUT_FLAGS``; no KEY_SCHEMA bump.
 DISPATCH_RESOLVER_ENV = "WYSTAN_DISPATCH_RESOLVER"

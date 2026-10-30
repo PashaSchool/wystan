@@ -15,8 +15,8 @@ the residual edge of Common is a separate cycle).
 Order: the post-UF family, BEFORE B96 (6.9969) — attach-first-then-demote:
 a journey that finds a home saves its PF from reading as 0-UF.
 
-Flag ``WYSTAN_ORPHAN_UF_PATH_ATTACH`` default OFF (armed-only; the flip
-rides its own commit per protocol). Unset ≡ 0 byte-identical.
+Flag ``WYSTAN_ORPHAN_UF_PATH_ATTACH`` default ON since flip-pack #18
+(KEY_SCHEMA 53; unset ≡ ``1``). Explicit ``0`` ⇒ byte-identical.
 """
 
 from __future__ import annotations

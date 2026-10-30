@@ -23,8 +23,9 @@ Segments (each a separate commit, ONE flag):
   * Seg D — koa-router (``new Router()`` + ``router.<verb>(path|rpc-name)``) and
     hono (``new Hono()`` + ``app.<verb>(path)``) — real HTTP methods.
 
-Flag ``WYSTAN_SERVER_API_ENTRIES`` — default OFF. Unset/``0`` -> ``extract``
-returns ``[]`` and the scan is byte-identical to pre-B66 (kill-switch unit). The
+Flag ``WYSTAN_SERVER_API_ENTRIES`` — default ON since the horizon-1 flip
+(2026-07-16, KEY_SCHEMA 30). Explicit ``0`` -> ``extract`` returns ``[]``
+and the scan is byte-identical to pre-B66 (kill-switch unit). The
 REGISTRY gates on the flag too (``scan_meta.extractor_hits`` serializes every
 registered source key — an inert-but-registered extractor still grows the OFF
 board by one key, the B67 kill-switch lesson).

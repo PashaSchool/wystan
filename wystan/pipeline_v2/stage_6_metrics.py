@@ -19,8 +19,8 @@ No LLM calls. No network. Reuses existing analyzer code — does NOT
 duplicate the bug-fix detection regex, the health formula, or the
 co-change index. Graceful degradation: if the private coverage
 package is not installed, coverage fields are left at ``None`` and
-the stage emits a warning to ``ctx`` via the return-tuple's notes
-list (Stage 7 forwards those into ``scan_meta.warnings``).
+the reason is only logged (``logger.info``) — nothing is written to
+``scan_meta.warnings`` (the stage returns the feature list only).
 
 Idempotent: running twice on the same input yields identical output
 (the underlying analyzer calls are deterministic).
@@ -165,7 +165,7 @@ def _load_coverage_provider(
     """Try to construct the private BehavioralCoverageProvider.
 
     Returns ``(provider, warning_or_None)``. Warning carries the reason
-    the provider could not be loaded — surfaced into ``scan_meta``.
+    the provider could not be loaded — the caller only logs it.
     """
     try:
         from wystan_test_coverage import (

@@ -75,15 +75,16 @@ def _load_default_profiles() -> list[FrameworkProfile]:
     _try("wystan.pipeline_v2.profiles.next_pages_react",
          "NextPagesReactProfile")
 
-    # B44 — React-Router-framework / Remix profile. Registered ONLY when
-    # WYSTAN_REACT_ROUTER_FW_PROFILE is set (the env read is inline —
-    # importing the profile module for its flag helper would trip the G2
-    # cross-profile import lint; the string-based ``_try`` is the sanctioned
-    # registration path). With the flag off a react-router-framework unit
-    # keeps falling to the DefaultProfile, so selection + every downstream
-    # board is byte-identical (regression guard). Code-gated here rather
-    # than via a pyproject entry-point precisely because an unconditional
-    # entry-point would bypass the flag.
+    # B44 — React-Router-framework / Remix profile. Registered by default
+    # (WYSTAN_REACT_ROUTER_FW_PROFILE unset ≡ "1"); set it to 0/false to
+    # skip registration (the env read is inline — importing the profile
+    # module for its flag helper would trip the G2 cross-profile import
+    # lint; the string-based ``_try`` is the sanctioned registration
+    # path). With the flag off a react-router-framework unit keeps falling
+    # to the DefaultProfile, so selection + every downstream board is
+    # byte-identical to the pre-B44 engine (kill-switch). Code-gated here
+    # rather than via a pyproject entry-point precisely because an
+    # unconditional entry-point would bypass the flag.
     import os
     if os.environ.get("WYSTAN_REACT_ROUTER_FW_PROFILE", "1").strip() not in {
         "", "0", "false", "False",

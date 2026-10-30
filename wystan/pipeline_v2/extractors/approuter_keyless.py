@@ -42,8 +42,9 @@ twins. ``build_routes_index`` folds these candidates LAST, so a
 CLEAN ``next-app-router`` repo where the stock ``route`` pass ran) wins and
 stays byte-identical — approuter rows only ADD.
 
-Flag ``WYSTAN_APPROUTER_KEYLESS`` — default **OFF**. Explicit ``0`` /
-unset -> ``extract`` returns ``[]`` AND the registry does not even register
+Flag ``WYSTAN_APPROUTER_KEYLESS`` — default **ON** since the S*-pack flip
+(2026-07-19, KEY_SCHEMA 32). Explicit ``0`` -> ``extract`` returns ``[]``
+AND the registry does not even register
 the source (``scan_meta.extractor_hits`` serializes every registered key —
 the B67 kill-switch lesson), so the OFF scan is byte-identical to pre-S4a.
 

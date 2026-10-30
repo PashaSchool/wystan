@@ -1419,18 +1419,18 @@ def _calculate_health(
     Calculates a health score from 0 to 100.
     100 = healthy, 0 = high technical debt.
 
-    Formula (revised Day 15):
-    - Base score decreases with bug fix ratio using a sigmoid-like
-      curve centered at 35% bug-fix ratio. This means:
-        - 0-15% bug-fix → 85-100 (healthy — mostly new feature work)
-        - 15-35% → 55-85 (normal active development)
-        - 35-55% → 25-55 (elevated — worth watching)
-        - 55-75% → 10-25 (high debt — maintenance-dominant)
-        - 75%+   → 0-10 (critical — almost all commits are bug fixes)
+    Formula (revised Day 15; centre moved 35% → 55%):
+    - Base score decreases with bug fix ratio using a logistic curve
+      centered at 55% bug-fix ratio (steepness 8). This means:
+        - 0-20% bug-fix → ~94-99 (healthy — mostly new feature work)
+        - 20-45% → ~69-94 (healthy / normal active development)
+        - 45-65% → ~31-69 (midpoint 50 at 55% — balanced maintenance)
+        - 65-85% → ~8-31 (elevated → high debt — maintenance-dominant)
+        - 85%+   → <8 (critical — almost all commits are bug fixes)
       The old formula (ratio * 200) mapped anything ≥50% to flat zero,
-      which made 90%+ of features in real OSS repos (outline, ghost,
-      cal.com) "critical" — that's misleading for stable products where
-      40-60% bug-fix ratio is normal active maintenance.
+      and the earlier 35% centre still made most features in real OSS
+      repos (outline, ghost, cal.com) "critical" — misleading for stable
+      products where 40-60% bug-fix ratio is normal active maintenance.
     - Activity factor scales confidence: a feature with 2 commits and
       50% bug ratio is less concerning than one with 200 commits and
       50%.

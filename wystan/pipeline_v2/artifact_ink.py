@@ -34,7 +34,7 @@ DISCIPLINE (the SACRED anti-cases):
     binaries via ``_is_excluded_name``) return ``None``: they contribute 0 LOC
     anyway, so classifying them as ink would be meaningless.
 
-Kill-switch ``WYSTAN_ARTIFACT_INK_LANE`` (default OFF) → Stage 6.97 leaves
+Kill-switch ``WYSTAN_ARTIFACT_INK_LANE`` (default ON since B62; ``=0``) → Stage 6.97 leaves
 ``loc`` exactly as today and scans are byte-identical to main. ``classify_artifact``
 itself is pure and side-effect free; the FLAG gates only whether the drain runs.
 """

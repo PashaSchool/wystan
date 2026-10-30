@@ -25,9 +25,21 @@ class AnchorCandidate:
             anchor. Same file may appear in candidates from multiple
             extractors — Stage 2 reconciles ownership using a stable
             source-priority rule.
-        source: which extractor produced this candidate. One of
-            ``"route"``, ``"mvc"``, ``"schema"``, ``"package"``,
-            ``"config"``. Custom extractors registered via entry-points
+        source: which extractor produced this candidate. The
+            authoritative list (with ownership priority) is the
+            ``_SOURCE_PRIORITY`` table in
+            :mod:`wystan.pipeline_v2.stage_2_reconcile`. Families, by
+            tier: manifests (``package``, ``rust-workspace``); declared
+            entry points (``route``, ``route-pages``, ``route-approuter``,
+            ``rails-routes``, ``fastapi-route``, ``route-fastify``,
+            ``route-express``, ``go-router``, ``django-route``,
+            ``react-router-spa``, ``spa-page``, ``server-api-entry``,
+            ``jobs-entry``); code-layout modules (``mvc``,
+            ``fastapi-domain``, ``django-app``, ``rails-models``,
+            ``go-package``, ``rust-module``, ``python-library``,
+            ``js-library``); supporting evidence (``schema``,
+            ``rails-views``, ``rails-jobs``, ``rails-stimulus``,
+            ``config``). Custom extractors registered via entry-points
             should use their own slug; Stage 2 treats unknown sources
             with the lowest priority by default.
         confidence_self: 0..1 — how confident *this* extractor is in

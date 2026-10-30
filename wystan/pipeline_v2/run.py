@@ -682,7 +682,8 @@ def run_pipeline_v2(
     # ids, lineage, UF rollup, recall) treat these seeds like any other
     # flow, so a flowless connector PF gains honest member flows and
     # its `Uncovered:` marker dissolves naturally. Both flags default
-    # OFF → this block is byte-inert on default scans.
+    # ON (since the 2026-07-10 B34 / B34-b flips); set either to 0 to
+    # make this block byte-inert.
     from wystan.pipeline_v2.dispatch_registry import (
         dispatch_registry_enabled,
         run_dispatch_registry_stage,

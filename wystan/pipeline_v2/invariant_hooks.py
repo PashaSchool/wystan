@@ -69,15 +69,16 @@ INVARIANT_HOOKS_ENV = "WYSTAN_INVARIANT_HOOKS"
 #: B113 (fixb113) — the silent-empty-board sentinel's own arm. The
 #: ``mint_silent_empty`` hook lives on its OWN seam key
 #: ("6.86_mint_universe") which phase_finalize fires only when this flag is
-#: armed, so the default world never gains an ``invariant_hooks[]`` record
-#: (byte-identity; the B91/B112 own-key precedent). Default OFF; explicit
-#: ``0`` is a kill-switch forever. Subordinate to
+#: armed (the B91/B112 own-key precedent). Default ON (unset ≡ ``1``);
+#: explicit ``0`` is a kill-switch forever and keeps the board free of the
+#: record. Subordinate to
 #: :func:`invariant_hooks_enabled` — the master kill-switch still silences it.
 MINT_SILENT_EMPTY_SENTINEL_ENV = "WYSTAN_MINT_SILENT_EMPTY_SENTINEL"
 
 
 def mint_silent_empty_sentinel_enabled() -> bool:
-    """B113 — the silent-empty sentinel arm. Default **OFF**."""
+    """B113 — the silent-empty sentinel arm. Default **ON** (unset ≡ ``1``;
+    explicit ``0`` disables)."""
     return os.environ.get(
         MINT_SILENT_EMPTY_SENTINEL_ENV, "1",
     ).strip().lower() in {"1", "true", "yes", "on"}
@@ -1147,8 +1148,9 @@ register("demote_gap_emitted", "6.995_demote_gap_emission", SEVERITY_CRITICAL,
 # B113 — OWN registry key ("6.86_mint_universe"), NOT the shared "6.86" seam:
 # that seam fires on every scan, so registering there would append a record to
 # ``invariant_hooks[]`` for every repo in the default world. phase_finalize
-# fires this key only under WYSTAN_MINT_SILENT_EMPTY_SENTINEL ⇒ OFF is
-# byte-identical (the B91/B112 own-key precedent). WARN, not critical: the
+# fires this key only under WYSTAN_MINT_SILENT_EMPTY_SENTINEL (default ON;
+# explicit 0 is byte-identical — the B91/B112 own-key precedent). WARN, not
+# critical: the
 # class is a DIAGNOSIS of an upstream inversion, and a critical would append a
 # ``failed`` degradation that blocks install on a board whose emptiness may yet
 # be correct. Escalation is a lead ruling once the class is driven to zero.

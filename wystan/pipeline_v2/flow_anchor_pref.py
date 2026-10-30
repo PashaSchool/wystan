@@ -47,10 +47,10 @@ already-default ``degrade_span`` widening accepts it and stamps the real
 body: +582 LOC (chatwoot +282 / maybe +300) with no container ever
 swallowed.
 
-Flag: ``WYSTAN_FLOW_ANCHOR_METHOD_PREF``, default **OFF** (armed),
-appended to ``scan_result_cache.ENV_OUTPUT_FLAGS`` WITHOUT a KEY_SCHEMA
-bump — the bump rides the separate flip commit. Unset ≡ explicit
-``0``/``false``/``off``/``no`` ≡ byte-identical to the pre-fix world.
+Flag: ``WYSTAN_FLOW_ANCHOR_METHOD_PREF``, default **ON** (flip #28,
+KS 63; unset ≡ explicit ``1``), registered in
+``scan_result_cache.ENV_OUTPUT_FLAGS``. Explicit ``0``/``false``/``off``/
+``no`` ≡ byte-identical to the pre-fix world (kill-switch forever).
 
 KNOWN, NAMED consequence for whoever composes the flip (measured, not a
 surprise): tightening an anchor can reveal that two LLM-named flows are

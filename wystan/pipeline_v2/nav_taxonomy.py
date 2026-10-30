@@ -26,8 +26,9 @@ marketing taxonomy (the nav is the author's product framing, versioned
 with the code) and BELOW the customer's explicit ``wystan.yaml``
 override. Wiring:
 
-  * Stage 6.5 — new ``nav-taxonomy`` rule (confidence 0.85 >
-    dep-anchor 0.75) names matched clusters with the vendor label →
+  * Stage 6.5 — new ``nav-taxonomy`` rule (confidence 0.9 — above
+    dep-anchor 0.75 and the 0.85 domain-noun ceiling; see
+    ``_CONF_NAV_TAXONOMY``) names matched clusters with the vendor label →
     keyless / deterministic-only scans get vendor-named product
     features.
   * Stage 8 haiku — nav matches override the haiku marketing mapping.

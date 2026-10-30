@@ -40,8 +40,8 @@ frame iff ALL hold:
      this mechanism's scope) fails it and is left untouched.
 
 Vocab lives in ``stacks/nav-tree.yaml`` (data, not code — the section-landing
-precedent). Flag ``WYSTAN_SETTINGS_FRAME_DEMOTE`` default OFF (armed-only;
-the KEY_SCHEMA bump rides a later flip). OFF / unset ⇒ returns ``None`` before
+precedent). Flag ``WYSTAN_SETTINGS_FRAME_DEMOTE`` default ON (KEY_SCHEMA
+42, 2026-07-28; unset ≡ ``1``). Explicit ``0`` ⇒ returns ``None`` before
 any mutation, no ``scan_meta`` key ⇒ byte-identical to the pre-B94 engine
 (kill-switch). Depends on ``run_nav_parent`` having run first only for the
 optional nav-branch signal; the route-anchor signal needs nothing upstream.

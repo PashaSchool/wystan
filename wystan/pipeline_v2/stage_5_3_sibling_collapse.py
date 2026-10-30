@@ -58,9 +58,16 @@ Algorithm (deterministic, no magic numbers per ``rule-no-magic-tuning``)
      features collapse freely. This protects rare cases where Stage
      2 anchored a real domain (e.g. ``auth``) that happens to live
      under the same prefix as N route singletons.
-   - **Synthesize parent label** from the last two segments of
-     ``parent_dir`` (e.g. ``backend/src/server/routes/v1/`` →
-     ``v1-routes``; ``apps/web/api/admin/`` → ``api-admin-routes``).
+   - **Synthesize parent label** from ``parent_dir`` via the
+     container-suffix rule in :func:`_synthesize_parent_label`: find the
+     rightmost container segment (``routes``, ``router(s)``,
+     ``handlers``, ``controllers``, ``views``) and emit
+     ``<segments-right-of-it>-<container>`` (e.g.
+     ``backend/src/server/routes/v1/`` → ``v1-routes``;
+     ``services/auth/handlers/`` → ``auth-handlers``); only when no
+     container segment exists does it fall back to the last two
+     segments + ``-routes`` (``apps/web/api/admin/`` →
+     ``api-admin-routes``).
    - **Merge** the collapsible subset into one
      :class:`Feature`: union of paths, synthesized name, source
      ``"sibling-collapse"`` recorded in telemetry. Per-feature
@@ -257,11 +264,10 @@ def _synthesize_parent_label(parent_dir: str) -> str:
              ``<container>`` prefixed by the immediately-preceding
              segment if any (``app/controllers`` →
              ``app-controllers``).
-      3. If NO container was found, fall back to last two segments
-         joined + ``-routes`` (``apps/web/api/admin`` →
-         ``api-admin-routes`` when ``api`` is treated as a container;
-         a true no-container case like ``frontend/dashboard`` →
-         ``frontend-dashboard-routes``).
+      3. If NO container was found (``api`` is NOT a container
+         suffix), fall back to the last two segments joined +
+         ``-routes`` (``apps/web/api/admin`` → ``api-admin-routes``;
+         ``frontend/dashboard`` → ``frontend-dashboard-routes``).
 
     Examples:
       ``backend/src/server/routes/v1`` → ``v1-routes``
@@ -269,7 +275,7 @@ def _synthesize_parent_label(parent_dir: str) -> str:
       ``apps/web/api/admin``           → ``api-admin-routes``
       ``services/auth/handlers``       → ``auth-handlers``
       ``app/controllers``              → ``app-controllers``
-      ``backend/api/v2``               → ``v2-api``
+      ``backend/api/v2``               → ``api-v2-routes``
     """
     segments = [s.lower().replace("_", "-")
                 for s in parent_dir.split("/") if s]

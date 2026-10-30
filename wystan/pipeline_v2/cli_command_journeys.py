@@ -1,5 +1,6 @@
 """fixb126 — CLI **command journeys**: the journey half of the CLI
-anchor supply (``WYSTAN_CLI_ANCHOR_SUPPLY``, default OFF).
+anchor supply (``WYSTAN_CLI_ANCHOR_SUPPLY``, default ON since flip #31;
+``=0`` kill-switch).
 
 THE HOLE CLASS (measured, ollama c19/c20 keyed pair): fixb125 put the
 shipped command surface on the product map — ``ollama CLI``, ``lh CLI``,

@@ -11,8 +11,9 @@ on-disk schema:
     landing app, replay registry, cloud sync, incremental loader).
   - ``developer_features`` / ``product_features`` are re-derived on
     ``model_dump`` so v2 consumers can read the layered shape directly.
-  - ``product_features`` is always empty for Layer 1 (Layer 2 is
-    deferred per the rebuild plan).
+  - ``product_features`` carries the Layer 2 output (Stage 8 analyst /
+    clusterer, or the Stage 6.86 anchored mint) when the caller passes
+    it; it is empty only when no Layer 2 pass ran.
   - ``scan_meta`` carries stage timings, stack/monorepo detection,
     LLM fallback share, model id, and any warnings the pipeline
     collected.

@@ -1266,7 +1266,7 @@ def build_dissolved_dev_gaps(
     return rows, tele
 
 
-# ── Orphan-flow ATTACH (Stage 6.9945, default OFF) ──────────────────────
+# ── Orphan-flow ATTACH (Stage 6.9945, default ON since flip-pack №13) ───
 #
 # The deterministic INVERSE of :func:`build_orphan_flow_gaps`. Instead of
 # STAMPING a qualifying orphan-UI cohort as a ``coverage_gaps[]`` finding,
