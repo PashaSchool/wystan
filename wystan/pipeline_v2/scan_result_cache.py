@@ -3691,8 +3691,9 @@ def is_bypassed() -> bool:
 def _pyproject_version() -> str:
     """Version from the nearest ``pyproject.toml`` (walk up from this file).
 
-    Reflects the *code* version (1.39.0) even when the installed dist
-    metadata is stale. Empty string on any failure.
+    Reflects the *code* version (the value hatch reads from
+    ``wystan/__init__.py`` via ``pyproject.toml``) even when the installed
+    dist metadata is stale. Empty string on any failure.
     """
     here = Path(__file__).resolve()
     for parent in here.parents:
@@ -3707,8 +3708,28 @@ def _pyproject_version() -> str:
                 v = proj.get("version")
                 if isinstance(v, str) and v:
                     return v
-            return ""
+            return _hatch_dynamic_version(data, candidate.parent)
     return ""
+
+
+def _hatch_dynamic_version(data: dict, root: Path) -> str:
+    """Resolve a hatch-dynamic version: ``[tool.hatch.version].path``.
+
+    Reads ``__version__ = "..."`` from the file hatch points at (today
+    ``wystan/__init__.py``). Empty string when the key or literal is absent.
+    """
+    tool = data.get("tool")
+    hatch = tool.get("hatch") if isinstance(tool, dict) else None
+    cfg = hatch.get("version") if isinstance(hatch, dict) else None
+    rel = cfg.get("path") if isinstance(cfg, dict) else None
+    if not isinstance(rel, str) or not rel:
+        return ""
+    try:
+        src = (root / rel).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', src, re.M)
+    return m.group(1) if m else ""
 
 
 def engine_version() -> str:
