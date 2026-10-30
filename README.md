@@ -12,7 +12,7 @@ No Jira. No annotations. No manual tagging. Just `git log` and your code.
 [![MCP](https://img.shields.io/badge/MCP-ready-6E56CF)](https://modelcontextprotocol.io)
 [![Downloads](https://img.shields.io/pypi/dm/wystan?color=6E56CF)](https://pypi.org/project/wystan/)
 
-[**Website**](https://wysten.ai) · [**Live scans**](https://wysten.ai/live-scan) · [**Quick start**](#quick-start) · [**For AI agents**](#built-for-ai-coding-agents) · [**How it works**](#how-it-works) · [**Releases**](https://github.com/PashaSchool/wystan/releases)
+[**Website**](https://wystan.ai) · [**Live scans**](https://wystan.ai/live-scan) · [**Quick start**](#quick-start) · [**For AI agents**](#built-for-ai-coding-agents) · [**How it works**](#how-it-works) · [**Releases**](https://github.com/PashaSchool/wystan/releases)
 
 </div>
 
@@ -92,7 +92,7 @@ wystan /path/to/your/repo --model sonnet
 
 That writes a versioned **feature-map JSON** to `~/.wystan/`. Explore it, diff it across runs, ship it to CI, or hand it to your AI agent (below).
 
-Prefer not to run anything locally? [**wysten.ai**](https://wysten.ai) hosts the same engine — with PR comments, runtime overlays, dashboards and history — and scans public repos for free.
+Prefer not to run anything locally? [**wystan.ai**](https://wystan.ai) hosts the same engine — with PR comments, runtime overlays, dashboards and history — and scans public repos for free.
 
 ## Built for AI coding agents
 
@@ -201,6 +201,6 @@ In plain words: **use it, read it, modify it, self-host it — for anything exce
 
 **[Star this repo](https://github.com/PashaSchool/wystan)** if Wystan helps you (or your agent) understand a codebase faster.
 
-Made for engineers and the AI agents that work alongside them · [wysten.ai](https://wysten.ai)
+Made for engineers and the AI agents that work alongside them · [wystan.ai](https://wystan.ai)
 
 </div>

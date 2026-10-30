@@ -5,7 +5,7 @@ Optional, opt-in module. When ``WYSTAN_API_KEY`` is set:
   - The MCP server batches tool-call events and sends them every minute
 
 Without an API key, all cloud calls become silent no-ops. The CLI and
-MCP server work entirely locally and never reach out to wysten.ai.
+MCP server work entirely locally and never reach out to wystan.ai.
 """
 
 from wystan.cloud.sync import push_feature_map, send_mcp_events_batch
