@@ -1004,6 +1004,14 @@ def run_finalize_phase(
              .get("headless_product_spine"))):
         uf_suppressed = False
         scan_meta["uf_suppression_lifted"] = "headless-product-spine"
+    # A command-line tool whose commands were found has user journeys: each
+    # command is something a user runs. Suppression stays for a CLI-classed
+    # unit with no detected command surface.
+    if uf_suppressed and bool(
+            ((scan_meta.get("stage_6_86_anchored_mint") or {})
+             .get("cli_anchor_supply") or {}).get("clusters")):
+        uf_suppressed = False
+        scan_meta["uf_suppression_lifted"] = "cli-command-surface"
     if uf_suppressed:
         uf_reason = suppression_reason(repo_class_result)
         scan_meta["uf_suppressed_reason"] = uf_reason
@@ -1607,6 +1615,20 @@ def run_finalize_phase(
                 _cli_fence_tele = {"error": str(exc)[:200]}
             if _cli_fence_tele:
                 scan_meta["cli_home_fence"] = _cli_fence_tele
+
+        # ── Command groups are product features ───────────────────────
+        # ``gh pr`` ("Manage pull requests") becomes a product feature
+        # under the binary's; its commands' user flows move with it.
+        from wystan.pipeline_v2.cli_command_groups import split_command_groups
+        try:
+            _cli_groups_tele = split_command_groups(
+                ctx, product_features,
+                [f for f in features if getattr(f, "layer", None) != "product"],
+                user_flows, list(bipartite.flows))
+        except Exception as exc:  # noqa: BLE001 — additive split is best-effort
+            _cli_groups_tele = {"error": str(exc)[:200]}
+        if _cli_groups_tele.get("binaries") or _cli_groups_tele.get("error"):
+            scan_meta["cli_command_groups"] = _cli_groups_tele
 
     # ── W3.1 D6 — route-group journey recall seeds (BOTH paths) ─────────
     # A >= 2-route product group no UF touches (tracecat tables/chat, the
@@ -6076,6 +6098,7 @@ def run_finalize_phase(
                     "llm_health": llm_health,
                 },
             )
+            scan_meta["entry_points"] = pln_tele.pop("entry_points", None)
             scan_meta["product_language_names"] = pln_tele
             # The writer's calls happen after the full-bill refresh above.
             scan_meta["cost_usd"] = round(tracker.total_cost_usd, 4)
