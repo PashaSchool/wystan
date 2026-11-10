@@ -14,14 +14,14 @@ import json
 import logging
 from typing import Any
 
-from wystan.llm.cost import CostTracker, deterministic_params
+from wystan.llm.cost import CostTracker, deterministic_params, response_text
 from wystan.models.types import Feature, SymbolAttribution
 from wystan.symbols.extractor import FileSymbols
 
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
 
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_MODEL = "claude-sonnet-5-5"
 _MAX_SYMBOLS_IN_PROMPT = 120
 
 
@@ -151,7 +151,7 @@ def _ask_llm(
         except Exception:
             pass
 
-    text = response.content[0].text if response.content else ""
+    text = response_text(response)
     return _parse_response(text)
 
 

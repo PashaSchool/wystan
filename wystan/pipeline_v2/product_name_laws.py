@@ -30,12 +30,13 @@ LAW_CONTAINER_NAME = "container_name"
 LAW_TECHNOLOGY_NAME = "technology_name"
 LAW_TOO_LONG = "too_long"
 LAW_BARE_VERB = "bare_verb"
+LAW_VERB_LED = "verb_led"
 LAW_NO_OBJECT = "no_object"
 LAW_NOT_VERB_FIRST = "not_verb_first"
 LAW_IMPLEMENTATION_VERB = "implementation_verb"
 
 _ROUTE_GLYPHS = re.compile(r"[$:{}\[\]_+/\\]|\.\w")
-_EDGE_PUNCTUATION = " .,;:-–—"
+_EDGE_PUNCTUATION = " .,;:-–—!?"
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9']*")
 _GLUE_WORDS = frozenset({"to", "in", "up", "on", "of", "by", "out", "off"})
 _MIN_GLUED_LENGTH = 6
@@ -127,9 +128,15 @@ def _shared_violations(name: str, words: list[str], ctx: LawContext) -> list[str
 
 
 def _feature_violations(words: list[str], ctx: LawContext, is_shown: bool) -> list[str]:
-    verbs = ctx.vocabulary_verbs | ctx.listed("product_name_implementation_verbs")
+    # A one-word user-goal verb is how products label a capability ("Share",
+    # "Search", "Export"); a one-word implementation verb is not.
+    verbs = ctx.listed("product_name_implementation_verbs")
     if len(words) == 1 and words[0] in verbs and not is_shown:
         return [LAW_BARE_VERB]
+    # A feature is a noun phrase ("Document signing"), not an instruction
+    # ("Sign documents"). A page the product itself titles "Sign In" stands.
+    if len(words) > 1 and words[0] in ctx.goal_verbs | verbs and not is_shown:
+        return [LAW_VERB_LED]
     return []
 
 

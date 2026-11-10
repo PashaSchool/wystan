@@ -22,10 +22,18 @@ Identity (slugs, ids, anchors, membership) is never touched.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from wystan.pipeline_v2.authored_names import (
+    SOURCE_URL,
+    AuthoredName,
+    authored_names,
+    page_rows,
+    top_page,
+)
 from wystan.pipeline_v2.naming_contract import _verb_class_tokens, load_naming_vocab
 from wystan.pipeline_v2.naming_validator import EvidenceBundle, tokenize_name, validate_name
 from wystan.pipeline_v2.product_name_laws import (
@@ -43,13 +51,18 @@ __all__ = [
     "EVIDENCE_UI_TEXT",
     "UNNAMEABLE_PREFIX",
     "NameTarget",
+    "build_ui_index",
+    "is_unnameable",
     "name_product_layer",
+    "route_files_without_ui",
     "run_product_language_names",
 ]
 
 EVIDENCE_UI_TEXT = "ui-text"
 EVIDENCE_UI_LABEL = "ui-label"
+EVIDENCE_NOT_AUTHORED = "not-authored"
 UNNAMEABLE_PREFIX = "unnameable:"
+NO_USER_SURFACE = "no_user_surface"
 
 _MAX_PROMPT_LABELS = 30
 _MAX_PROMPT_ROUTES = 8
@@ -71,6 +84,13 @@ class NameTarget:
     labels: list[UiLabel]
     identity_words: frozenset[str]
     """Words of the item's slug (feature) or resource (flow)."""
+    slug: str = ""
+    authored: list[AuthoredName] = field(default_factory=list)
+    """What the product calls the feature's top page, most trusted first."""
+    url_name: str = ""
+    """The top page's URL word, when it is the only name and a bare verb."""
+    has_no_surface: bool = False
+    """The product has pages and this feature has none."""
     routes: list[str] = field(default_factory=list)
     members: list[str] = field(default_factory=list)
     """Names of the code units inside the item."""
@@ -110,10 +130,15 @@ def _words(text: str) -> frozenset[str]:
 
 
 def _shares_stem(left: Iterable[str], right: Iterable[str]) -> bool:
+    """True when a word on each side has the same stem: equal, or a common
+    prefix that covers all but the last letter of the shorter word
+    ("share" and "sharing", "sign" and "signing")."""
     right_words = list(right)
     for a in left:
         for b in right_words:
-            if a == b or (min(len(a), len(b)) >= _MIN_STEM and (a.startswith(b) or b.startswith(a))):
+            shorter = min(len(a), len(b))
+            common = len(os.path.commonprefix([a, b]))
+            if a == b or (shorter >= _MIN_STEM and common >= max(_MIN_STEM, shorter - 1)):
                 return True
     return False
 
@@ -225,6 +250,16 @@ class _Namer:
                     matches.setdefault(text.split()[0].lower() if is_flow else "", text)
         return next(iter(matches.values())) if len(matches) == 1 else None
 
+    def _identity_candidate(self, target: NameTarget) -> str | None:
+        """A feature's own slug written as words ("share" to "Share"), when
+        that passes the laws. The slug comes from the feature's route or
+        package, so it is about the feature even when the display name the
+        earlier passes chose is not ("Remix")."""
+        if target.kind != KIND_FEATURE or not target.slug:
+            return None
+        text = " ".join(part.capitalize() for part in re.split(r"[-_\s]+", target.slug) if part)
+        return text if text and self._rejection(target, text) is None else None
+
     def _propose(self, targets: list[NameTarget], parents: dict[str, str]) -> dict[str, str]:
         """Accepted writer proposals by target key, after one retry."""
         accepted: dict[str, str] = {}
@@ -255,12 +290,17 @@ class _Namer:
 
     def _settle(self, target: NameTarget) -> None:
         """Rungs 2 to 4 for a target the writer did not name."""
+        if target.url_name:
+            self._take(target, target.url_name)
+            self.telemetry["kept"] += 1
+            target.apply(target.url_name, "low", [SOURCE_URL, "bare-verb"])
+            return
         broken = self._violations(target, target.current)
         if not broken:
             self.telemetry["kept"] += 1
             self._take(target, target.current)
             return
-        label = self._label_candidate(target)
+        label = self._label_candidate(target) or self._identity_candidate(target)
         if label is not None:
             self.telemetry["from_label"] += 1
             self._take(target, label)
@@ -271,9 +311,60 @@ class _Namer:
         by_law[broken[0]] = by_law.get(broken[0], 0) + 1
         target.apply(target.current, "low", [UNNAMEABLE_PREFIX + law for law in broken])
 
+    def _reads_as_fragment(self, target: NameTarget, text: str) -> bool:
+        """True for a one-word name that another feature's name starts with
+        ("Sign" beside "Sign In" and "Sign Up")."""
+        word = text.lower()
+        if " " in word:
+            return False
+        return any(
+            other.startswith(word + " ") for other in self._taken.get(target.group, set())
+        )
+
+    def _settle_feature(self, target: NameTarget) -> bool:
+        """Name a product feature from its top page. True when settled.
+
+        A feature is never sent to the writer: its name is either stated by
+        the product or it has none."""
+        if target.kind != KIND_FEATURE or not (target.authored or target.has_no_surface):
+            return False
+        for candidate in target.authored:
+            if product_name_violations(candidate.text, KIND_FEATURE, self._ctx, is_shown=True):
+                continue
+            if candidate.text.lower() in self._taken.get(target.group, set()):
+                continue
+            if candidate.source == SOURCE_URL and self._reads_as_fragment(target, candidate.text):
+                # ``/sign/:token`` gives "Sign", which reads as a fragment
+                # next to "Sign In". The writer may phrase it from the
+                # page's own text; without one the URL word stands.
+                target.url_name = candidate.text
+                return False
+            self._take(target, candidate.text)
+            confidence = "medium" if candidate.source == SOURCE_URL else "high"
+            self.telemetry["authored"] = self.telemetry.get("authored", 0) + 1
+            target.apply(candidate.text, confidence, [candidate.source])
+            return True
+        if not target.has_no_surface and not self._violations(target, target.current):
+            # It has a page; the product just does not label it. The current
+            # name stands, marked as not authored.
+            self._take(target, target.current)
+            self.telemetry["kept"] += 1
+            target.apply(target.current, "low", [EVIDENCE_NOT_AUTHORED])
+            return True
+        law = NO_USER_SURFACE if target.has_no_surface else "no_lawful_page_name"
+        self.telemetry["unnameable"] += 1
+        by_law = self.telemetry["unnameable_by_law"]
+        by_law[law] = by_law.get(law, 0) + 1
+        target.apply(target.current, "low", [UNNAMEABLE_PREFIX + law])
+        return True
+
     def run(self, targets: list[NameTarget], parents: dict[str, str]) -> None:
         ordered = sorted(targets, key=lambda target: target.key)
         self.telemetry["total"] += len(ordered)
+        # Features with a stated name first, so a URL word is judged against
+        # the names its siblings really have.
+        ordered.sort(key=lambda t: (not any(c.source != SOURCE_URL for c in t.authored), t.key))
+        ordered = [target for target in ordered if not self._settle_feature(target)]
         accepted = self._propose(ordered, parents)
         for target in ordered:
             name = accepted.get(target.key)
@@ -281,7 +372,10 @@ class _Namer:
                 self._settle(target)
             elif name != target.current:
                 self.telemetry["written"] += 1
-                target.apply(name, "high", [EVIDENCE_UI_TEXT])
+                # A written feature name is grounded, not stated by the
+                # product: it never carries full confidence.
+                confidence = "medium" if target.kind == KIND_FEATURE else "high"
+                target.apply(name, confidence, [EVIDENCE_UI_TEXT])
             else:
                 self.telemetry["kept"] += 1
 
@@ -299,6 +393,7 @@ def _feature_target(feature: Any, index: UiTextIndex, routes_by_file: dict[str, 
         current=feature.display_name or feature.name, group="pf",
         labels=index.labels_for(paths),
         identity_words=_words(feature.name),
+        slug=feature.name,
         routes=sorted({routes_by_file[path] for path in paths if path in routes_by_file}),
         apply=apply,
     )
@@ -349,15 +444,36 @@ def run_product_language_names(
     routes_index: list[dict[str, Any]],
     developer_features: list[Any] = (),
     brand_words: Iterable[str] = (),
+    nav_pairs: Iterable[tuple[str, str | None]] = (),
+    files_without_ui: Iterable[str] = (),
     writer: NameWriter | None = None,
 ) -> dict[str, Any]:
     """Rename product features and user flows in place; returns telemetry."""
+    nav_pairs = list(nav_pairs)
     ctx = build_law_context(index, brand_words)
     routes_by_file = {
         str(row.get("file")): str(row.get("pattern"))
         for row in routes_index if row.get("file") and row.get("pattern")
     }
     feature_targets = [_feature_target(f, index, routes_by_file) for f in product_features]
+    pages = page_rows(routes_index, ctx.structural_words, frozenset(files_without_ui))
+    scope_words = ctx.listed("tenant_scope_segments")
+    for target, feature in zip(feature_targets, product_features):
+        page = top_page(feature.paths or [], target.identity_words, pages)
+        if page is None:
+            # In a product with no pages at all (an API, a library) the lack
+            # of a page says nothing, and the ladder below names the feature.
+            target.has_no_surface = bool(pages)
+            continue
+        target.authored = authored_names(
+            page, index, nav_pairs,
+            brand_words=ctx.brand_words, scope_words=scope_words,
+        )
+        # Evidence for the writer is the feature's own pages, not every
+        # shared component its code reaches.
+        page_files = {p.file for p in pages} & set(feature.paths or [])
+        target.labels = index.labels_for(page_files)
+        target.routes = sorted({p.pattern for p in pages if p.file in page_files})
     members_of: dict[str, list[str]] = {}
     for dev in developer_features:
         if dev.product_feature_id:
@@ -413,9 +529,41 @@ def name_product_layer(
     ctx: Any,
     routes_index: list[dict[str, Any]],
     llm: dict[str, Any],
+    name_flows: bool = True,
 ) -> dict[str, Any]:
     """Pipeline entry: collect user-visible text, build the writer (keyed
-    scans), and run the ladder over the emitted product layer."""
+    scans), run the ladder, and remove what stayed unnameable.
+
+    Called twice by finalize. The first call, with ``name_flows`` off, runs before
+    the line-count rollups so a removed product feature's code is counted
+    where it went. The second call is the last pass before output."""
+    from wystan.pipeline_v2.unnameable_demote import (
+        demote_unnameable_features,
+        drop_unnameable_flows,
+    )
+
+    index = build_ui_index(features, product_features, flows, ctx)
+    developer = [f for f in features if getattr(f, "layer", None) != "product"]
+    telemetry = run_product_language_names(
+        product_features, user_flows if name_flows else [], flows,
+        index=index, routes_index=routes_index, developer_features=developer,
+        brand_words=_brand_words(ctx.repo_path), nav_pairs=_nav_pairs(ctx, index),
+        files_without_ui=route_files_without_ui(ctx.repo_path, routes_index),
+        writer=build_name_writer(**llm),
+    )
+    # What has no product-language name is not shown as product.
+    telemetry["features_removed"] = demote_unnameable_features(
+        product_features, developer, user_flows, flows,
+    )
+    if name_flows:
+        telemetry["flows_removed"] = drop_unnameable_flows(user_flows, flows)
+    return telemetry
+
+
+def build_ui_index(
+    features: list[Any], product_features: list[Any], flows: list[Any], ctx: Any,
+) -> UiTextIndex:
+    """User-visible text of every file a feature or flow owns."""
     candidates: set[str] = set()
     for feature in list(features) + list(product_features):
         candidates.update(feature.paths or [])
@@ -423,10 +571,38 @@ def name_product_layer(
         candidates.update(flow.paths or [])
         if flow.entry_point_file:
             candidates.add(flow.entry_point_file)
-    index = collect_ui_text(ctx.repo_path, candidates, ctx.tracked_files)
-    developer = [f for f in features if getattr(f, "layer", None) != "product"]
-    return run_product_language_names(
-        product_features, user_flows, flows,
-        index=index, routes_index=routes_index, developer_features=developer,
-        brand_words=_brand_words(ctx.repo_path), writer=build_name_writer(**llm),
+    return collect_ui_text(ctx.repo_path, candidates, ctx.tracked_files)
+
+
+def is_unnameable(item: Any) -> bool:
+    """True when the ladder found no product-language name for ``item``."""
+    return any(
+        str(note).startswith(UNNAMEABLE_PREFIX)
+        for note in (getattr(item, "name_evidence", None) or [])
     )
+
+
+def _nav_pairs(ctx: Any, index: UiTextIndex) -> list[tuple[str, str | None]]:
+    """``(label, href)`` pairs of the product's navigation files."""
+    from wystan.pipeline_v2.product_strings import collect_product_strings
+
+    strings = collect_product_strings(ctx.repo_path, sorted(index.by_file))
+    return sorted({pair for pairs in strings.nav_pairs_by_file.values() for pair in pairs},
+                  key=lambda pair: (pair[0], pair[1] or ""))
+
+
+_SCRIPT_ROUTE_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs")
+_DEFAULT_EXPORT = re.compile(r"\bexport\s+default\b|\bas\s+default\b")
+
+
+def route_files_without_ui(repo_path: Any, routes_index: list[dict[str, Any]]) -> list[str]:
+    """Route files that render nothing: a TS/JS route module with no default
+    export is a resource route (an endpoint, a proxy), not a page."""
+    silent: list[str] = []
+    for file in sorted({str(row.get("file") or "") for row in routes_index}):
+        if not file.endswith(_SCRIPT_ROUTE_SUFFIXES):
+            continue
+        text = _read_text(repo_path, file)
+        if text is not None and not _DEFAULT_EXPORT.search(text):
+            silent.append(file)
+    return silent

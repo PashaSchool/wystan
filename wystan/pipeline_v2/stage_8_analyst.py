@@ -116,7 +116,7 @@ from wystan.llm.model_gateway import resolve_model as gateway_model
 # ``sonnet_scanner`` / ``aggregator_detector`` / ``dedup`` / ``tool_use_scan``
 # (i.e. the short alias, NOT the dated id). Anthropic's API resolves
 # this to the current Sonnet 4.6 build.
-DEFAULT_ANALYST_MODEL = "claude-sonnet-4-6"
+DEFAULT_ANALYST_MODEL = "claude-sonnet-5-5"
 
 # Top developer features (by path count) included in the analyst
 # payload. Matches the experimenter prototype's cutoff.
