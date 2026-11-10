@@ -29,6 +29,10 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   keeps `MemberFile.primary=True` for it; the others keep the path with
   `primary=False` and an `evidence` naming the winner.
 
+### Fixed
+- `metrics_ownership_gate` docstrings said `history` survives an abstain; the
+  code nulls it with the metric family.
+
 ## [0.0.2] – 2026-10-30
 
 ### Fixed
