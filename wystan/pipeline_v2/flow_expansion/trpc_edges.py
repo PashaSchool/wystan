@@ -54,6 +54,10 @@ _NAMED_IMPORT = re.compile(
 )
 _ROUTER_HINTS = ("createTRPCRouter", "router(")
 _MAX_NESTING = 12
+# Bounds on the whole table. Depth alone does not bound the work: routers that
+# refer to each other many times multiply at every level.
+_MAX_PROCEDURES = 20_000
+_MAX_ROUTER_EXPANSIONS = 5_000
 
 RouterKey = tuple[str, str]  # (file, router variable name)
 
@@ -91,9 +95,11 @@ def _line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, max(offset, 0)) + 1
 
 
-def _parse_object(file: str, text: str, body: str, body_offset: int) -> dict:
+def _parse_object(file: str, text: str, body: str, body_offset: int, depth: int = 0) -> dict:
     """Parse one router object body into ``key -> _Ref | _Inline | dict``."""
     tree: dict = {}
+    if depth > _MAX_NESTING:
+        return tree
     cursor = 0
     for key, raw in _split_top_level_object(body):
         value = (raw or "").strip()
@@ -111,7 +117,7 @@ def _parse_object(file: str, text: str, body: str, body_offset: int) -> dict:
             open_idx = value.index("{")
             close_idx = _find_matching_brace(value, open_idx)
             inner = value[open_idx + 1: close_idx - 1] if close_idx > open_idx else ""
-            tree[key] = _parse_object(file, text, inner, value_offset + open_idx + 1)
+            tree[key] = _parse_object(file, text, inner, value_offset + open_idx + 1, depth + 1)
         else:
             start = _line_of(text, value_offset)
             tree[key] = _Inline(file, (start, start + value.count("\n")))
@@ -162,6 +168,7 @@ class _Resolver:
         self._routers = routers
         self._bindings: dict[str, dict[str, tuple[str, str]]] = {}
         self.referenced: set[RouterKey] = set()
+        self._expansions = 0
 
     def _locate(self, ref: _Ref) -> tuple[str, str]:
         """The file and name where ``ref`` is defined (itself when local)."""
@@ -172,9 +179,12 @@ class _Resolver:
         return self._bindings[ref.file].get(ref.name, (ref.file, ref.name))
 
     def flatten(self, tree: dict, prefix: str, depth: int, out: dict[str, Procedure]) -> None:
-        if depth > _MAX_NESTING:
+        self._expansions += 1
+        if depth > _MAX_NESTING or self._expansions > _MAX_ROUTER_EXPANSIONS:
             return
         for key in sorted(tree):
+            if len(out) >= _MAX_PROCEDURES:
+                return
             value = tree[key]
             path = f"{prefix}.{key}" if prefix else key
             if isinstance(value, dict):
