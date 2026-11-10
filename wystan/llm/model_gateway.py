@@ -49,6 +49,7 @@ _KNOWN_MODELS: dict[str, str] = {
     "claude-haiku-4-5": "anthropic/claude-haiku-4.5",
     "claude-haiku-4-5-20251001": "anthropic/claude-haiku-4.5",
     "claude-sonnet-4-6": "anthropic/claude-sonnet-4.6",
+    "claude-sonnet-5-5": "anthropic/claude-sonnet-5.5",
     "claude-sonnet-4-20250514": "anthropic/claude-sonnet-4",
     "claude-opus-4-6": "anthropic/claude-opus-4.6",
     "claude-opus-4-7": "anthropic/claude-opus-4.7",

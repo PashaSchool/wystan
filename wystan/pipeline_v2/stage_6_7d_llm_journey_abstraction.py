@@ -90,7 +90,7 @@ DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 # model_id (which stays Haiku for cost). Call 2 (re-attribution) is a cheap
 # mechanical map and stays on the passed model_id (Haiku) — the validated
 # "Sonnet + Haiku" combo. Override via WYSTAN_STAGE_6_7D_ABSTRACTION_MODEL.
-DEFAULT_ABSTRACTION_MODEL = "claude-sonnet-4-6"
+DEFAULT_ABSTRACTION_MODEL = "claude-sonnet-5-5"
 ABSTRACTION_MODEL_ENV = "WYSTAN_STAGE_6_7D_ABSTRACTION_MODEL"
 # ~50-120 coarsened UFs + ~30-60 PFs must fit in ONE structured response on a
 # large repo (dub). 8k truncated the JSON on big repos → parse-fail → degrade.

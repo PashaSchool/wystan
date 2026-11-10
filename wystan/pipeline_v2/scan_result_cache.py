@@ -3683,7 +3683,12 @@ ENV_OUTPUT_FLAGS = (
 #: KS86 (2026-11-10): Stage 3 offers only behaviour symbols as flow candidates
 #: and never anchors a flow on a declaration (schema, type, constant table).
 #: The Stage 3 prompt, the flow set and flow entry points change.
-KEY_SCHEMA_VERSION = 86
+#:
+#: KS87 (2026-11-10): product features are named from their top page
+#: (navigation label, page title, heading, URL word); a product feature with
+#: no page and an unnameable user flow leave the product layer; the default
+#: Sonnet is claude-sonnet-5-5.
+KEY_SCHEMA_VERSION = 87
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

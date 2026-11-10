@@ -24,6 +24,25 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   The scan pipeline never read that file.
 
 ### Changed
+- **A product feature is named by the product, and has a page.** The name
+  of a product feature is read from its top page (`authored_names.py`): the
+  navigation label that links to it, then the page title, then the first
+  heading, then the URL's own word. Directory, package and framework names
+  are never used ("Remix" for the share pages is now "Share"). In a product
+  that has pages, a feature with no page (an API endpoint, an internal
+  package) is removed from `product_features`; its code joins the feature it
+  lives under by name or becomes unowned with
+  `shared_reason: "unnameable_product_feature"` (`unnameable_demote.py`). A
+  user flow with no product-language name is removed from `user_flows`; its
+  code flows stay. Counts are in `scan_meta.unnameable_features_removed` and
+  `scan_meta.product_language_names.flows_removed`. `KEY_SCHEMA_VERSION` is
+  87.
+- **The default Sonnet is `claude-sonnet-5-5`.** The `sonnet` alias and every
+  stage default (analyst, journey abstraction, adjudicator, splitter,
+  discovery, symbol attribution, evolve) moved from `claude-sonnet-4-6`.
+  Requests to it send `thinking: {"type": "between_tools"}` and no
+  `temperature`; responses are read by block type. Pricing is $2 / $10 per
+  million tokens.
 - **A flow's entry point is code that does something.** Stage 3 classifies
   every exported TS/JS symbol as behaviour or declaration
   (`analyzer/symbol_behaviour.py`): a type, interface, enum, or a `const`

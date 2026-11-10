@@ -106,7 +106,7 @@ ENV_FLAG = "WYSTAN_STAGE_6_7E_ADJUDICATOR"
 #: mandate was validated on; DELIBERATELY decoupled from the scan's main
 #: ``model_id``, the 6.7d precedent). Registered in ENV_OUTPUT_FLAGS.
 MODEL_ENV = "WYSTAN_STAGE_6_7E_MODEL"
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5-5"
 
 #: Bumped whenever the prompt / verdict schema / verifier semantics change
 #: in a way that would make a cached verdict batch stale.

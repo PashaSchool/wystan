@@ -72,7 +72,7 @@ DEFAULT_MAX_WORKERS = max(
 # higher per-call cost/latency is bounded, and Sonnet partitions a touch
 # cleaner than Haiku (+1.5pp precision measured on cal.com). Override via the
 # ``model`` kwarg for a cheaper Haiku run.
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5-5"
 DEFAULT_MAX_TOKENS = 1100
 
 # Mega-UF gate (structural, scale-invariant — see rule-no-magic-tuning). A UF

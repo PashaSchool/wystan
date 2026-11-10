@@ -5610,6 +5610,31 @@ def run_finalize_phase(
             f"generic-container demote failed ({exc}); no demote"
         )
 
+    # ── Unnameable product features leave the product layer ────────────
+    # A product feature with no product-language name (a package, a
+    # framework, an implementation verb) is removed here, before the
+    # line-count rollups, and its developer features join the product
+    # feature their code lives under or become unowned. User flows are
+    # judged by the last pass, when their names are final.
+    try:
+        from wystan.pipeline_v2.product_language_names import (
+            name_product_layer as _name_features_early,
+        )
+        _unf_tele = _name_features_early(
+            features, product_features, user_flows, list(bipartite.flows),
+            ctx=ctx, routes_index=lineage_result.routes_index, name_flows=False,
+            llm={
+                "model_id": model_id, "cost_tracker": tracker,
+                "cache": getattr(ctx, "cache_backend", None),
+                "llm_health": llm_health,
+            },
+        )
+        scan_meta["unnameable_features_removed"] = _unf_tele["features_removed"]
+    except Exception as exc:  # noqa: BLE001 — never break a scan
+        scan_meta.setdefault("warnings", []).append(
+            f"unnameable-feature removal failed ({exc}); none removed"
+        )
+
     # ── B97 — emission HARD gate (WYSTAN_EMISSION_HARD_GATE, default
     # ON since flip-pack #16; =0 kill-switch) — the LAST barrier before
     # census + Stage 7 ─────────────────────────────────────────────────

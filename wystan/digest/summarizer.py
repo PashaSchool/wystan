@@ -10,6 +10,7 @@ import logging
 import os
 
 logger = logging.getLogger(__name__)
+from wystan.llm.cost import response_text
 from wystan.llm.model_gateway import resolve_model as gateway_model
 
 _MODEL = "claude-haiku-4-5-20251001"
@@ -103,7 +104,7 @@ def summarize_with_llm(
             messages=[{"role": "user", "content": prompt}],
         )
 
-        text = response.content[0].text.strip()
+        text = response_text(response).strip()
         # Strip markdown code block if present
         if text.startswith("```"):
             text = text.split("\n", 1)[1]
