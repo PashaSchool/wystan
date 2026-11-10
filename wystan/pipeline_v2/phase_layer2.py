@@ -117,7 +117,7 @@ def run_layer2_phase(
     # ── Stage 8 — marketing-grounded Layer 2 clusterer (Sprint E1) ──
     # Refines Stage 6.5's deterministic ``product_features`` using the
     # maintainer's PUBLIC marketing taxonomy + a single Haiku call.
-    # Cascade: customer-yaml (passthrough) → marketing+haiku → fallback
+    # Cascade: marketing+haiku → fallback
     # to Stage 6.5 result. Marketing fetch + Haiku call only fire when
     # the Anthropic SDK is configured (ANTHROPIC_API_KEY set). NO
     # README reads — homepage discovery is package.json#homepage only.

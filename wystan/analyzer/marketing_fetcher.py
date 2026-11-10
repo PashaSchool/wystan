@@ -404,7 +404,7 @@ def _discover_from_github_metadata(repo_path: Path) -> str | None:
 
 
 _USER_AGENT = (
-    "Wystan/Layer2-Clusterer (+https://wysten.ai) "
+    "Wystan/Layer2-Clusterer (+https://wystan.ai) "
     "compatible scraper"
 )
 

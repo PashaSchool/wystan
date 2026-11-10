@@ -23,8 +23,7 @@ Matching channels, in trust order (a > b > c):
 
 Cascade position: in-repo nav taxonomy ranks ABOVE the external
 marketing taxonomy (the nav is the author's product framing, versioned
-with the code) and BELOW the customer's explicit ``wystan.yaml``
-override. Wiring:
+with the code). Wiring:
 
   * Stage 6.5 — new ``nav-taxonomy`` rule (confidence 0.9 — above
     dep-anchor 0.75 and the 0.85 domain-noun ceiling; see

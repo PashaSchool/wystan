@@ -2366,6 +2366,35 @@ def run_finalize_phase(
                     feature=None,
                 )
 
+    # ── RPC router re-home ─────────────────────────────────────────
+    # Developer features still without a product feature (the transport
+    # package's routers above all) are attached to the product feature
+    # whose flows call their procedures, by the ``rpc`` edges flow
+    # expansion recorded. Before the 6.97 LoC passes, so the moved
+    # membership is counted normally.
+    from wystan.pipeline_v2.rpc_router_rehome import rehome_rpc_called_devs
+    with StageLogger(run_dir, 6, "rpc_router_rehome") as log_rpc:
+        try:
+            rpc_tele = rehome_rpc_called_devs(
+                features, product_features, list(bipartite.flows),
+            )
+            scan_meta["rpc_router_rehome"] = rpc_tele
+            log_rpc.info(
+                "rpc_router_rehome: checked=%d rehomed=%d tied=%d" % (
+                    rpc_tele["checked"], rpc_tele["rehomed"], rpc_tele["tied"],
+                ),
+                feature=None,
+            )
+            write_stage_artifact(
+                ctx.repo_path, stage_index=6, stage_name="rpc_router_rehome",
+                payload=dict(rpc_tele), run_dir=run_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — never break a scan
+            scan_meta.setdefault("warnings", []).append(
+                f"rpc-router-rehome failed ({exc}); features left unowned"
+            )
+            log_rpc.info(f"rpc_router_rehome: FAILED ({exc})", feature=None)
+
     # ── Stage 6.986 — mega-PF nav-area journey re-home + mint (B24) ──
     # A board-dominating umbrella PF (>=25% of homed journeys) whose
     # journeys strict-majority-cluster into >=3 distinct nav-area route
@@ -6004,6 +6033,43 @@ def run_finalize_phase(
         scan_meta.setdefault("warnings", []).append(
             f"synth-conversion failed ({exc}); synthesized tags left as-is"
         )
+
+    # ── Product-language names (last writer of the product display) ────
+    # Product features and user flows are renamed from the text the product
+    # shows its users. Runs after every pass that renames, regrades or
+    # removes product rows, so it names the rows that are emitted.
+    from wystan.pipeline_v2.product_language_names import name_product_layer
+    with StageLogger(run_dir, 7, "product_language_names") as log_pln:
+        try:
+            pln_tele = name_product_layer(
+                features, product_features, user_flows, list(bipartite.flows),
+                ctx=ctx,
+                routes_index=lineage_result.routes_index,
+                llm={
+                    "model_id": model_id, "cost_tracker": tracker,
+                    "cache": getattr(ctx, "cache_backend", None),
+                    "llm_health": llm_health,
+                },
+            )
+            scan_meta["product_language_names"] = pln_tele
+            # The writer's calls happen after the full-bill refresh above.
+            scan_meta["cost_usd"] = round(tracker.total_cost_usd, 4)
+            scan_meta["calls"] = tracker.call_count
+            log_pln.info(
+                "product_language_names: pf %s, uf %s" % (
+                    pln_tele["product_features"], pln_tele["user_flows"],
+                ),
+                feature=None,
+            )
+            write_stage_artifact(
+                ctx.repo_path, stage_index=7, stage_name="product_language_names",
+                payload=dict(pln_tele), run_dir=run_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — naming never breaks a scan
+            scan_meta.setdefault("warnings", []).append(
+                f"product-language-names failed ({exc}); names left as-is"
+            )
+            log_pln.info(f"product_language_names: FAILED ({exc})", feature=None)
 
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import

@@ -60,7 +60,7 @@ from wystan.pipeline_v2.flow_expansion.confidence import (
 )
 from wystan.pipeline_v2.flow_expansion.span_recovery import (
     SpanRecoveryConfig,
-    recover_callee_symbols,
+    resolve_import_spans,
     resolve_reexport_entry,
 )
 from wystan.pipeline_v2.flow_expansion.decorator_edges import (
@@ -218,6 +218,9 @@ class CallNode:
     symbol: str | None
     lines: tuple[int, int] | None
     depth: int
+    # Set only when the node's span is coarser than one resolved symbol (a
+    # whole file or a whole class); the expander's default applies otherwise.
+    confidence: str | None = None
 
 
 @dataclass(frozen=True)
@@ -837,89 +840,57 @@ def build_call_graph(
                 ),
             ))
 
-        # Emit import edges to any imported file we DIDN'T resolve to a
-        # symbol — that gives the graph file-level reach even when we
-        # can't pin down the callee. Always add the file-node so the
-        # graph has structure to walk on the next iteration.
-        for cf in imported_files:
-            file_node_id = _node_id(cf, None)
-            # Skip if any callee from this file was already covered
-            # via a call edge AND a node entry — avoids redundant
-            # file-node duplication.
-            already_via_call = any(
-                k[0] == cf for k in callees_by_symbol
+        # Every imported file the caller uses is measured: the symbols it
+        # references become nodes with their own spans. An import the caller
+        # never references adds nothing; a reference that cannot be tied to
+        # one symbol adds a single whole-file span. No node is left without
+        # lines (see span_recovery.resolve_import_spans).
+        cur_sig = rctx.signatures.get(current.file)
+        cur_source = (cur_sig.source if cur_sig else "") or ""
+        if current.lines is not None and cur_source:
+            body = "\n".join(
+                cur_source.splitlines()[current.lines[0] - 1: current.lines[1]],
             )
-            if already_via_call:
+        else:
+            body = cur_source
+        for cf in imported_files:
+            if cf == current.file or not span_recovery.callee:
                 continue
-
-            # B82 Form B — named-import callee span recovery. Before falling
-            # back to a null-span file-node, attribute the SPECIFIC imported
-            # symbol's real body range(s) (never the whole file). Fires only
-            # under the flag; the file-node fallback is preserved whenever no
-            # binding resolves (the flag never deletes the fallback path).
-            if span_recovery.callee:
-                src_sig_cur = rctx.signatures.get(current.file)
-                recovered = recover_callee_symbols(
-                    rctx, current.file, src_sig_cur, cf,
-                )
-                if recovered:
-                    emitted_any = False
-                    for sym, (s_line, e_line) in recovered:
-                        if len(nodes) >= max_nodes:
-                            dropped += 1
-                            truncated = True
-                            break
-                        sym_node_id = _node_id(cf, sym)
-                        if sym_node_id not in seen_ids:
-                            seen_ids.add(sym_node_id)
-                            sym_node = CallNode(
-                                id=sym_node_id,
-                                file=cf,
-                                symbol=sym,
-                                lines=(s_line, e_line),
-                                depth=current.depth + 1,
-                            )
-                            nodes.append(sym_node)
-                            queue.append(sym_node)
-                            depth_reached = max(depth_reached, sym_node.depth)
-                            recovered_callee_keys.append(sym_node_id)
-                        edges.append(CallEdge(
-                            from_id=current.id,
-                            to_id=sym_node_id,
-                            kind="call",
-                            confidence="medium",
-                        ))
-                        emitted_any = True
-                    if emitted_any:
-                        # Symbol nodes subsume the file-node: the null-span
-                        # placeholder is REPLACED by symbol-bounded spans.
-                        recovered_file_nodes += 1
-                        continue
-
-            if len(nodes) >= max_nodes:
-                dropped += 1
-                truncated = True
-                continue
-            if file_node_id not in seen_ids:
-                seen_ids.add(file_node_id)
-                file_node = CallNode(
-                    id=file_node_id,
-                    file=cf,
-                    symbol=None,
-                    lines=None,
-                    depth=current.depth + 1,
-                )
-                nodes.append(file_node)
-                queue.append(file_node)
-                depth_reached = max(depth_reached, file_node.depth)
-            edges.append(CallEdge(
-                from_id=current.id,
-                to_id=file_node_id,
-                kind="import",
-                confidence=confidence_for_import(
-                    resolver_used="static",
-                ),
-            ))
+            taken = {k[1] for k in callees_by_symbol if k[0] == cf}
+            spans = resolve_import_spans(
+                rctx, current.file, cur_sig, body, cf, taken,
+            )
+            emitted_symbol = False
+            for span in spans:
+                if len(nodes) >= max_nodes:
+                    dropped += 1
+                    truncated = True
+                    continue
+                span_node_id = _node_id(cf, span.symbol)
+                if span_node_id not in seen_ids:
+                    seen_ids.add(span_node_id)
+                    span_node = CallNode(
+                        id=span_node_id,
+                        file=cf,
+                        symbol=span.symbol,
+                        lines=span.lines,
+                        depth=current.depth + 1,
+                        confidence=span.confidence,
+                    )
+                    nodes.append(span_node)
+                    queue.append(span_node)
+                    depth_reached = max(depth_reached, span_node.depth)
+                    if span.symbol is not None:
+                        recovered_callee_keys.append(span_node_id)
+                edges.append(CallEdge(
+                    from_id=current.id,
+                    to_id=span_node_id,
+                    kind="call" if span.symbol is not None else "import",
+                    confidence=span.confidence,
+                ))
+                emitted_symbol = emitted_symbol or span.symbol is not None
+            if emitted_symbol:
+                recovered_file_nodes += 1
 
         # (c) Decorator-support edges (flag-gated, Python-only). The decorated
         # method → decorator-implementation edge: for each cross-module user-

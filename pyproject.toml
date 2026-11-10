@@ -73,7 +73,7 @@ ast = [
 ]
 
 [project.urls]
-Homepage = "https://wysten.ai"
+Homepage = "https://wystan.ai"
 Repository = "https://github.com/PashaSchool/wystan"
 Issues = "https://github.com/PashaSchool/wystan/issues"
 

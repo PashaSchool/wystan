@@ -37,10 +37,12 @@ No LLM. No network. Pure pattern matching on ``ctx.tracked_files``.
 from __future__ import annotations
 
 from collections import defaultdict
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from wystan.analyzer.validation import is_test_file
-from wystan.pipeline_v2.data import load_stack_yaml
+from wystan.pipeline_v2.data import load_stack_yaml, load_yaml
+from wystan.pipeline_v2.indexes import flat_route_static_segments
 from wystan.pipeline_v2.extractors._util import (
     is_noise,
     posix,
@@ -135,6 +137,12 @@ def route_groups_of(path: str) -> tuple[str, ...]:
     return tuple(sorted(groups))
 
 
+@lru_cache(maxsize=1)
+def _tenant_scope_words() -> frozenset[str]:
+    vocab = load_yaml("spine-anchor-vocab.yaml")
+    return frozenset(str(w).lower() for w in (vocab.get("tenant_scope_segments") or []))
+
+
 def _first_meaningful_segment(segments: list[str]) -> str | None:
     """Return the first segment that is not noise / not a route group.
 
@@ -194,6 +202,17 @@ def _emit_for_fs_routing(
         if rest is None:
             continue
         if not any(p.endswith(suf) for suf in page_suffixes):
+            continue
+
+        # Flat-file routing writes the URL in the file name
+        # (``t.$teamUrl+/documents.$id.edit.tsx`` → ``/t/:teamUrl/documents/
+        # :id/edit``): the feature is the first capability segment of that
+        # URL, not the folder that happens to hold the file.
+        flat_segments = flat_route_static_segments(p, _tenant_scope_words())
+        if flat_segments is not None:
+            capability = next((s for s in flat_segments if not is_noise(s)), None)
+            if capability is not None and slugify(capability):
+                buckets[slugify(capability)].append(p)
             continue
 
         # Split rest into URL segments (directories) + filename. App

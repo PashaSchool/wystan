@@ -95,9 +95,10 @@ metric WITHOUT ``metrics_abstained`` (or without a ledger row) is a
 defect, not an abstain.
 
 SACRED: display/metric fields only. Membership (``paths`` /
-``member_files`` / ``flows`` / UF homes), ``loc``, ``hotspot_files``
-and the ``history`` series are never touched — the gate decides
-whether a NUMBER may ship, never who owns what.
+``member_files`` / ``flows`` / UF homes), ``loc`` and ``hotspot_files``
+are never touched — the gate decides whether a NUMBER may ship, never
+who owns what. ``history`` is NOT in that list: it is nulled together
+with the metric family (see ``ABSTAINED_NULL_FIELDS``).
 
 Kill-switch: ``WYSTAN_METRICS_OWNERSHIP_GATE`` — default **ON**
 (flip #29, 2026-08-06, warden CLEAR #29 on c16/c17, KS 64; unset ≡
@@ -364,8 +365,9 @@ def _was(row: Any) -> dict[str, Any]:
 def _apply_abstain(row: Any, reason: str) -> None:
     """Null the measured family IN PLACE + stamp the machine-readable reason.
 
-    Membership, ``loc``, ``hotspot_files`` and ``history`` are untouched
-    by construction — this function only writes the metric fields.
+    Membership, ``loc`` and ``hotspot_files`` are untouched by
+    construction — this function only writes ``ABSTAINED_NULL_FIELDS``
+    (the metric family and ``history``), ``authors`` and the stamps.
     """
     for field in ABSTAINED_NULL_FIELDS:
         _set_attr(row, field, None)

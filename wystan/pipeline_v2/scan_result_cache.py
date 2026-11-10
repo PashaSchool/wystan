@@ -1775,6 +1775,11 @@ ENV_OUTPUT_FLAGS = (
     # honest there). Shapes product_features[] + user_flows[] (6.7d goes
     # free-gen instead of anchored) on boards with pf_minted==0.
     "WYSTAN_MINT_EMPTY_HONEST",
+    # single-primary-owner (2026-11-10, default OFF — append with no bump): a
+    # file a Stage 2 loser keeps through zero-path protection becomes a
+    # non-primary ``member_files`` entry naming the winner. Shapes
+    # features[].member_files[].primary + evidence.
+    "WYSTAN_SINGLE_PRIMARY_OWNER",
     # C-B / fixb106 (2026-08-04, default OFF — append with no bump): the Law C
     # verb:repo-umbrella-lead rung — a generic (out-of-family) UF lead
     # grounded by the repo's OWN flow-name LEAD lexicon at a
@@ -3656,7 +3661,29 @@ ENV_OUTPUT_FLAGS = (
 #:
 #: PACK #46 CLOSED: 3 flipped flags under ONE KS81 bump + the promotion of
 #: 'js'/'rsc' into known_acronyms (the pack's only rider outside a kill-switch).
-KEY_SCHEMA_VERSION = 81
+#:
+#: KS82 (2026-11-10): the ``wystan.yaml`` customer rule is removed from
+#: Stage 6.5 and Stage 8. ``scan_meta.product_clusterer_votes_cast`` loses
+#: its ``customer-yaml`` key on every scan, so cached results are invalidated.
+#:
+#: KS83 (2026-11-10): flow expansion measures every node (no span-less file
+#: nodes) and links tRPC client calls to their procedures with ``rpc`` edges.
+#: Flow nodes, edges, line ranges and LoC change on every scan.
+#:
+#: KS84 (2026-11-10): flat-file route grammar (URL read from the file name),
+#: addressing segments, container and internal route anchors barred, RPC
+#: routers attached to the product features that call them. Developer and
+#: product feature sets change on flat-routed and tRPC repositories.
+#:
+#: KS85 (2026-11-10): product features and user flows are named in product
+#: language from user-visible text. ``display_name`` of product features,
+#: ``name`` of user flows, and their ``name_confidence`` / ``name_evidence``
+#: change on every scan.
+#:
+#: KS86 (2026-11-10): Stage 3 offers only behaviour symbols as flow candidates
+#: and never anchors a flow on a declaration (schema, type, constant table).
+#: The Stage 3 prompt, the flow set and flow entry points change.
+KEY_SCHEMA_VERSION = 86
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

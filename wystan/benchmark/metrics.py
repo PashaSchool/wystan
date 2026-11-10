@@ -79,8 +79,7 @@ def _name_matches(expected: str, detected: str) -> bool:
          names from matching unrelated detected names that happen to
          contain that one token (e.g. expected ``email`` would
          otherwise match unrelated ``ee/organisation-email-domains``).
-         For single-token canonicals the user must add explicit
-         aliases in ``.wystan.yaml``.
+         Single-token canonicals therefore never match by containment.
     """
     e = _normalize(expected)
     d = _normalize(detected)
