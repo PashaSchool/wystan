@@ -23,6 +23,12 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   (`wystan/analyzer/repo_config.py`, `wystan/analyzer/auto_alias_discoverer.py`).
   The scan pipeline never read that file.
 
+### Added
+- `WYSTAN_SINGLE_PRIMARY_OWNER` (default OFF). When several features keep the
+  same file through Stage 2 zero-path protection, only the conflict winner
+  keeps `MemberFile.primary=True` for it; the others keep the path with
+  `primary=False` and an `evidence` naming the winner.
+
 ## [0.0.2] – 2026-10-30
 
 ### Fixed

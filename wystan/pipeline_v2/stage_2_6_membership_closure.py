@@ -770,13 +770,18 @@ def run_membership_closure(
     # ── Anchor provenance for EVERY deterministic feature ────────────
     for f in features:
         existing = {m.path for m in f.member_files}
+        contested_owner = getattr(f, "contested_owner", None) or {}
         for p in f.paths:
             if p in existing:
                 continue
+            evidence = f"stage-2 anchor (sources={','.join(f.sources)})"
+            winner = contested_owner.get(p)
+            if winner is not None:
+                # WYSTAN_SINGLE_PRIMARY_OWNER — the file stays in ``paths``
+                # (zero-path protection) but the primary claim is the winner's.
+                evidence += f"; shared file, primary={winner}"
             f.member_files.append(_member_file(
-                p, "anchor", 1.0,
-                f"stage-2 anchor (sources={','.join(f.sources)})",
-                True,
+                p, "anchor", 1.0, evidence, winner is None,
             ))
 
     # Product-Spine §4.1 — concern facets never seed the import closure:

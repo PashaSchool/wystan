@@ -1775,6 +1775,11 @@ ENV_OUTPUT_FLAGS = (
     # honest there). Shapes product_features[] + user_flows[] (6.7d goes
     # free-gen instead of anchored) on boards with pf_minted==0.
     "WYSTAN_MINT_EMPTY_HONEST",
+    # single-primary-owner (2026-11-10, default OFF — append with no bump): a
+    # file a Stage 2 loser keeps through zero-path protection becomes a
+    # non-primary ``member_files`` entry naming the winner. Shapes
+    # features[].member_files[].primary + evidence.
+    "WYSTAN_SINGLE_PRIMARY_OWNER",
     # C-B / fixb106 (2026-08-04, default OFF — append with no bump): the Law C
     # verb:repo-umbrella-lead rung — a generic (out-of-family) UF lead
     # grounded by the repo's OWN flow-name LEAD lexicon at a
