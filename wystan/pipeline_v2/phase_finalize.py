@@ -1630,6 +1630,23 @@ def run_finalize_phase(
         if _cli_groups_tele.get("binaries") or _cli_groups_tele.get("error"):
             scan_meta["cli_command_groups"] = _cli_groups_tele
 
+        # ── Operation groups are product features ─────────────────────
+        # A schema that composes its operations into groups (``Checkout``,
+        # ``Order``) names the product's features. Takes only code nobody
+        # owns.
+        try:
+            from wystan.pipeline_v2.entry_group_features import mint_entry_group_features
+            from wystan.pipeline_v2.entry_points.graphql_schema import graphql_entries
+
+            _op_groups_tele = mint_entry_group_features(
+                graphql_entries(ctx), product_features,
+                [f for f in features if getattr(f, "layer", None) != "product"],
+                user_flows, list(bipartite.flows))
+        except Exception as exc:  # noqa: BLE001 — additive mint is best-effort
+            _op_groups_tele = {"error": str(exc)[:200]}
+        if _op_groups_tele.get("groups") or _op_groups_tele.get("error"):
+            scan_meta["entry_group_features"] = _op_groups_tele
+
     # ── W3.1 D6 — route-group journey recall seeds (BOTH paths) ─────────
     # A >= 2-route product group no UF touches (tracecat tables/chat, the
     # comp Auditor class, supabase studio holes — validator I24) gets ONE

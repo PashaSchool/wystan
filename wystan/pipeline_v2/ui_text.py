@@ -166,13 +166,32 @@ def _flatten_catalog(node: object, prefix: str, out: dict[str, str]) -> None:
         out.setdefault(prefix, node)
 
 
+# A product's whole UI vocabulary sits in one catalog file, which is far
+# larger than a source file.
+_MAX_CATALOG_BYTES = 8 * 1024 * 1024
+
+
+def _read_catalog(repo_path: Path, rel: str) -> str | None:
+    from wystan.analyzer.safe_read import path_within_repo
+
+    path = repo_path / rel
+    if not path_within_repo(path, repo_path):
+        return None
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_CATALOG_BYTES:
+            return None
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 def _load_catalog(repo_path: Path, all_files: Iterable[str]) -> dict[str, str]:
     """``dotted.key -> English text`` from the default-locale JSON catalogs."""
     catalog: dict[str, str] = {}
     for rel in sorted(set(all_files)):
         if not rel.lower().endswith(".json") or not _is_i18n_catalog(rel):
             continue
-        raw = _read_text(repo_path, rel)
+        raw = _read_catalog(repo_path, rel)
         try:
             parsed = json.loads(raw) if raw else None
         except ValueError:

@@ -1593,6 +1593,23 @@ def _anchor_in_instrument_dirs(
     return bool(units) and all(_inside(u) for u in units)
 
 
+def _declared_entry_files(ctx: Any) -> frozenset[str]:
+    """Files in which the product registers a UI action. Empty on any
+    failure.
+
+    Schema operations are not included: a schema that groups its operations
+    states its own features, and ``entry_group_features`` builds them from
+    code nobody owns. Lifting the bar for them here would hand that code to
+    package anchors first (measured on saleor: ``order``, ``discount`` and
+    ``payment`` all landed in one feature called "Attribute")."""
+    try:
+        from wystan.pipeline_v2.entry_points.actions import action_entries
+
+        return frozenset(entry.file for entry in action_entries(ctx) if entry.file)
+    except Exception:  # noqa: BLE001 — a report-grade input never breaks the mint
+        return frozenset()
+
+
 def _mint_bar(
     anchor: SpineAnchor,
     winners: list["Feature"],
@@ -1605,6 +1622,7 @@ def _mint_bar(
     plumbing_keys: frozenset[str] = frozenset(),
     product_right_gate: bool = False,
     sacred_dirs: frozenset[str] = frozenset(),
+    entry_files: frozenset[str] = frozenset(),
 ) -> str | None:
     """``None`` when the anchor may mint, else the bar reason."""
     if not winners:
@@ -1713,7 +1731,14 @@ def _mint_bar(
         # itself. A structural anchor with no route/page file on a headless
         # repo is innards; a CLI surface is its own rung (an honest scope).
         if anchor.source != "route" and not anchor.page_route_files:
-            return "headless_internal_package"
+            # A package is not innards when the product declares, in its
+            # files, something a user addresses that is not a route: a
+            # registered UI action, a schema operation.
+            held: set[str] = set(anchor.files)
+            for w in winners:
+                held.update(anchor.matched_set(owned_paths_of(w)))
+            if not (held & entry_files):
+                return "headless_internal_package"
     # PYPKG THINNESS (W2b.1 fix b): a package-domain anchor with no flow
     # evidence and fewer than two code files is structure, not a
     # capability (onyx `redis`/`httpx` wrapper-package class).
@@ -2207,6 +2232,7 @@ def run_anchored_mint(
         str(t).strip().lower()
         for t in (vocab.get("unit_root_artifact_tokens") or ())
         if str(t).strip()) if _annex_on else frozenset()
+    _entry_files: frozenset[str] = _declared_entry_files(ctx)
     bar_by_anchor: dict[str, str | None] = {}
     for cid in sorted(winners_by_anchor):
         a = anchor_by_id[cid]
@@ -2214,7 +2240,8 @@ def run_anchored_mint(
             a, winners_by_anchor[cid], flow_entries, repo_has_pages,
             code_exts, mint_repo_root, loc_cache,
             instrument_dirs=instrument_dirs, plumbing_keys=plumbing_keys,
-            product_right_gate=_pr_gate_on, sacred_dirs=_sacred_dirs)
+            product_right_gate=_pr_gate_on, sacred_dirs=_sacred_dirs,
+            entry_files=_entry_files)
     # Hub cores mint only when ≥ 1 sibling vendor minted (amendment §2:
     # a core exists relative to its children).
     minted_vendor_hubs = {
@@ -2558,7 +2585,8 @@ def run_anchored_mint(
                         mint_repo_root, loc_cache,
                         instrument_dirs=instrument_dirs,
                         plumbing_keys=plumbing_keys,
-                        product_right_gate=_pr_gate_on, sacred_dirs=_sacred_dirs)
+                        product_right_gate=_pr_gate_on, sacred_dirs=_sacred_dirs,
+                        entry_files=_entry_files)
         if bar is not None:
             return None
         # B58 Seg B — the on-demand mint honours the dev-artifact-unit
