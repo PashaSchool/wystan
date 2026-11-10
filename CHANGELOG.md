@@ -24,6 +24,18 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   The scan pipeline never read that file.
 
 ### Changed
+- **Entry points, and command-line tools get a product layer.** A new
+  `entry_points` package records what a user can address (a page, a command)
+  with the name its author gave it and its declared parent;
+  `scan_meta.entry_points` reports them by kind. For command-line tools: a Go
+  binary owns the commands its main package imports (the `cmd/<bin>` +
+  `pkg/cmd` layout was rejected before); a `cli-tool` unit with detected
+  commands keeps its user flows; each command group becomes a product feature
+  under the binary's, named by its own description ("Manage pull requests"),
+  with `parent_product_feature_id` pointing at the binary's feature; the
+  binary's feature takes the root command's description. Names an author
+  wrote are no longer judged or removed by the code-name laws.
+  `KEY_SCHEMA_VERSION` is 88.
 - **A product feature is named by the product, and has a page.** The name
   of a product feature is read from its top page (`authored_names.py`): the
   navigation label that links to it, then the page title, then the first

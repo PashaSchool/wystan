@@ -3688,7 +3688,13 @@ ENV_OUTPUT_FLAGS = (
 #: (navigation label, page title, heading, URL word); a product feature with
 #: no page and an unnameable user flow leave the product layer; the default
 #: Sonnet is claude-sonnet-5-5.
-KEY_SCHEMA_VERSION = 87
+#:
+#: KS88 (2026-11-10): entry points. A Go binary owns the commands its main
+#: package imports; a command-line tool with detected commands keeps its
+#: user flows; command groups are product features under the binary's, named
+#: by their own descriptions; author-written names are not judged by the
+#: code-name laws; ``scan_meta.entry_points`` is reported.
+KEY_SCHEMA_VERSION = 88
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

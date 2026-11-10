@@ -226,6 +226,10 @@ class _Namer:
             return "a sibling already has this name"
         return None
 
+    def reserve(self, group: str, names: Iterable[str]) -> None:
+        """Names already in use that this namer must not hand out again."""
+        self._taken.setdefault(group, set()).update(name.lower() for name in names)
+
     def _take(self, target: NameTarget, name: str) -> None:
         self._taken.setdefault(target.group, set()).add(name.lower())
 
@@ -450,6 +454,12 @@ def run_product_language_names(
 ) -> dict[str, Any]:
     """Rename product features and user flows in place; returns telemetry."""
     nav_pairs = list(nav_pairs)
+    # A name the author wrote (a command's description) is not ours to judge
+    # or replace: the laws exist to catch names derived from code.
+    authored_features = [f for f in product_features if _is_author_named(f)]
+    product_features = [f for f in product_features if not _is_author_named(f)]
+    authored_flows = [u for u in user_flows if _is_author_named(u)]
+    user_flows = [u for u in user_flows if not _is_author_named(u)]
     ctx = build_law_context(index, brand_words)
     routes_by_file = {
         str(row.get("file")): str(row.get("pattern"))
@@ -482,6 +492,7 @@ def run_product_language_names(
         target.members = sorted(members_of.get(feature.name, []))
 
     feature_namer = _Namer(ctx, writer)
+    feature_namer.reserve("pf", (f.display_name or f.name for f in authored_features))
     feature_namer.run(feature_targets, {})
 
     flows_of: dict[str, list[Any]] = {}
@@ -500,6 +511,7 @@ def run_product_language_names(
     )
     return {
         "keyed": writer is not None,
+        "author_named": {"product_features": len(authored_features), "user_flows": len(authored_flows)},
         "ui_text_files": len(index.by_file),
         "product_features": feature_namer.telemetry,
         "user_flows": flow_namer.telemetry,
@@ -551,6 +563,7 @@ def name_product_layer(
         files_without_ui=route_files_without_ui(ctx.repo_path, routes_index),
         writer=build_name_writer(**llm),
     )
+    telemetry["entry_points"] = _entry_point_report(ctx, routes_index, index)
     # What has no product-language name is not shown as product.
     telemetry["features_removed"] = demote_unnameable_features(
         product_features, developer, user_flows, flows,
@@ -606,3 +619,36 @@ def route_files_without_ui(repo_path: Any, routes_index: list[dict[str, Any]]) -
         if text is not None and not _DEFAULT_EXPORT.search(text):
             silent.append(file)
     return silent
+
+
+_AUTHOR_EVIDENCE = frozenset({"authored:description", "cli-declared"})
+
+
+def _is_author_named(item: Any) -> bool:
+    """True when ``item`` already wears a name its author declared in code:
+    a command's own description."""
+    return bool(_AUTHOR_EVIDENCE & set(getattr(item, "name_evidence", None) or ()))
+
+
+def _entry_point_report(ctx: Any, routes_index: list[dict[str, Any]], index: UiTextIndex) -> dict[str, Any]:
+    """What the product declares a user can address, by kind. A report only:
+    nothing here changes the product layer."""
+    from wystan.pipeline_v2.entry_points import collect_entry_points, entry_report
+    from wystan.pipeline_v2.entry_points.commands import command_entries
+    from wystan.pipeline_v2.entry_points.pages import page_entries
+
+    laws = build_law_context(index, _brand_words(ctx.repo_path))
+
+    def pages() -> list[Any]:
+        return page_entries(
+            routes_index, index, _nav_pairs(ctx, index),
+            structural_words=laws.structural_words, brand_words=laws.brand_words,
+            scope_words=laws.listed("tenant_scope_segments"),
+            files_without_ui=frozenset(route_files_without_ui(ctx.repo_path, routes_index)),
+        )
+
+    def commands() -> list[Any]:
+        return command_entries(ctx)
+
+    entries, errors = collect_entry_points([pages, commands])
+    return entry_report(entries, errors)
