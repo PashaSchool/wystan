@@ -86,3 +86,6 @@ benchmarks/
 feature-map-*.json
 .wystan/
 .wystan/feature-map.json
+
+# OpenSpec working docs (local only, never committed)
+/openspec/
