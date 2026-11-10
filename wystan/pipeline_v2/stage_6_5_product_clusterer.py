@@ -16,11 +16,6 @@ Groups Layer 1 ``developer_features`` into customer-facing
       Confidence 0.75 — higher than workspace because a dep import is
       a near-binary signal of capability presence.
 
-  Rule 3 — customer YAML override
-      If the scanned repo has a ``wystan.yaml`` at its root with a
-      ``product_features:`` block, that mapping wins absolutely
-      (confidence 1.0) and overrides any earlier rule decision.
-
 Conflict resolution
 ===================
 
@@ -93,10 +88,8 @@ _CONF_DEP_ANCHOR = 0.75
 # In-repo nav taxonomy — the vendor's OWN nav/sidebar + route hierarchy
 # (see ``nav_taxonomy.py``). Above dep-anchor (0.75) AND above the
 # domain-noun ceiling (0.85): an explicit vendor-declared label beats
-# every inferred one. Below customer-yaml (1.0) — the customer's
-# explicit override is absolute.
+# every inferred one.
 _CONF_NAV_TAXONOMY = 0.9
-_CONF_CUSTOMER_YAML = 1.0
 
 # When multiple dep anchors fire on the same dev feature, the
 # dominant anchor wins iff its path share is at least this multiple
@@ -117,7 +110,7 @@ _AMBIGUOUS_LEAD_THRESHOLD = 2.0
 # ``rule-no-repo-specific-paths``).
 #
 # This filter applies ONLY to the workspace rule (Rule 1). The
-# dep-anchor rule (Rule 2) and customer-yaml rule (Rule 3) are NOT
+# dep-anchor rule (Rule 2) is NOT
 # affected: a repo that imports a Database dep still gets a
 # legitimate "Database" product feature via Rule 2 even though
 # "Database" is in this set — what gets filtered is naming a
@@ -220,7 +213,7 @@ class ProductFeature:
     name: str                                  # canonical product label
     developer_feature_names: tuple[str, ...]   # which Layer 1 features fold in
     anchor_signals: tuple[str, ...]            # what triggered the clustering
-    source: str                                # "rule:workspace" / "rule:dep-anchor" / "rule:customer-yaml" / "rule:workspace+rule:dep-anchor"
+    source: str                                # "rule:workspace" / "rule:dep-anchor" / "rule:workspace+rule:dep-anchor"
     confidence: float                          # 0..1 — higher when multiple rules agree
 
 
@@ -232,7 +225,7 @@ class _Vote:
     """
 
     product_label: str
-    rule: str                                  # "workspace" / "dep-anchor" / "customer-yaml"
+    rule: str                                  # "workspace" / "dep-anchor" / "nav-taxonomy"
     confidence: float
     anchor_signal: str                         # human-readable origin (workspace path, dep name, etc.)
     weight: float = 1.0                        # path-share within feature for dep-anchor ties
@@ -260,7 +253,7 @@ def _load_dep_anchors() -> list[tuple[tuple[str, ...], str]]:
     """Read ``eval/dependency-anchors.yaml`` once, return the parsed map.
 
     Returns ``[]`` on any parse / file error — the clusterer degrades
-    gracefully to Rule 1 + Rule 3 only.
+    gracefully to Rule 1 only.
 
     Side effect: populates ``_DEP_ALIASES_CACHE`` with per-label name
     alias substrings for the Sprint Rails H3 semantic-name guard.
@@ -732,77 +725,6 @@ def _apply_nav_taxonomy_rule(
     return nav_map, telemetry
 
 
-# ── Rule 3 — customer YAML override ─────────────────────────────────────
-
-
-def _load_customer_overrides(repo_path: Path) -> dict[str, str]:
-    """Read ``<repo>/wystan.yaml`` if present.
-
-    Expected shape:
-        product_features:
-          - name: "HTTP Uptime Monitoring"
-            includes: [checker, monitors, status-fetcher]
-          - name: "Status Pages"
-            includes: [status-page, public, badge]
-
-    Returns ``{developer_feature_name: product_label}`` mapping (a
-    developer feature can only override into a SINGLE product label;
-    customer override takes precedence over rules 1+2 conflict logic).
-    """
-    cfg_path = repo_path / "wystan.yaml"
-    if not cfg_path.is_file():
-        return {}
-    try:
-        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        logger.warning(
-            "stage_6_5_product_clusterer: cannot parse %s (%s) — "
-            "Rule 3 (customer-yaml) skipped",
-            cfg_path, exc,
-        )
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    entries = raw.get("product_features") or []
-    if not isinstance(entries, list):
-        return {}
-    mapping: dict[str, str] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        label = entry.get("name")
-        includes = entry.get("includes") or []
-        if not isinstance(label, str) or not isinstance(includes, list):
-            continue
-        for inc in includes:
-            if isinstance(inc, str):
-                mapping[inc] = label.strip()
-    return mapping
-
-
-def _apply_customer_yaml_rule(
-    ctx: "ScanContext",
-    state: _ClustererState,
-) -> int:
-    """Override any prior votes with the customer's explicit mapping."""
-    overrides = _load_customer_overrides(ctx.repo_path)
-    if not overrides:
-        return 0
-    for dev_name, label in overrides.items():
-        # Customer rule fully OWNS the dev_name → product mapping.
-        # Wipe prior votes; insert a sentinel vote at confidence 1.0.
-        state.votes[dev_name] = [
-            _Vote(
-                product_label=label,
-                rule="customer-yaml",
-                confidence=_CONF_CUSTOMER_YAML,
-                anchor_signal="wystan.yaml",
-                weight=1.0,
-            ),
-        ]
-    return len(overrides)
-
-
 # ── Vote resolution ─────────────────────────────────────────────────────
 
 
@@ -821,11 +743,6 @@ def _resolve_votes(
     """
     if not votes:
         return [], []
-
-    # Customer-yaml short-circuits everything.
-    customer = [v for v in votes if v.rule == "customer-yaml"]
-    if customer:
-        return [customer[0].product_label], list(customer)
 
     # Group votes by product_label, summing weights per label.
     by_label: dict[str, list[_Vote]] = defaultdict(list)
@@ -943,9 +860,6 @@ def run_product_clusterer(
     nav_map, nav_telemetry = _apply_nav_taxonomy_rule(
         ctx, developer_features, state,
     )
-
-    # ── Rule 3 — customer YAML override (absolute) ──
-    customer_votes = _apply_customer_yaml_rule(ctx, state)
 
     # ── Resolve per-feature votes into final assignments ──
     # mapping: dev_name → tuple[product_label, …]
@@ -1087,7 +1001,6 @@ def run_product_clusterer(
             "workspace+domain": domain_refined_votes,
             "dep-anchor": dep_votes,
             "nav-taxonomy": len(nav_map),
-            "customer-yaml": customer_votes,
         },
         "domain_noun_extraction_rate": domain_rate,
         # In-repo nav taxonomy (vendor-declared Layer 2) — counters +
@@ -1102,7 +1015,7 @@ def run_product_clusterer(
             f"product_features={len(product_features_out)} "
             f"mapped={mapped}/{total} "
             f"(workspace_votes={workspace_votes} "
-            f"dep_votes={dep_votes} customer_votes={customer_votes})",
+            f"dep_votes={dep_votes})",
         )
 
     return product_features_out, mapping, telemetry

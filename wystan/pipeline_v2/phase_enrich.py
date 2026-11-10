@@ -100,7 +100,7 @@ def run_enrich_phase(
 
     # ── Stage 6.5 — Layer 2 product clusterer (deterministic) ──────
     # Pure rule-based clustering — workspace concentration + dep-anchor
-    # imports + optional ``wystan.yaml`` override. NO LLM. Folds
+    # imports + in-repo nav taxonomy. NO LLM. Folds
     # Stage 6 dev features into customer-facing product features.
     write_stage_input(run_dir, 6, "product_clusterer", {
         "ctx": ctx,

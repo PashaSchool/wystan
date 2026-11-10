@@ -545,6 +545,13 @@ class MemberFile(BaseModel):
     primary owner across the scan (``primary=True`` exactly on the
     feature whose ``paths`` carries it).
 
+    Known exception — Stage 2 zero-path protection: when several
+    features declare only the same file, each keeps it in ``paths`` so
+    none becomes empty, and by default each carries ``primary=True`` for
+    it. With ``WYSTAN_SINGLE_PRIMARY_OWNER=1`` only the conflict winner
+    keeps ``primary=True``; the others keep the path with
+    ``primary=False`` and an ``evidence`` naming the winner.
+
     Roles:
       - ``anchor``    — file attributed by a Stage 1/2 deterministic
                         extractor (the feature's own declared surface).

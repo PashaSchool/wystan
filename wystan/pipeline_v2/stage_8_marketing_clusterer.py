@@ -18,15 +18,8 @@ Stage 8 closes that gap by:
 
 Cascade (highest confidence first):
 
-    customer-yaml (wystan.yaml)  →  conf 1.00
     marketing+haiku                  →  conf 0.85
     deterministic Stage 6.5 result   →  conf 0.60 (passthrough)
-
-The customer YAML check is delegated to Stage 6.5 (which already
-runs first and handles ``wystan.yaml``). When Stage 6.5
-returned product features that came from ``rule:customer-yaml``,
-Stage 8 short-circuits — the customer has already declared the
-mapping.
 
 Marketing data is cached at ``~/.wystan/marketing-cache/<slug>.json``
 with a 7-day TTL. This is OK under the cold-scan rule because the
@@ -109,8 +102,7 @@ _MAX_TAXONOMY_ENTRIES_IN_PROMPT = 25
 _HAIKU_MAX_TOKENS = 2000
 
 # Confidence floor stamped on Stage 8 results when marketing+haiku
-# succeeds. Higher than deterministic (0.6) but lower than customer
-# override (1.0) to preserve the cascade.
+# succeeds. Higher than deterministic (0.6) to preserve the cascade.
 _CONF_MARKETING_HAIKU = 0.85
 
 # ── Content-hash LLM cache (deterministic short-circuit) ────────────────
@@ -852,11 +844,9 @@ def run_stage_8(
     """Cascade entry point for Sprint E1.
 
     Cascade:
-      1. If Stage 6.5 already saw a ``wystan.yaml`` and emitted
-         customer-yaml-sourced features → passthrough (highest conf).
-      2. Else try marketing-grounded Haiku cluster:
+      1. Try marketing-grounded Haiku cluster:
          fetch homepage → extract taxonomy → ask Haiku → apply.
-      3. Else fall back to Stage 6.5 deterministic result.
+      2. Else fall back to Stage 6.5 deterministic result.
 
     ``nav_taxonomy_map`` (in-repo nav taxonomy, Stage 6.5 rule 2.5) —
     ``{dev_feature_name: vendor_label}``. The vendor's own nav labels
@@ -874,38 +864,7 @@ def run_stage_8(
     cache_backend = getattr(ctx, "cache_backend", None)
     base_map: dict[str, tuple[str, ...]] = dict(dev_to_product_map_pre or {})
 
-    # ── 1. Customer YAML short-circuit ──
-    src_breakdown = source_breakdown_pre or {}
-    customer_count = src_breakdown.get("rule:customer-yaml", 0)
-    if customer_count > 0:
-        if log is not None:
-            log.info(f"customer-yaml-detected source_count={customer_count}")
-        telemetry: dict[str, Any] = {
-            "source": "customer-yaml",
-            "marketing_url": None,
-            "taxonomy_size": 0,
-            "taxonomy_sample": [],
-            "developer_features_mapped": sum(
-                1 for v in base_map.values() if v
-            ),
-            "developer_features_unmapped": sum(
-                1 for f in developer_features if not base_map.get(f.name)
-            ),
-            "product_features_emitted": len(product_features_pre),
-            "haiku_call_cost_usd": 0.0,
-            "haiku_tokens_in": 0,
-            "haiku_tokens_out": 0,
-            "confidence": 1.0,
-            "cache_hit": False,
-            "haiku_called": False,
-        }
-        return Stage8Result(
-            product_features=list(product_features_pre),
-            dev_to_product_map=base_map,
-            telemetry=telemetry,
-        )
-
-    # ── 2. Marketing + Haiku ──
+    # ── 1. Marketing + Haiku ──
     # Try cache first to surface telemetry; if hit, no fetch happens.
     cached_before = _load_cached_taxonomy(slug, cache_backend=cache_backend)
     taxonomy: MarketingTaxonomy | None = None
@@ -1056,7 +1015,7 @@ def run_stage_8(
         if log is not None:
             log.warn("haiku-mapping-empty — falling back to deterministic")
 
-    # ── 3. Deterministic fallback ──
+    # ── 2. Deterministic fallback ──
     reason = (
         "no-client" if client is None
         else "fetch-failed-or-empty" if taxonomy is None

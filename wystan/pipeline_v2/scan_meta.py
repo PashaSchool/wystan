@@ -531,7 +531,7 @@ def assemble_scan_meta(
         # degrade); the rest of the pipeline is unaffected.
         "stage_6_6": dict(branch_slicer_telemetry),
         # Sprint E1 — Stage 8 marketing-grounded Layer 2 clusterer.
-        # ``source`` is one of "customer-yaml" / "marketing+haiku" /
+        # ``source`` is one of "marketing+haiku" /
         # "deterministic-only". When "marketing+haiku", taxonomy_size +
         # marketing_url surface the maintainer page that grounded the
         # Haiku mapping. ``haiku_call_cost_usd`` is included in the

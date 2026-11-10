@@ -43,7 +43,8 @@ input.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
@@ -219,6 +220,24 @@ class DeveloperFeature:
     # convention (mirroring Stage 5's ``dedup_merged_from:`` drop-log
     # tag) is a ``merged_from:`` rationale entry plus this field.
     merged_from: list[str] = field(default_factory=list)
+
+    # ``{path: winning feature name}`` for files this feature LOST in
+    # conflict resolution but kept through zero-path protection. Stage 2.6
+    # records those files as non-primary members. Filled only under
+    # ``WYSTAN_SINGLE_PRIMARY_OWNER``; empty otherwise.
+    contested_owner: dict[str, str] = field(default_factory=dict)
+
+
+SINGLE_PRIMARY_OWNER_ENV = "WYSTAN_SINGLE_PRIMARY_OWNER"
+_TRUTHY_FLAG_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def single_primary_owner_enabled() -> bool:
+    """Default OFF. ``WYSTAN_SINGLE_PRIMARY_OWNER=1`` makes a file kept on
+    a losing feature by zero-path protection a non-primary member there,
+    so exactly one feature carries ``MemberFile.primary=True`` for it."""
+    value = os.environ.get(SINGLE_PRIMARY_OWNER_ENV, "0").strip().lower()
+    return value in _TRUTHY_FLAG_VALUES
 
 
 @dataclass
@@ -812,6 +831,7 @@ def _attribute_paths(
 
     # Pass 1 — provisional strip set, ranking-only.
     proposed_strip: dict[int, set[str]] = {}
+    winner_of: dict[str, str] = {}
     for path, idx_list in claims.items():
         if len(idx_list) == 1:
             continue
@@ -823,6 +843,7 @@ def _attribute_paths(
             return (-best_src_prio, -conf_rank, -len(f.paths), f.name)
 
         ranked = sorted(idx_list, key=_rank_key)
+        winner_of[path] = features[ranked[0]].name
         for loser in ranked[1:]:
             proposed_strip.setdefault(loser, set()).add(path)
 
@@ -835,6 +856,8 @@ def _attribute_paths(
     # process in a deterministic order (sorted feature index) so the
     # outcome is reproducible across runs.
     strip: dict[int, set[str]] = {}
+    protected: dict[int, dict[str, str]] = {}
+    mark_contested = single_primary_owner_enabled()
     for idx in sorted(proposed_strip):
         f = features[idx]
         contested = proposed_strip[idx]
@@ -842,14 +865,19 @@ def _attribute_paths(
         if not survivors:
             # Stripping would orphan this feature; keep the contested
             # paths instead. Loser shares ownership with winner(s).
+            if mark_contested:
+                protected[idx] = {p: winner_of[p] for p in sorted(contested)}
             continue
         strip[idx] = contested
 
-    if not strip:
+    if not strip and not protected:
         return features
 
     rebuilt: list[DeveloperFeature] = []
     for idx, f in enumerate(features):
+        if idx in protected:
+            rebuilt.append(replace(f, contested_owner=protected[idx]))
+            continue
         if idx not in strip:
             rebuilt.append(f)
             continue
