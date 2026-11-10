@@ -3656,7 +3656,11 @@ ENV_OUTPUT_FLAGS = (
 #:
 #: PACK #46 CLOSED: 3 flipped flags under ONE KS81 bump + the promotion of
 #: 'js'/'rsc' into known_acronyms (the pack's only rider outside a kill-switch).
-KEY_SCHEMA_VERSION = 81
+#:
+#: KS82 (2026-11-10): the ``wystan.yaml`` customer rule is removed from
+#: Stage 6.5 and Stage 8. ``scan_meta.product_clusterer_votes_cast`` loses
+#: its ``customer-yaml`` key on every scan, so cached results are invalidated.
+KEY_SCHEMA_VERSION = 82
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

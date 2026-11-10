@@ -1244,10 +1244,8 @@ def run_stage_8_analyst(
     can call either with identical arguments.
 
     Cascade:
-      1. Customer YAML short-circuit — passthrough (same as Haiku
-         path).
-      2. Analyst Sonnet call → emit product features.
-      3. Fallback to Haiku clusterer on:
+      1. Analyst Sonnet call → emit product features.
+      2. Fallback to Haiku clusterer on:
          - No client
          - Empty analyst response
          - Parse failure after one retry
@@ -1255,37 +1253,7 @@ def run_stage_8_analyst(
     """
     slug = ctx.repo_path.name
 
-    # 1. Customer YAML short-circuit — exact same logic as Haiku path.
-    src_breakdown = source_breakdown_pre or {}
-    customer_count = src_breakdown.get("rule:customer-yaml", 0)
-    if customer_count > 0:
-        if log is not None:
-            log.info(
-                f"customer-yaml-detected source_count={customer_count}",
-            )
-        base_map = dict(dev_to_product_map_pre or {})
-        telemetry = {
-            "mode": "analyst",
-            "source": "customer-yaml",
-            "analyst_called": False,
-            "fallback_used": False,
-            "developer_features_mapped": sum(
-                1 for v in base_map.values() if v
-            ),
-            "product_features_emitted": len(product_features_pre),
-            "analyst_cost_usd": 0.0,
-            "prompt_input_tokens": 0,
-            "prompt_output_tokens": 0,
-            "phantom_count_estimate": 0,
-            "confidence": 1.0,
-        }
-        return Stage8Result(
-            product_features=list(product_features_pre),
-            dev_to_product_map=base_map,
-            telemetry=telemetry,
-        )
-
-    # 2. Try the analyst path.
+    # 1. Try the analyst path.
     if client is None:
         if log is not None:
             log.info("no-client — falling back to deterministic Stage 8")

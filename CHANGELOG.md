@@ -10,6 +10,19 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
 
 ## [Unreleased]
 
+### Removed
+- `wystan.yaml` product-feature override. Stage 6.5 no longer reads
+  `<repo>/wystan.yaml`, and Stage 8 no longer short-circuits on a customer
+  mapping. A `wystan.yaml` in a scanned repository is ignored.
+  `scan_meta.product_clusterer_votes_cast` no longer has a `customer-yaml`
+  key, and `KEY_SCHEMA_VERSION` is 82. Every profile digest in
+  `snapshots.lock.json` is stale until regenerated with
+  `python -m wystan.tools.snapshot_gate --update` on a machine that has the
+  pinned clones.
+- `wystan suggest-config` and the `.wystan.yaml` repository config
+  (`wystan/analyzer/repo_config.py`, `wystan/analyzer/auto_alias_discoverer.py`).
+  The scan pipeline never read that file.
+
 ## [0.0.2] – 2026-10-30
 
 ### Fixed
