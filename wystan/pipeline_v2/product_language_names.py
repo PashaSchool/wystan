@@ -70,6 +70,8 @@ _MAX_PROMPT_MEMBERS = 12
 _TITLE_SEPARATOR = re.compile(r"\s+[-|·–—]\s+")
 _FEATURE_LABEL_KINDS = ("title", "heading")
 _MIN_STEM = 4
+# An entry group is a node of its own when it has children: two or more.
+_MIN_GROUP_ENTRIES = 2
 
 
 @dataclass
@@ -184,6 +186,7 @@ class _Namer:
         self._ctx = ctx
         self._writer = writer
         self._taken: dict[str, set[str]] = {}
+        self._current: dict[tuple[str, str], str] = {}
         self.telemetry = {
             "total": 0, "written": 0, "kept": 0, "from_label": 0,
             "unnameable": 0, "declined_by_writer": 0, "rejected_proposals": 0,
@@ -224,6 +227,9 @@ class _Namer:
             return "words not in the evidence: " + ", ".join(check.all_violations)
         if name.lower() in self._taken.get(target.group, set()):
             return "a sibling already has this name"
+        holder = self._current.get((target.group, name.lower()))
+        if holder is not None and holder != target.key:
+            return "a sibling is already called this"
         return None
 
     def reserve(self, group: str, names: Iterable[str]) -> None:
@@ -365,6 +371,10 @@ class _Namer:
     def run(self, targets: list[NameTarget], parents: dict[str, str]) -> None:
         ordered = sorted(targets, key=lambda target: target.key)
         self.telemetry["total"] += len(ordered)
+        # The name an item wears now is spoken for: nobody else is renamed
+        # into it.
+        for target in ordered:
+            self._current.setdefault((target.group, target.current.lower()), target.key)
         # Features with a stated name first, so a URL word is judged against
         # the names its siblings really have.
         ordered.sort(key=lambda t: (not any(c.source != SOURCE_URL for c in t.authored), t.key))
@@ -468,12 +478,19 @@ def run_product_language_names(
     feature_targets = [_feature_target(f, index, routes_by_file) for f in product_features]
     pages = page_rows(routes_index, ctx.structural_words, frozenset(files_without_ui))
     scope_words = ctx.listed("tenant_scope_segments")
+    operations_by_file: dict[str, set[str]] = {}
+    for row in routes_index:
+        if row.get("method") != "PAGE" and row.get("file") and row.get("pattern"):
+            operations_by_file.setdefault(str(row["file"]), set()).add(str(row["pattern"]))
     for target, feature in zip(feature_targets, product_features):
         page = top_page(feature.paths or [], target.identity_words, pages)
         if page is None:
-            # In a product with no pages at all (an API, a library) the lack
-            # of a page says nothing, and the ladder below names the feature.
-            target.has_no_surface = bool(pages)
+            # No page. The feature still has a surface when its own code
+            # serves a group of API operations: an API is something a user
+            # addresses too. One lone endpoint is a leaf, not a feature. In a
+            # product with no pages at all the lack of a page says nothing.
+            operations = set().union(*(operations_by_file.get(p, set()) for p in feature.paths or []))
+            target.has_no_surface = bool(pages) and len(operations) < _MIN_GROUP_ENTRIES
             continue
         target.authored = authored_names(
             page, index, nav_pairs,
@@ -599,9 +616,33 @@ def _nav_pairs(ctx: Any, index: UiTextIndex) -> list[tuple[str, str | None]]:
     """``(label, href)`` pairs of the product's navigation files."""
     from wystan.pipeline_v2.product_strings import collect_product_strings
 
+    from wystan.pipeline_v2.ui_text import _load_catalog
+
     strings = collect_product_strings(ctx.repo_path, sorted(index.by_file))
-    return sorted({pair for pairs in strings.nav_pairs_by_file.values() for pair in pairs},
-                  key=lambda pair: (pair[0], pair[1] or ""))
+    catalog = _load_catalog(ctx.repo_path, ctx.tracked_files)
+    pairs: set[tuple[str, str | None]] = set()
+    for found in strings.nav_pairs_by_file.values():
+        for label, href in found:
+            text = _stated_label(label, catalog)
+            if text:
+                pairs.add((text, href))
+    return sorted(pairs, key=lambda pair: (pair[0], pair[1] or ""))
+
+
+_CATALOG_KEY = re.compile(r"^[a-z0-9]+(?:[_.:\-][a-z0-9]+)*$")
+
+
+def _stated_label(label: str, catalog: dict[str, str]) -> str | None:
+    """The text a navigation row shows. A row often holds a catalog key
+    (``event_types_page_title``); the key is resolved, and a key with no
+    catalog entry is not a label."""
+    if label in catalog:
+        return catalog[label]
+    # An identifier-shaped label with no catalog entry is a key we could not
+    # resolve (``event_types_page_title``, ``users``), not text a user reads.
+    if _CATALOG_KEY.match(label):
+        return None
+    return label
 
 
 _SCRIPT_ROUTE_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs")
@@ -621,7 +662,7 @@ def route_files_without_ui(repo_path: Any, routes_index: list[dict[str, Any]]) -
     return silent
 
 
-_AUTHOR_EVIDENCE = frozenset({"authored:description", "cli-declared"})
+_AUTHOR_EVIDENCE = frozenset({"authored:description", "authored:schema", "cli-declared"})
 
 
 def _is_author_named(item: Any) -> bool:
@@ -650,5 +691,15 @@ def _entry_point_report(ctx: Any, routes_index: list[dict[str, Any]], index: UiT
     def commands() -> list[Any]:
         return command_entries(ctx)
 
-    entries, errors = collect_entry_points([pages, commands])
+    def operations() -> list[Any]:
+        from wystan.pipeline_v2.entry_points.graphql_schema import graphql_entries
+
+        return graphql_entries(ctx)
+
+    def actions() -> list[Any]:
+        from wystan.pipeline_v2.entry_points.actions import action_entries
+
+        return action_entries(ctx)
+
+    entries, errors = collect_entry_points([pages, commands, operations, actions])
     return entry_report(entries, errors)

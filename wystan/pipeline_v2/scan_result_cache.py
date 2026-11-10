@@ -3694,7 +3694,12 @@ ENV_OUTPUT_FLAGS = (
 #: user flows; command groups are product features under the binary's, named
 #: by their own descriptions; author-written names are not judged by the
 #: code-name laws; ``scan_meta.entry_points`` is reported.
-KEY_SCHEMA_VERSION = 88
+#:
+#: KS89-90 (2026-11-10): a page-less feature that serves a group of API
+#: operations keeps its place; navigation labels are resolved through the
+#: UI catalog; a package that declares UI actions or schema operations is not
+#: barred as internal; GraphQL operation groups become product features.
+KEY_SCHEMA_VERSION = 91
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

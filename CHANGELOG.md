@@ -24,6 +24,24 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   The scan pipeline never read that file.
 
 ### Changed
+- **API products get a product layer from their schema.** New adapters read
+  GraphQL operations composed in code (`entry_points/graphql_schema.py`,
+  graphene: root type, group classes, operations, with descriptions from a
+  shipped `schema.graphql`) and UI action registries
+  (`entry_points/actions.py`). Each group of two or more operations becomes a
+  product feature named by the schema ("Checkout", "Gift Card"), taking the
+  unowned module that implements its operations, the unowned code its flows
+  reach, and the parentless user flows that start there
+  (`entry_group_features.py`). A package that registers UI actions is no
+  longer barred as `headless_internal_package`.
+- **A page-less feature with an API keeps its place.** In a product with
+  pages, a feature is removed for having no page only when its own code
+  serves fewer than two API operations.
+- **Navigation labels are read through the UI catalog.** A row holding a
+  catalog key (`event_types_page_title`) is resolved to its text; a key with
+  no entry is not used as a name. Catalog files are read up to 8 MB.
+- A product feature is no longer renamed into a name a sibling already has.
+  `KEY_SCHEMA_VERSION` is 91.
 - **Entry points, and command-line tools get a product layer.** A new
   `entry_points` package records what a user can address (a page, a command)
   with the name its author gave it and its declared parent;
