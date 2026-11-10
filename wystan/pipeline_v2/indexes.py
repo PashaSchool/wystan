@@ -120,6 +120,113 @@ _FS_DYNAMIC_RE = re.compile(r"^\[+\.{0,3}(?P<name>[^\]]*?)\]+$")
 _GROUP_RE = re.compile(r"^\(.*\)$")  # Next.js route group — URL-invisible
 
 
+# ── Flat-file route grammar (Remix / React Router flat routes, TanStack) ──
+#
+# In a flat-routing tree the URL is written in the FILE NAME, not in the
+# directory tree: ``t.$teamUrl+/documents.$id.edit.tsx`` is the URL
+# ``/t/:teamUrl/documents/:id/edit``. A dot separates URL segments, a
+# trailing ``+`` on a directory marks a folder of nested routes, ``$name``
+# is a parameter, a leading ``_`` is a pathless layout, and ``[x]`` escapes
+# a literal segment.
+_FLAT_ROUTE_ROOTS: tuple[tuple[str, ...], ...] = (
+    ("app", "routes"),
+    ("src", "routes"),
+)
+_FLAT_ESCAPE_RE = re.compile(r"\[([^\]]*)\]")
+_FLAT_DOT_PLACEHOLDER = "\x00"
+
+
+def _has_flat_route_root(all_segs: list[str]) -> bool:
+    for i in range(len(all_segs)):
+        for seq in _FLAT_ROUTE_ROOTS:
+            if all_segs[i:i + len(seq)] == list(seq):
+                return True
+    return False
+
+
+def _uses_flat_route_grammar(all_segs: list[str], rest_segs: list[str]) -> bool:
+    """True when the route file is written in flat-file grammar.
+
+    A folder suffixed ``+`` or a ``$param`` part is the grammar's own mark in
+    any tree; a dotted file stem counts only under a Remix / TanStack root, so
+    an Express ``routes/user.routes.js`` is never read as a flat route."""
+    stem = re.sub(r"\.[A-Za-z0-9]+$", "", rest_segs[-1])
+    parts = [*rest_segs[:-1], stem]
+    if any(seg.endswith("+") for seg in rest_segs[:-1]):
+        return True
+    if any(piece.startswith("$") for seg in parts for piece in seg.split(".")):
+        return True
+    return "." in stem and _has_flat_route_root(all_segs)
+
+
+def _flat_route_parts(segment: str) -> list[str]:
+    """URL parts of one flat-route segment (a ``+`` folder or a file stem)."""
+    body = segment[:-1] if segment.endswith("+") else segment
+    protected = _FLAT_ESCAPE_RE.sub(
+        lambda m: m.group(1).replace(".", _FLAT_DOT_PLACEHOLDER), body,
+    )
+    return [part.replace(_FLAT_DOT_PLACEHOLDER, ".") for part in protected.split(".")]
+
+
+def _flat_route_pattern(rest_segs: list[str]) -> str | None:
+    """URL pattern of a flat-grammar route file, or ``None`` when the file is
+    not addressable (a pathless layout with no URL part of its own)."""
+    stem = re.sub(r"\.[A-Za-z0-9]+$", "", rest_segs[-1])
+    out_segs: list[str] = []
+    for segment in [*rest_segs[:-1], stem]:
+        is_literal = "[" in segment
+        for part in _flat_route_parts(segment):
+            if not part or _GROUP_RE.match(part):
+                continue
+            if part.startswith("_") and not is_literal:
+                continue  # pathless layout / index marker
+            if part == "$":
+                out_segs.append("*")
+            elif part.startswith("$"):
+                out_segs.append(":" + part[1:])
+            else:
+                out_segs.append(part[:-1] if part.endswith("_") and len(part) > 1 else part)
+    return "/" + "/".join(out_segs)
+
+
+def is_addressing_segment(
+    segments: list[str], index: int, scope_words: frozenset[str],
+) -> bool:
+    """True when ``segments[index]`` only addresses a tenant or record.
+
+    ``/t/:teamUrl/documents`` and ``/workspaces/:id/tables`` name the
+    capability in a LATER segment: a single-letter or scope-word segment that
+    is immediately followed by a parameter, with a static segment after it,
+    is addressing, not a capability."""
+    segment = segments[index].lower()
+    if len(segment) > 1 and segment not in scope_words:
+        return False
+    if index + 1 >= len(segments) or not segments[index + 1].startswith((":", "*")):
+        return False
+    return any(not s.startswith((":", "*")) for s in segments[index + 2:])
+
+
+def flat_route_static_segments(
+    path: str, scope_words: frozenset[str],
+) -> list[str] | None:
+    """Static URL segments of a flat-grammar route file, addressing removed.
+
+    ``…/routes/_authenticated+/t.$teamUrl+/documents.$id.edit.tsx`` →
+    ``["documents", "edit"]``. ``None`` when the file is not written in flat
+    grammar (the caller keeps its directory-based derivation)."""
+    all_segs = [s for s in path.replace("\\", "/").split("/") if s]
+    rest_segs = _split_at_route_root(all_segs)
+    if not rest_segs or not _uses_flat_route_grammar(all_segs, rest_segs):
+        return None
+    pattern = _flat_route_pattern(rest_segs) or ""
+    segments = [s for s in pattern.split("/") if s]
+    return [
+        segment for index, segment in enumerate(segments)
+        if not segment.startswith((":", "*", "_"))
+        and not is_addressing_segment(segments, index, scope_words)
+    ]
+
+
 def _split_at_route_root(segs: list[str]) -> list[str] | None:
     """Return the segments AFTER the first routing-root component run.
 
@@ -173,6 +280,10 @@ def _derive_route_from_path(path: str) -> tuple[str, str] | None:
     rest_segs = _split_at_route_root(all_segs)
     if rest_segs is None or not rest_segs:
         return None
+
+    if _uses_flat_route_grammar(all_segs, rest_segs):
+        flat_pattern = _flat_route_pattern(rest_segs)
+        return (flat_pattern, "PAGE") if flat_pattern is not None else None
 
     dir_segs = rest_segs[:-1]
     fname = rest_segs[-1]

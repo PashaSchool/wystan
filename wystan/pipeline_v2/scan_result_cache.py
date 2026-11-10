@@ -3665,7 +3665,25 @@ ENV_OUTPUT_FLAGS = (
 #: KS82 (2026-11-10): the ``wystan.yaml`` customer rule is removed from
 #: Stage 6.5 and Stage 8. ``scan_meta.product_clusterer_votes_cast`` loses
 #: its ``customer-yaml`` key on every scan, so cached results are invalidated.
-KEY_SCHEMA_VERSION = 82
+#:
+#: KS83 (2026-11-10): flow expansion measures every node (no span-less file
+#: nodes) and links tRPC client calls to their procedures with ``rpc`` edges.
+#: Flow nodes, edges, line ranges and LoC change on every scan.
+#:
+#: KS84 (2026-11-10): flat-file route grammar (URL read from the file name),
+#: addressing segments, container and internal route anchors barred, RPC
+#: routers attached to the product features that call them. Developer and
+#: product feature sets change on flat-routed and tRPC repositories.
+#:
+#: KS85 (2026-11-10): product features and user flows are named in product
+#: language from user-visible text. ``display_name`` of product features,
+#: ``name`` of user flows, and their ``name_confidence`` / ``name_evidence``
+#: change on every scan.
+#:
+#: KS86 (2026-11-10): Stage 3 offers only behaviour symbols as flow candidates
+#: and never anchors a flow on a declaration (schema, type, constant table).
+#: The Stage 3 prompt, the flow set and flow entry points change.
+KEY_SCHEMA_VERSION = 86
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

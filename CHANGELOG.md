@@ -23,6 +23,57 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   (`wystan/analyzer/repo_config.py`, `wystan/analyzer/auto_alias_discoverer.py`).
   The scan pipeline never read that file.
 
+### Changed
+- **A flow's entry point is code that does something.** Stage 3 classifies
+  every exported TS/JS symbol as behaviour or declaration
+  (`analyzer/symbol_behaviour.py`): a type, interface, enum, or a `const`
+  whose initializer has no function body is a declaration. Declarations are
+  not offered to the LLM as flow candidates, do not count towards the export
+  floor, and cannot be an entry point; a flow that lists only declarations is
+  dropped with a note. A `const` that wraps a function defined in the same
+  file stays a candidate. Other languages are unchanged.
+  `KEY_SCHEMA_VERSION` is 86.
+- **Product features and user flows are named in product language.** A new
+  last pass (`product_language_names`) renames `display_name` of product
+  features and `name` of user flows from the text the product shows its
+  users: page titles, headings, button labels and translated copy, including
+  Lingui `msg` / `<Trans>` and catalog keys (`ui_text.py`). Names must pass
+  the product-language laws (`product_name_laws.py`): no route parameters or
+  their residue, no glued identifiers, no bare package, directory, framework
+  or protocol names; a user flow starts with a user-goal verb. On keyed scans
+  an LLM writer proposes names; a proposal is kept only when it passes the
+  laws, every word is in the item's evidence, and it shares a word with the
+  item's own URLs and code units. A name that breaks a law and cannot be
+  replaced keeps its text, gets `name_confidence: "low"` and
+  `name_evidence: ["unnameable:<law>"]`; counts are in
+  `scan_meta.product_language_names`. Developer feature and code flow names,
+  slugs, ids and anchors are unchanged. `KEY_SCHEMA_VERSION` is 85.
+- **Every flow node is measured.** Flow expansion no longer emits file nodes
+  without a line span. An imported file is represented by the symbols the
+  caller references, each with its own span; an import the caller never
+  references adds nothing; a reference that cannot be tied to a symbol adds
+  one whole-file span with `confidence: "low"`. The
+  `WYSTAN_FLOW_SPAN_RECOVERY*` flags are retired (always on). Flow `loc`,
+  `line_ranges` and user-flow `loc` grow accordingly. `KEY_SCHEMA_VERSION` 83.
+- **Flat-file routes are read as URLs.** A Remix / React Router / TanStack
+  route file such as `t.$teamUrl+/documents.$id.edit.tsx` now yields the
+  pattern `/t/:teamUrl/documents/:id/edit` (it was the file path). The Stage 1
+  route extractor names the feature after the first capability segment
+  (`documents`), and a single-letter or scope-word segment before a parameter
+  is treated as addressing. `KEY_SCHEMA_VERSION` 84.
+- **Code containers do not mint product features.** A directory route anchor
+  with a structural name (`components`) and a route under a directory marked
+  internal (`_internal+`, `[__x]+`) are barred.
+- **RPC routers join the product.** A developer feature without a product
+  feature is attached to the product feature whose flows hold a strict
+  plurality of `rpc` edges into it (`rpc_router_rehome.py`); the cross-unit
+  demote no longer strips such a feature.
+- **tRPC calls reach the procedure.** A flow whose code calls
+  `trpc.<path>.<verb>()` now includes the procedure's defining symbol and its
+  direct callees, linked by a new `FlowEdge.kind` value `rpc`. Routers that
+  register procedures through imported identifiers and nested routers are
+  resolved (`flow_expansion/trpc_edges.py`).
+
 ### Added
 - `WYSTAN_SINGLE_PRIMARY_OWNER` (default OFF). When several features keep the
   same file through Stage 2 zero-path protection, only the conflict winner

@@ -535,3 +535,72 @@ side_effect_flow_families:
     - cache
   log:
     - log
+
+# ── Product-language laws (product_name_laws.py) ───────────────────────
+# Names of product features and user flows are written for the person who
+# uses the product. The three lists below are the words that describe how
+# the software is built instead. Universal vocabulary, never repo-specific.
+
+# Frameworks, transports and protocols: not allowed anywhere in a product
+# name ("API (Remix)", "Handle CORS requests").
+product_name_technology:
+  - remix
+  - nextjs
+  - nuxt
+  - sveltekit
+  - react
+  - vue
+  - angular
+  - django
+  - rails
+  - laravel
+  - express
+  - fastapi
+  - trpc
+  - grpc
+  - graphql
+  - rpc
+  - cors
+  - http
+  - https
+  - mdx
+  - jsx
+  - tsx
+  - orm
+  - middleware
+  - router
+  - handler
+  - endpoint
+
+# Route-parameter residue: a name may not END with one of these in the
+# singular ("Team Verify Email Token", "Branding Logo Organisation Org Id").
+product_name_param_residue:
+  - id
+  - ids
+  - url
+  - slug
+  - token
+  - uuid
+  - guid
+  - pk
+  - hash
+
+# Verbs that describe what the code does, not what the user wants. A user
+# flow may not start with one; a product feature may not be one.
+product_name_implementation_verbs:
+  - handle
+  - validate
+  - resolve
+  - render
+  - parse
+  - process
+  - ingest
+  - fetch
+  - retrieve
+  - serialize
+  - dispatch
+  - test
+  - apply
+  - insert
+  - redeem
+  - enforce

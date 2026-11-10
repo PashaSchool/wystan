@@ -88,6 +88,9 @@ __all__ = [
     "parse_reexports",
     "resolve_reexport_entry",
     "recover_callee_symbols",
+    "ImportedSpan",
+    "resolve_import_spans",
+    "whole_file_lines",
 ]
 
 FLOW_SPAN_RECOVERY_ENV = "WYSTAN_FLOW_SPAN_RECOVERY"
@@ -106,43 +109,28 @@ _TS_JS_SUFFIXES = frozenset({
 _FILE_ENTRY_SENTINEL = "<file>"
 
 
-def _truthy(env: str) -> bool:
-    return os.environ.get(env, "0").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def reexport_recovery_enabled() -> bool:
-    """Form A armed — default **OFF**. ``WYSTAN_FLOW_SPAN_RECOVERY`` (master)
-    OR ``WYSTAN_FLOW_SPAN_RECOVERY_REEXPORT`` (isolation) truthy. Explicit
-    ``0``/``false``/``off``/``no``/unset ⇒ no-op (kill-switch; unset ≡ explicit
-    ``0`` byte-identical)."""
-    return _truthy(FLOW_SPAN_RECOVERY_ENV) or _truthy(
-        FLOW_SPAN_RECOVERY_REEXPORT_ENV,
-    )
+    """Form A is always on. The ``WYSTAN_FLOW_SPAN_RECOVERY*`` flags are
+    retired: every flow node must carry a measured line span."""
+    return True
 
 
 def callee_recovery_enabled() -> bool:
-    """Form B armed — default **OFF**. ``WYSTAN_FLOW_SPAN_RECOVERY`` (master)
-    OR ``WYSTAN_FLOW_SPAN_RECOVERY_CALLEE`` (isolation) truthy. Explicit
-    ``0``/``false``/``off``/``no``/unset ⇒ no-op (kill-switch; unset ≡ explicit
-    ``0`` byte-identical)."""
-    return _truthy(FLOW_SPAN_RECOVERY_ENV) or _truthy(
-        FLOW_SPAN_RECOVERY_CALLEE_ENV,
-    )
+    """Import-span resolution is always on (see :func:`resolve_import_spans`)."""
+    return True
 
 
 @dataclass(frozen=True)
 class SpanRecoveryConfig:
-    """Per-scan span-recovery arming, read ONCE from the environment."""
+    """Span-recovery arming. Both arms are unconditional; the class stays so
+    tests can switch one arm off in isolation."""
 
-    reexport: bool = False
-    callee: bool = False
+    reexport: bool = True
+    callee: bool = True
 
     @classmethod
     def from_env(cls) -> "SpanRecoveryConfig":
-        return cls(
-            reexport=reexport_recovery_enabled(),
-            callee=callee_recovery_enabled(),
-        )
+        return cls()
 
     @property
     def any(self) -> bool:
@@ -444,3 +432,181 @@ def recover_callee_symbols(
             seen.add(original)
             out.append((original, body))
     return out
+
+
+# ── Import-span resolution (every imported file is measured) ─────────────
+
+_IDENT = r"[A-Za-z_$][\w$]*"
+# ``import D, { a, b as c } from 'm'`` / ``import { a } from 'm'`` (multi-line ok).
+_RE_IMPORT_NAMED = re.compile(
+    rf"import\s+(?:type\s+)?(?:{_IDENT}\s*,\s*)?\{{([^}}]*)\}}\s*from\s*['\"]([^'\"]+)['\"]",
+)
+# ``import D from 'm'`` / ``import D, { a } from 'm'``.
+_RE_IMPORT_DEFAULT = re.compile(
+    rf"import\s+(?:type\s+)?({_IDENT})\s*(?:,\s*\{{[^}}]*\}})?\s*from\s*['\"]([^'\"]+)['\"]",
+)
+# ``import * as NS from 'm'``.
+_RE_IMPORT_NAMESPACE = re.compile(
+    rf"import\s+(?:type\s+)?\*\s+as\s+({_IDENT})\s+from\s*['\"]([^'\"]+)['\"]",
+)
+_NON_TOP_LEVEL_KINDS = ("method", "constructor")
+_CONFIDENCE_SYMBOL = "medium"
+_CONFIDENCE_COARSE = "low"
+
+
+@dataclass(frozen=True)
+class ImportedSpan:
+    """One measured piece of an imported file used by a caller.
+
+    ``symbol`` is ``None`` for a whole-file span: the caller references the
+    import but the reference cannot be tied to one symbol."""
+
+    symbol: str | None
+    lines: tuple[int, int]
+    confidence: str
+
+
+@dataclass(frozen=True)
+class _Binding:
+    kind: str        # "named" | "default" | "namespace"
+    original: str
+    local: str
+
+
+def _bindings_to(
+    rctx: "ReachContext", importer: str, source: str, target_file: str,
+) -> list[_Binding]:
+    """Every TS/JS import binding in ``source`` that resolves to ``target_file``."""
+    out: list[_Binding] = []
+    for m in _RE_IMPORT_NAMED.finditer(source):
+        if _resolve_module(rctx, importer, m.group(2)) != target_file:
+            continue
+        for token in m.group(1).split(","):
+            tok = token.strip()
+            if tok.startswith("type "):
+                tok = tok[len("type "):].strip()
+            if not tok:
+                continue
+            original, _, local = tok.partition(" as ")
+            out.append(_Binding("named", original.strip(), (local or original).strip()))
+    for m in _RE_IMPORT_NAMESPACE.finditer(source):
+        if _resolve_module(rctx, importer, m.group(2)) == target_file:
+            out.append(_Binding("namespace", m.group(1), m.group(1)))
+    for m in _RE_IMPORT_DEFAULT.finditer(source):
+        if _resolve_module(rctx, importer, m.group(2)) == target_file:
+            out.append(_Binding("default", m.group(1), m.group(1)))
+    return out
+
+
+def _is_referenced(name: str, body: str) -> bool:
+    return re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", body) is not None
+
+
+def _span_of(rng) -> ImportedSpan | None:
+    """Span for a referenced top-level symbol; ``None`` when nothing to add."""
+    if rng.kind == "class":
+        # A class is never attributed whole: its constructor and the methods
+        # the caller invokes are resolved as their own nodes by the call graph.
+        return None
+    return ImportedSpan(rng.name, (rng.start_line, rng.end_line), _CONFIDENCE_SYMBOL)
+
+
+_MAX_WHOLE_FILE_BYTES = 2_000_000
+
+
+def whole_file_lines(rctx: "ReachContext", rel_path: str) -> tuple[int, int] | None:
+    """``(1, line_count)`` of a repository file, or ``None`` when unreadable.
+
+    Uses the parsed signature when there is one; a file without a signature
+    (no exported symbol was extracted) is read from disk."""
+    sig = rctx.signatures.get(rel_path)
+    text = (sig.source if sig is not None else None) or ""
+    if not text:
+        path = Path(str(rctx.repo_path)) / rel_path
+        try:
+            if not path.is_file() or path.stat().st_size > _MAX_WHOLE_FILE_BYTES:
+                return None
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+    if not text:
+        return None
+    return (1, len(text.splitlines()) or 1)
+
+
+def _whole_file(rctx: "ReachContext", target_file: str) -> list[ImportedSpan]:
+    lines = whole_file_lines(rctx, target_file)
+    return [] if lines is None else [ImportedSpan(None, lines, _CONFIDENCE_COARSE)]
+
+
+def _top_level_ranges(tsig: "FileSignature") -> list:
+    return [r for r in tsig.symbol_ranges if r.kind not in _NON_TOP_LEVEL_KINDS]
+
+
+def _resolve_binding(binding: _Binding, tsig: "FileSignature", body: str) -> list:
+    """Symbol ranges of ``tsig`` that ``binding`` refers to in ``body``."""
+    if binding.kind == "named":
+        rng = _symbol_range_obj(tsig, binding.original)
+        return [rng] if rng is not None and rng.kind != "reexport" else []
+    if binding.kind == "namespace":
+        members = set(re.findall(
+            rf"(?<![\w$.]){re.escape(binding.local)}\.({_IDENT})", body,
+        ))
+        found = [_symbol_range_obj(tsig, m) for m in sorted(members)]
+        return [r for r in found if r is not None and r.kind != "reexport"]
+    by_name = _symbol_range_obj(tsig, binding.local)
+    if by_name is not None:
+        return [by_name]
+    bodies = [r for r in _top_level_ranges(tsig) if r.kind not in ("type", "reexport")]
+    return bodies if len(bodies) == 1 else []
+
+
+def resolve_import_spans(
+    rctx: "ReachContext",
+    current_file: str,
+    current_sig: "FileSignature | None",
+    body: str,
+    target_file: str,
+    taken: set[str],
+) -> list[ImportedSpan]:
+    """Measured spans of ``target_file`` that the caller ``body`` uses.
+
+    ``taken`` holds symbol labels of ``target_file`` already attributed through
+    call edges; they are not returned again. The result is empty when the
+    caller does not reference the import, and a single whole-file span when it
+    does but no symbol can be identified. A node without lines is never
+    produced."""
+    tsig = rctx.signatures.get(target_file)
+    if current_sig is None:
+        return []
+    is_ts_js = Path(current_file).suffix.lower() in _TS_JS_SUFFIXES
+    if tsig is None and not is_ts_js:
+        return []
+    ranges: list = []
+    referenced_unresolved = False
+    if is_ts_js:
+        for binding in _bindings_to(rctx, current_file, current_sig.source or "", target_file):
+            if not _is_referenced(binding.local, body):
+                continue
+            # A target without a signature has no extracted symbols to bind to.
+            resolved = _resolve_binding(binding, tsig, body) if tsig is not None else []
+            if resolved:
+                ranges.extend(resolved)
+            else:
+                referenced_unresolved = True
+    else:
+        ranges = [r for r in _top_level_ranges(tsig) if _is_referenced(r.name, body)]
+    spans: list[ImportedSpan] = []
+    seen: set[str] = set(taken)
+    for rng in ranges:
+        if rng.name in seen:
+            continue
+        seen.add(rng.name)
+        span = _span_of(rng)
+        if span is not None:
+            spans.append(span)
+    if spans or not referenced_unresolved:
+        return spans
+    if taken:
+        return []
+    return _whole_file(rctx, target_file)

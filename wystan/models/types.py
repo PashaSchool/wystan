@@ -426,6 +426,9 @@ class FlowEdge(BaseModel):
       - ``import``            — A imports B (T1 file-level edge).
       - ``call``              — A's body references B by identifier
                                 (T1 intra-repo call edge).
+      - ``rpc``               — A calls a tRPC procedure defined by B
+                                (``trpc.a.b.useQuery()`` → the procedure
+                                symbol). No import connects the two.
       - ``cross_stack_http``  — A is a ``fetch_call`` node whose URL
                                 literal matched a route in
                                 ``routes_index`` (T2 cross-stack edge).
@@ -434,7 +437,7 @@ class FlowEdge(BaseModel):
     # ``from`` is a Python keyword — pydantic supports it via alias.
     from_: str = Field(alias="from")
     to: str
-    kind: Literal["import", "call", "cross_stack_http"]
+    kind: Literal["import", "call", "cross_stack_http", "rpc"]
     confidence: Literal["high", "medium", "low"] = "medium"
 
     model_config = {"populate_by_name": True}
