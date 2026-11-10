@@ -49,6 +49,7 @@ from wystan.pipeline_v2.ui_text import UiLabel, UiTextIndex, collect_ui_text
 
 __all__ = [
     "EVIDENCE_UI_TEXT",
+    "JOINS_PREFIX",
     "UNNAMEABLE_PREFIX",
     "NameTarget",
     "build_ui_index",
@@ -63,6 +64,7 @@ EVIDENCE_UI_LABEL = "ui-label"
 EVIDENCE_NOT_AUTHORED = "not-authored"
 UNNAMEABLE_PREFIX = "unnameable:"
 NO_USER_SURFACE = "no_user_surface"
+JOINS_PREFIX = "joins:"
 
 _MAX_PROMPT_LABELS = 30
 _MAX_PROMPT_ROUTES = 8
@@ -89,6 +91,10 @@ class NameTarget:
     slug: str = ""
     authored: list[AuthoredName] = field(default_factory=list)
     """What the product calls the feature's top page, most trusted first."""
+    joins: str = ""
+    """The product feature whose page shows this one's code."""
+    reached_only: bool = False
+    """Named through a page that imports its code, not a page it owns."""
     url_name: str = ""
     """The top page's URL word, when it is the only name and a bare verb."""
     has_no_surface: bool = False
@@ -354,6 +360,10 @@ class _Namer:
             self.telemetry["authored"] = self.telemetry.get("authored", 0) + 1
             target.apply(candidate.text, confidence, [candidate.source])
             return True
+        if target.reached_only:
+            # The page gave no name that is free: without one this is a
+            # package some pages import, not a feature.
+            target.has_no_surface = True
         if not target.has_no_surface and not self._violations(target, target.current):
             # It has a page; the product just does not label it. The current
             # name stands, marked as not authored.
@@ -365,7 +375,10 @@ class _Namer:
         self.telemetry["unnameable"] += 1
         by_law = self.telemetry["unnameable_by_law"]
         by_law[law] = by_law.get(law, 0) + 1
-        target.apply(target.current, "low", [UNNAMEABLE_PREFIX + law])
+        notes = [UNNAMEABLE_PREFIX + law]
+        if target.joins:
+            notes.append(JOINS_PREFIX + target.joins)
+        target.apply(target.current, "low", notes)
         return True
 
     def run(self, targets: list[NameTarget], parents: dict[str, str]) -> None:
@@ -460,10 +473,12 @@ def run_product_language_names(
     brand_words: Iterable[str] = (),
     nav_pairs: Iterable[tuple[str, str | None]] = (),
     files_without_ui: Iterable[str] = (),
+    page_reach: dict[str, frozenset[str]] | None = None,
     writer: NameWriter | None = None,
 ) -> dict[str, Any]:
     """Rename product features and user flows in place; returns telemetry."""
     nav_pairs = list(nav_pairs)
+    page_reach = page_reach or {}
     # A name the author wrote (a command's description) is not ours to judge
     # or replace: the laws exist to catch names derived from code.
     authored_features = [f for f in product_features if _is_author_named(f)]
@@ -478,6 +493,7 @@ def run_product_language_names(
     feature_targets = [_feature_target(f, index, routes_by_file) for f in product_features]
     pages = page_rows(routes_index, ctx.structural_words, frozenset(files_without_ui))
     scope_words = ctx.listed("tenant_scope_segments")
+    page_owner = {path: f.name for f in product_features for path in f.paths or []}
     operations_by_file: dict[str, set[str]] = {}
     for row in routes_index:
         if row.get("method") != "PAGE" and row.get("file") and row.get("pattern"):
@@ -491,6 +507,26 @@ def run_product_language_names(
             # product with no pages at all the lack of a page says nothing.
             operations = set().union(*(operations_by_file.get(p, set()) for p in feature.paths or []))
             target.has_no_surface = bool(pages) and len(operations) < _MIN_GROUP_ENTRIES
+            shown_on, only_there = (
+                _page_that_shows(feature, pages, page_reach, scope_words)
+                if target.has_no_surface else (None, False)
+            )
+            owner = page_owner.get(shown_on.file) if shown_on is not None else None
+            if owner and owner != feature.name:
+                # The page that shows it already belongs to a feature: this
+                # code is part of that feature, not a second one. Only when
+                # no other part of the product imports it: a package several
+                # parts share belongs to none of them.
+                target.joins = owner if only_there else ""
+            elif shown_on is not None:
+                # Its code is what one part of the product's pages render,
+                # and nobody owns that page: the feature is the page.
+                target.has_no_surface = False
+                target.reached_only = True
+                target.authored = authored_names(
+                    shown_on, index, nav_pairs,
+                    brand_words=ctx.brand_words, scope_words=scope_words,
+                )
             continue
         target.authored = authored_names(
             page, index, nav_pairs,
@@ -578,6 +614,7 @@ def name_product_layer(
         index=index, routes_index=routes_index, developer_features=developer,
         brand_words=_brand_words(ctx.repo_path), nav_pairs=_nav_pairs(ctx, index),
         files_without_ui=route_files_without_ui(ctx.repo_path, routes_index),
+        page_reach=_page_reach(ctx, routes_index),
         writer=build_name_writer(**llm),
     )
     telemetry["entry_points"] = _entry_point_report(ctx, routes_index, index)
@@ -703,3 +740,45 @@ def _entry_point_report(ctx: Any, routes_index: list[dict[str, Any]], index: UiT
 
     entries, errors = collect_entry_points([pages, commands, operations, actions])
     return entry_report(entries, errors)
+
+
+def _page_reach(ctx: Any, routes_index: list[dict[str, Any]]) -> dict[str, frozenset[str]]:
+    """Files each page imports. Empty when the unit has no pages or the
+    import graph cannot be built."""
+    page_files = {str(r["file"]) for r in routes_index if r.get("method") == "PAGE" and r.get("file")}
+    if not page_files:
+        return {}
+    try:
+        from wystan.pipeline_v2.entry_points.page_reach import files_reached_from
+        from wystan.pipeline_v2.flow_reach import build_reach_context
+
+        return files_reached_from(build_reach_context(ctx), page_files)
+    except Exception:  # noqa: BLE001 — reach is evidence, never a requirement
+        return {}
+
+
+def _page_that_shows(
+    feature: Any, pages: list[Any], page_reach: dict[str, frozenset[str]], scope_words: frozenset[str],
+) -> tuple[Any | None, bool]:
+    """The page through which a user reaches a feature that has no page file,
+    and whether that part of the product is the only one importing it.
+
+    Pages are grouped by the first word of their URL. The feature is shown by
+    a group when more than half of the pages that import its code are in it;
+    the shallowest of those pages is returned. Code imported from all over
+    the product (a UI kit) has no such group and returns ``None``."""
+    from wystan.pipeline_v2.authored_names import _capability_segments
+
+    own = set(feature.paths or [])
+    importers = [page for page in pages if own & page_reach.get(page.file, frozenset())]
+    if not importers:
+        return None, False
+    groups: dict[str, list[Any]] = {}
+    for page in importers:
+        segments = _capability_segments(page, scope_words)
+        groups.setdefault(segments[0] if segments else "", []).append(page)
+    word, members = max(groups.items(), key=lambda item: (len(item[1]), item[0]))
+    if not word or len(members) * 2 <= len(importers):
+        return None, False
+    shallowest = min(members, key=lambda page: (len(page.static_segments()), len(page.pattern), page.pattern))
+    return shallowest, len(groups) == 1

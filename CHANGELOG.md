@@ -24,6 +24,14 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   The scan pipeline never read that file.
 
 ### Changed
+- **A feature made of components is tied to the pages that show it.** Page
+  imports are followed five files deep (`entry_points/page_reach.py`). A
+  feature with no page of its own, whose code is imported mostly from the
+  pages of one part of the product, is no longer removed: it takes that
+  page's name when nobody owns the page ("Analytics" on plane), or all of it
+  joins the feature that owns the page when no other part of the product
+  imports it (`scan_meta.unnameable_features_removed.joined`). A package
+  imported from several parts stays shared. `KEY_SCHEMA_VERSION` is 95.
 - **API products get a product layer from their schema.** New adapters read
   GraphQL operations composed in code (`entry_points/graphql_schema.py`,
   graphene: root type, group classes, operations, with descriptions from a
