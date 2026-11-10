@@ -34,6 +34,7 @@ from wystan.pipeline_v2.product_name_laws import (
     LawContext,
     product_name_violations,
 )
+from wystan.pipeline_v2.product_strings import _read_text
 from wystan.pipeline_v2.product_name_writer import NameWriter, build_name_writer
 from wystan.pipeline_v2.spine_anchors import load_spine_vocab
 from wystan.pipeline_v2.ui_text import UiLabel, UiTextIndex, collect_ui_text
@@ -393,10 +394,11 @@ def _brand_words(repo_path: Any) -> list[str]:
     """The product's own name: the repository directory and the root
     package's name and scope."""
     words = set(tokenize_name(repo_path.name))
-    manifest = repo_path / "package.json"
+    # Size-capped and never through a symlink that leaves the repository.
+    raw = _read_text(repo_path, "package.json")
     try:
-        declared = json.loads(manifest.read_text(encoding="utf-8")).get("name") or ""
-    except (OSError, ValueError, AttributeError):
+        declared = (json.loads(raw).get("name") or "") if raw else ""
+    except (ValueError, AttributeError):
         declared = ""
     words.update(tokenize_name(str(declared).replace("@", " ").replace("/", " ")))
     return sorted(words)

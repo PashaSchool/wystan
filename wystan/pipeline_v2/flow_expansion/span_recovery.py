@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wystan.analyzer.import_graph import _resolve_import
+from wystan.analyzer.safe_read import path_within_repo
 
 if TYPE_CHECKING:
     from wystan.analyzer.ast_extractor import FileSignature
@@ -523,6 +524,9 @@ def whole_file_lines(rctx: "ReachContext", rel_path: str) -> tuple[int, int] | N
     text = (sig.source if sig is not None else None) or ""
     if not text:
         path = Path(str(rctx.repo_path)) / rel_path
+        # A symlink that leaves the repository is never read.
+        if not path_within_repo(path, rctx.repo_path):
+            return None
         try:
             if not path.is_file() or path.stat().st_size > _MAX_WHOLE_FILE_BYTES:
                 return None
