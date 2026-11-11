@@ -48,11 +48,13 @@ from wystan.pipeline_v2.spine_anchors import load_spine_vocab
 from wystan.pipeline_v2.ui_text import UiLabel, UiTextIndex, collect_ui_text
 
 __all__ = [
+    "EVIDENCE_NONE",
     "EVIDENCE_UI_TEXT",
     "JOINS_PREFIX",
     "UNNAMEABLE_PREFIX",
     "NameTarget",
     "build_ui_index",
+    "cap_confidence_by_evidence",
     "is_unnameable",
     "name_product_layer",
     "route_files_without_ui",
@@ -62,6 +64,11 @@ __all__ = [
 EVIDENCE_UI_TEXT = "ui-text"
 EVIDENCE_UI_LABEL = "ui-label"
 EVIDENCE_NOT_AUTHORED = "not-authored"
+EVIDENCE_NONE = "not-evidenced"
+# Evidence that the product itself states the name. Only these earn "high".
+_STATED_PREFIX = "authored:"
+_STATED_EVIDENCE = frozenset({"cli-declared"})
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 UNNAMEABLE_PREFIX = "unnameable:"
 NO_USER_SURFACE = "no_user_surface"
 JOINS_PREFIX = "joins:"
@@ -624,7 +631,43 @@ def name_product_layer(
     )
     if name_flows:
         telemetry["flows_removed"] = drop_unnameable_flows(user_flows, flows)
+        # Last pass before output: nothing reads the confidence after this.
+        telemetry["feature_confidence"] = cap_confidence_by_evidence(product_features)
     return telemetry
+
+
+def _evidence_ceiling(evidence: Iterable[str]) -> str:
+    """The highest confidence ``evidence`` can carry: "high" when the product
+    states the name, "low" when there is none, "medium" for everything
+    inferred (a URL segment, user-visible text, the shape of the code)."""
+    notes = [str(note) for note in evidence]
+    if not notes:
+        return "low"
+    if any(note.startswith(_STATED_PREFIX) or note in _STATED_EVIDENCE for note in notes):
+        return "high"
+    return "medium"
+
+
+def cap_confidence_by_evidence(product_features: list[Any]) -> dict[str, int]:
+    """Lower each product feature's ``name_confidence`` to what its
+    ``name_evidence`` supports; never raise it.
+
+    A name kept because it merely passes the laws records no evidence, and the
+    model's default confidence is "high": without this a name nobody wrote
+    reads as the most trusted one. Such a name becomes "low" with the note
+    ``not-evidenced``. Returns the count of features per final level."""
+    counts = {"high": 0, "medium": 0, "low": 0, "lowered": 0}
+    for feature in product_features:
+        evidence = list(getattr(feature, "name_evidence", None) or [])
+        ceiling = _evidence_ceiling(evidence)
+        current = str(getattr(feature, "name_confidence", "") or "high")
+        if _CONFIDENCE_RANK.get(current, 2) > _CONFIDENCE_RANK[ceiling]:
+            feature.name_confidence = ceiling
+            counts["lowered"] += 1
+        if not evidence:
+            feature.name_evidence = [EVIDENCE_NONE]
+        counts[str(feature.name_confidence)] = counts.get(str(feature.name_confidence), 0) + 1
+    return counts
 
 
 def build_ui_index(

@@ -3705,7 +3705,9 @@ ENV_OUTPUT_FLAGS = (
 #: feature that owns the page when no other part imports it.
 #: KS98 (2026-11-11): ``scan_meta.agents`` reports the agents, tools, skills
 #: and MCP servers a repository declares.
-KEY_SCHEMA_VERSION = 98
+#: KS99 (2026-11-11): a product feature's name confidence is capped by its
+#: evidence; a name with none is "low" and says ``not-evidenced``.
+KEY_SCHEMA_VERSION = 99
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
