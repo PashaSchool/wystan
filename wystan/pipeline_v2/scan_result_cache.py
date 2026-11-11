@@ -3665,7 +3665,45 @@ ENV_OUTPUT_FLAGS = (
 #: KS82 (2026-11-10): the ``wystan.yaml`` customer rule is removed from
 #: Stage 6.5 and Stage 8. ``scan_meta.product_clusterer_votes_cast`` loses
 #: its ``customer-yaml`` key on every scan, so cached results are invalidated.
-KEY_SCHEMA_VERSION = 82
+#:
+#: KS83 (2026-11-10): flow expansion measures every node (no span-less file
+#: nodes) and links tRPC client calls to their procedures with ``rpc`` edges.
+#: Flow nodes, edges, line ranges and LoC change on every scan.
+#:
+#: KS84 (2026-11-10): flat-file route grammar (URL read from the file name),
+#: addressing segments, container and internal route anchors barred, RPC
+#: routers attached to the product features that call them. Developer and
+#: product feature sets change on flat-routed and tRPC repositories.
+#:
+#: KS85 (2026-11-10): product features and user flows are named in product
+#: language from user-visible text. ``display_name`` of product features,
+#: ``name`` of user flows, and their ``name_confidence`` / ``name_evidence``
+#: change on every scan.
+#:
+#: KS86 (2026-11-10): Stage 3 offers only behaviour symbols as flow candidates
+#: and never anchors a flow on a declaration (schema, type, constant table).
+#: The Stage 3 prompt, the flow set and flow entry points change.
+#:
+#: KS87 (2026-11-10): product features are named from their top page
+#: (navigation label, page title, heading, URL word); a product feature with
+#: no page and an unnameable user flow leave the product layer; the default
+#: Sonnet is claude-sonnet-5-5.
+#:
+#: KS88 (2026-11-10): entry points. A Go binary owns the commands its main
+#: package imports; a command-line tool with detected commands keeps its
+#: user flows; command groups are product features under the binary's, named
+#: by their own descriptions; author-written names are not judged by the
+#: code-name laws; ``scan_meta.entry_points`` is reported.
+#:
+#: KS89-90 (2026-11-10): a page-less feature that serves a group of API
+#: operations keeps its place; navigation labels are resolved through the
+#: UI catalog; a package that declares UI actions or schema operations is not
+#: barred as internal; GraphQL operation groups become product features.
+#:
+#: KS92-95 (2026-11-10): a page-less feature whose code is imported by the
+#: pages of one part of the product takes that page's name, or joins the
+#: feature that owns the page when no other part imports it.
+KEY_SCHEMA_VERSION = 97
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

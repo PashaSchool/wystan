@@ -426,6 +426,9 @@ class FlowEdge(BaseModel):
       - ``import``            — A imports B (T1 file-level edge).
       - ``call``              — A's body references B by identifier
                                 (T1 intra-repo call edge).
+      - ``rpc``               — A calls a tRPC procedure defined by B
+                                (``trpc.a.b.useQuery()`` → the procedure
+                                symbol). No import connects the two.
       - ``cross_stack_http``  — A is a ``fetch_call`` node whose URL
                                 literal matched a route in
                                 ``routes_index`` (T2 cross-stack edge).
@@ -434,7 +437,7 @@ class FlowEdge(BaseModel):
     # ``from`` is a Python keyword — pydantic supports it via alias.
     from_: str = Field(alias="from")
     to: str
-    kind: Literal["import", "call", "cross_stack_http"]
+    kind: Literal["import", "call", "cross_stack_http", "rpc"]
     confidence: Literal["high", "medium", "low"] = "medium"
 
     model_config = {"populate_by_name": True}
@@ -986,6 +989,11 @@ class Feature(BaseModel):
     # from the serialized JSON (see ``_omit_unset_spine_fields``) so
     # default output stays byte-identical to engines predating the field.
     name_evidence: list[str] | None = None
+    # The product feature this one is a sub-feature of, taken from its entry
+    # point's declared parent (a command group under its binary, a page under
+    # the page that contains it). ``None`` for a top-level feature and omitted
+    # from the serialized JSON then. The list of product features stays flat.
+    parent_product_feature_id: str | None = None
     # Phase 3 dual-evidence (2026-07): {"code": [paths], "anchors": [{text,source,
     # locator}], "confidence": 0-1} — code + product-source corroboration, attached
     # deterministically by dual_evidence.py. Additive/optional; None when not computed.
@@ -1150,6 +1158,7 @@ class Feature(BaseModel):
                         # WYSTAN_NAME_EVIDENCE_RUNGS; a None dump is
                         # byte-identical to pre-R5 output.
                         "name_evidence",
+                        "parent_product_feature_id",
                         # B78 Seg G — stamped only under WYSTAN_NAV_PARENT;
                         # a None dump is byte-identical to pre-Seg-G output.
                         "nav_parent",

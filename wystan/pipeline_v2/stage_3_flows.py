@@ -55,6 +55,7 @@ from wystan.analyzer.ast_extractor import (
     FileSignature,
     extract_signatures,
 )
+from wystan.analyzer.symbol_behaviour import DECLARATION, classify_symbol
 from wystan.analyzer.validation import is_test_file
 from wystan.cache.backend import CacheKind
 from wystan.llm.cost import CostTracker, deterministic_params
@@ -581,6 +582,44 @@ def _enumerate_candidates(
     )
 
 
+_CALLABLE_KINDS = frozenset({"function", "class"})
+# Functions defined in a file whether or not they are exported: a
+# ``function name`` declaration, or a ``const name =`` bound to a function.
+_LOCAL_FUNCTION = re.compile(
+    r"\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)"
+    r"|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(?:async\s*)?(?:function\b|\([^)\n]*\)\s*(?::[^=\n]+)?=>|[A-Za-z_$][\w$]*\s*=>)",
+)
+
+
+def _local_callable_pattern(sig: FileSignature) -> "re.Pattern[str] | None":
+    """Matches a reference to any function or class defined in the file."""
+    names = {sr.name for sr in sig.symbol_ranges if sr.kind in _CALLABLE_KINDS}
+    for match in _LOCAL_FUNCTION.finditer(sig.source or ""):
+        names.add(match.group(1) or match.group(2))
+    if not names:
+        return None
+    alternatives = "|".join(re.escape(name) for name in sorted(names))
+    return re.compile(r"(?<![\w$.])(?:" + alternatives + r")(?![\w$])")
+
+
+def _is_declaration_export(
+    rel: str, sig: FileSignature, sym: str, local_callables: "re.Pattern[str] | None",
+) -> bool:
+    """True when the export ``sym`` is a declaration with no behaviour.
+
+    A ``const`` that wraps or aliases a function defined in the same file
+    (``export const POST = withAuth(handler)``) is behaviour: the code it
+    runs is that function."""
+    symbol = next((sr for sr in sig.symbol_ranges if sr.name == sym), None)
+    if classify_symbol(rel, sig.source or "", symbol) != DECLARATION:
+        return False
+    if symbol is None or symbol.kind != "const" or local_callables is None:
+        return True
+    lines = (sig.source or "").splitlines()[symbol.start_line - 1:symbol.end_line]
+    initializer = "\n".join(lines).partition("=")[2]
+    return local_callables.search(initializer) is None
+
+
 def _enumerate_candidates_paths(
     paths: list[str],
     repo_path: str,
@@ -634,10 +673,18 @@ def _enumerate_candidates_paths(
         content_sig[rel] = hashlib.sha256(
             (sig.source or "").encode("utf-8", "ignore"),
         ).hexdigest()[:16]
+        local_callables = _local_callable_pattern(sig)
         for sym in sig.exports:
             if sym in seen_exports:
                 continue
             seen_exports.add(sym)
+            # A declaration (schema, type, constant table) has no behaviour
+            # to follow: it is not offered as a flow candidate and can never
+            # be an entry point.
+            if _is_declaration_export(rel, sig, sym, local_callables):
+                if symbol_kinds is not None:
+                    symbol_kinds[sym] = DECLARATION
+                continue
             exports.append(sym)
             # Pull start line from symbol_ranges when present.
             start_line = next(
@@ -762,6 +809,15 @@ def _parse_response_text(text: str) -> list[dict[str, Any]]:
     return [f for f in flows if isinstance(f, dict)]
 
 
+def _lists_only_declarations(
+    symbols_raw: list[Any], symbol_kinds: dict[str, str] | None,
+) -> bool:
+    """True when a flow lists symbols and every known one is a declaration."""
+    if not symbol_kinds:
+        return False
+    return any(symbol_kinds.get(s) == DECLARATION for s in symbols_raw if isinstance(s, str))
+
+
 def _validate_and_attach_lines(
     raw_flows: list[dict[str, Any]],
     symbol_to_loc: dict[str, tuple[str, int]],
@@ -815,6 +871,9 @@ def _validate_and_attach_lines(
             s for s in symbols_raw
             if isinstance(s, str) and s in symbol_to_loc
         ]
+        if not symbols and _lists_only_declarations(symbols_raw, symbol_kinds):
+            notes.append(f"dropped flow anchored only on declarations: {name!r}")
+            continue
         entry_file: str | None = None
         entry_line: int | None = None
         if symbols:

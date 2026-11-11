@@ -1004,6 +1004,14 @@ def run_finalize_phase(
              .get("headless_product_spine"))):
         uf_suppressed = False
         scan_meta["uf_suppression_lifted"] = "headless-product-spine"
+    # A command-line tool whose commands were found has user journeys: each
+    # command is something a user runs. Suppression stays for a CLI-classed
+    # unit with no detected command surface.
+    if uf_suppressed and bool(
+            ((scan_meta.get("stage_6_86_anchored_mint") or {})
+             .get("cli_anchor_supply") or {}).get("clusters")):
+        uf_suppressed = False
+        scan_meta["uf_suppression_lifted"] = "cli-command-surface"
     if uf_suppressed:
         uf_reason = suppression_reason(repo_class_result)
         scan_meta["uf_suppressed_reason"] = uf_reason
@@ -1607,6 +1615,37 @@ def run_finalize_phase(
                 _cli_fence_tele = {"error": str(exc)[:200]}
             if _cli_fence_tele:
                 scan_meta["cli_home_fence"] = _cli_fence_tele
+
+        # ── Command groups are product features ───────────────────────
+        # ``gh pr`` ("Manage pull requests") becomes a product feature
+        # under the binary's; its commands' user flows move with it.
+        from wystan.pipeline_v2.cli_command_groups import split_command_groups
+        try:
+            _cli_groups_tele = split_command_groups(
+                ctx, product_features,
+                [f for f in features if getattr(f, "layer", None) != "product"],
+                user_flows, list(bipartite.flows))
+        except Exception as exc:  # noqa: BLE001 — additive split is best-effort
+            _cli_groups_tele = {"error": str(exc)[:200]}
+        if _cli_groups_tele.get("binaries") or _cli_groups_tele.get("error"):
+            scan_meta["cli_command_groups"] = _cli_groups_tele
+
+        # ── Operation groups are product features ─────────────────────
+        # A schema that composes its operations into groups (``Checkout``,
+        # ``Order``) names the product's features. Takes only code nobody
+        # owns.
+        try:
+            from wystan.pipeline_v2.entry_group_features import mint_entry_group_features
+            from wystan.pipeline_v2.entry_points.graphql_schema import graphql_entries
+
+            _op_groups_tele = mint_entry_group_features(
+                graphql_entries(ctx), product_features,
+                [f for f in features if getattr(f, "layer", None) != "product"],
+                user_flows, list(bipartite.flows))
+        except Exception as exc:  # noqa: BLE001 — additive mint is best-effort
+            _op_groups_tele = {"error": str(exc)[:200]}
+        if _op_groups_tele.get("groups") or _op_groups_tele.get("error"):
+            scan_meta["entry_group_features"] = _op_groups_tele
 
     # ── W3.1 D6 — route-group journey recall seeds (BOTH paths) ─────────
     # A >= 2-route product group no UF touches (tracecat tables/chat, the
@@ -2365,6 +2404,35 @@ def run_finalize_phase(
                     f"transport_handoff: FAILED ({exc}) — continuing",
                     feature=None,
                 )
+
+    # ── RPC router re-home ─────────────────────────────────────────
+    # Developer features still without a product feature (the transport
+    # package's routers above all) are attached to the product feature
+    # whose flows call their procedures, by the ``rpc`` edges flow
+    # expansion recorded. Before the 6.97 LoC passes, so the moved
+    # membership is counted normally.
+    from wystan.pipeline_v2.rpc_router_rehome import rehome_rpc_called_devs
+    with StageLogger(run_dir, 6, "rpc_router_rehome") as log_rpc:
+        try:
+            rpc_tele = rehome_rpc_called_devs(
+                features, product_features, list(bipartite.flows),
+            )
+            scan_meta["rpc_router_rehome"] = rpc_tele
+            log_rpc.info(
+                "rpc_router_rehome: checked=%d rehomed=%d tied=%d" % (
+                    rpc_tele["checked"], rpc_tele["rehomed"], rpc_tele["tied"],
+                ),
+                feature=None,
+            )
+            write_stage_artifact(
+                ctx.repo_path, stage_index=6, stage_name="rpc_router_rehome",
+                payload=dict(rpc_tele), run_dir=run_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — never break a scan
+            scan_meta.setdefault("warnings", []).append(
+                f"rpc-router-rehome failed ({exc}); features left unowned"
+            )
+            log_rpc.info(f"rpc_router_rehome: FAILED ({exc})", feature=None)
 
     # ── Stage 6.986 — mega-PF nav-area journey re-home + mint (B24) ──
     # A board-dominating umbrella PF (>=25% of homed journeys) whose
@@ -5581,6 +5649,31 @@ def run_finalize_phase(
             f"generic-container demote failed ({exc}); no demote"
         )
 
+    # ── Unnameable product features leave the product layer ────────────
+    # A product feature with no product-language name (a package, a
+    # framework, an implementation verb) is removed here, before the
+    # line-count rollups, and its developer features join the product
+    # feature their code lives under or become unowned. User flows are
+    # judged by the last pass, when their names are final.
+    try:
+        from wystan.pipeline_v2.product_language_names import (
+            name_product_layer as _name_features_early,
+        )
+        _unf_tele = _name_features_early(
+            features, product_features, user_flows, list(bipartite.flows),
+            ctx=ctx, routes_index=lineage_result.routes_index, name_flows=False,
+            llm={
+                "model_id": model_id, "cost_tracker": tracker,
+                "cache": getattr(ctx, "cache_backend", None),
+                "llm_health": llm_health,
+            },
+        )
+        scan_meta["unnameable_features_removed"] = _unf_tele["features_removed"]
+    except Exception as exc:  # noqa: BLE001 — never break a scan
+        scan_meta.setdefault("warnings", []).append(
+            f"unnameable-feature removal failed ({exc}); none removed"
+        )
+
     # ── B97 — emission HARD gate (WYSTAN_EMISSION_HARD_GATE, default
     # ON since flip-pack #16; =0 kill-switch) — the LAST barrier before
     # census + Stage 7 ─────────────────────────────────────────────────
@@ -6004,6 +6097,44 @@ def run_finalize_phase(
         scan_meta.setdefault("warnings", []).append(
             f"synth-conversion failed ({exc}); synthesized tags left as-is"
         )
+
+    # ── Product-language names (last writer of the product display) ────
+    # Product features and user flows are renamed from the text the product
+    # shows its users. Runs after every pass that renames, regrades or
+    # removes product rows, so it names the rows that are emitted.
+    from wystan.pipeline_v2.product_language_names import name_product_layer
+    with StageLogger(run_dir, 7, "product_language_names") as log_pln:
+        try:
+            pln_tele = name_product_layer(
+                features, product_features, user_flows, list(bipartite.flows),
+                ctx=ctx,
+                routes_index=lineage_result.routes_index,
+                llm={
+                    "model_id": model_id, "cost_tracker": tracker,
+                    "cache": getattr(ctx, "cache_backend", None),
+                    "llm_health": llm_health,
+                },
+            )
+            scan_meta["entry_points"] = pln_tele.pop("entry_points", None)
+            scan_meta["product_language_names"] = pln_tele
+            # The writer's calls happen after the full-bill refresh above.
+            scan_meta["cost_usd"] = round(tracker.total_cost_usd, 4)
+            scan_meta["calls"] = tracker.call_count
+            log_pln.info(
+                "product_language_names: pf %s, uf %s" % (
+                    pln_tele["product_features"], pln_tele["user_flows"],
+                ),
+                feature=None,
+            )
+            write_stage_artifact(
+                ctx.repo_path, stage_index=7, stage_name="product_language_names",
+                payload=dict(pln_tele), run_dir=run_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — naming never breaks a scan
+            scan_meta.setdefault("warnings", []).append(
+                f"product-language-names failed ({exc}); names left as-is"
+            )
+            log_pln.info(f"product_language_names: FAILED ({exc})", feature=None)
 
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import

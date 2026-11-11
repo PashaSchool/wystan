@@ -40,6 +40,9 @@ _PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-4-7":           (15.00, 75.00),
     "claude-sonnet-4-20250514":  (3.00, 15.00),
     "claude-sonnet-4-6":         (3.00, 15.00),
+    # Claude 5 family
+    "claude-sonnet-5-5":         (2.00, 10.00),
+    "claude-sonnet-5":           (2.00, 10.00),
     "claude-haiku-4-5":          (1.00,  5.00),
     "claude-haiku-4-5-20251001": (1.00,  5.00),
     # Claude 3.x legacy — kept for compatibility with older configs
@@ -96,12 +99,41 @@ _ADAPTIVE_THINKING_DEFAULT_MODELS: tuple[str, ...] = (
 )
 
 
+# Models on which ``thinking:{type:"disabled"}`` is itself a 400 and the
+# lowest thinking setting is ``{type:"between_tools"}``: no extended thinking
+# before the reply, so a JSON-extraction stage keeps its output budget.
+# Checked BEFORE the prefix list above, because "claude-sonnet-5-5" also
+# starts with "claude-sonnet-5".
+_BETWEEN_TOOLS_THINKING_MODELS: tuple[str, ...] = (
+    "claude-sonnet-5-5",
+)
+
+
+def thinking_between_tools(model: str) -> bool:
+    """True when thinking is turned off with ``{type:"between_tools"}``."""
+    return any(model.startswith(p) for p in _BETWEEN_TOOLS_THINKING_MODELS)
+
+
+def response_text(message: Any) -> str:
+    """The text of a Messages response, read by block type.
+
+    A response can start with a ``thinking`` block, so the first block is not
+    always the text."""
+    blocks = getattr(message, "content", None) or []
+    return "\n".join(
+        text for block in blocks
+        if getattr(block, "type", "text") == "text" and (text := getattr(block, "text", None))
+    )
+
+
 def thinking_disabled(model: str) -> bool:
     """True when we should send ``thinking:{type:"disabled"}`` for ``model``.
 
     Only for models that default adaptive-thinking ON *and* accept an explicit
     disable — so a JSON-extraction stage keeps its full output budget.
     """
+    if thinking_between_tools(model):
+        return False
     return any(model.startswith(p) for p in _ADAPTIVE_THINKING_DEFAULT_MODELS)
 
 
@@ -118,7 +150,9 @@ def deterministic_params(model: str) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if supports_temperature(model):
         params["temperature"] = 0
-    if thinking_disabled(model):
+    if thinking_between_tools(model):
+        params["thinking"] = {"type": "between_tools"}
+    elif thinking_disabled(model):
         params["thinking"] = {"type": "disabled"}
     stage = current_stage()
     if stage:
@@ -205,7 +239,7 @@ class CostTracker:
         tracker = CostTracker(max_cost=0.50)
         tracker.record(
             provider="anthropic",
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5-5",
             input_tokens=resp.usage.input_tokens,
             output_tokens=resp.usage.output_tokens,
             label="deep-scan",
