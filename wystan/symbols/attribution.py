@@ -20,6 +20,7 @@ from wystan.symbols.extractor import FileSymbols
 
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
+from wystan.llm.client import build_client
 
 _DEFAULT_MODEL = "claude-sonnet-5-5"
 _MAX_SYMBOLS_IN_PROMPT = 120
@@ -120,7 +121,7 @@ def _ask_llm(
 ) -> dict[str, list[dict[str, Any]]] | None:
     """Returns {flow_name: [{file: str, symbols: [str]}]} or None on error."""
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         logger.warning("anthropic not installed — skipping symbol attribution")
         return None
@@ -130,7 +131,7 @@ def _ask_llm(
         return None
 
     try:
-        client = Anthropic(api_key=api_key) if api_key else Anthropic()
+        client = build_client(api_key)
         response = client.messages.create(
             model=gateway_model(model),
             max_tokens=4000,

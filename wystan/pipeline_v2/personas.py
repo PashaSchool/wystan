@@ -61,6 +61,7 @@ from wystan.pipeline_v2.naming_contract import (
     load_naming_vocab,
 )
 from wystan.pipeline_v2.naming_validator import tokenize_name
+from wystan.llm.client import build_client
 
 logger = logging.getLogger(__name__)
 
@@ -123,13 +124,13 @@ def _default_client_factory() -> Any | None:  # pragma: no cover - IO
     """Lazy Anthropic client — ``None`` when SDK / key absent (keyless),
     so every persona degrades to the deterministic path."""
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         return None
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
-    return Anthropic(api_key=api_key)
+    return build_client(api_key)
 
 
 # ── Shared batch-call plumbing ──────────────────────────────────────────
