@@ -6116,6 +6116,7 @@ def run_finalize_phase(
                 },
             )
             scan_meta["entry_points"] = pln_tele.pop("entry_points", None)
+            scan_meta["agents"] = _agent_units_report(ctx)
             scan_meta["product_language_names"] = pln_tele
             # The writer's calls happen after the full-bill refresh above.
             scan_meta["cost_usd"] = round(tracker.total_cost_usd, 4)
@@ -6184,3 +6185,17 @@ def run_finalize_phase(
 __all__ = [
     "run_finalize_phase",
 ]
+
+
+def _agent_units_report(ctx: Any) -> dict[str, Any] | None:
+    """Agents, tools, skills and MCP servers the repository declares, by kind.
+
+    A report only (``scan_meta.agents``): nothing here changes features or
+    flows. ``None`` when the collection fails, so it never stops a scan."""
+    try:
+        from wystan.pipeline_v2.agents import agent_report, collect_agent_units
+
+        units, facts = collect_agent_units(ctx)
+        return agent_report(units, facts)
+    except Exception:  # noqa: BLE001 — a report, never a requirement
+        return None
