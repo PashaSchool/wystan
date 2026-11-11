@@ -8,13 +8,18 @@ feature and shown under no journey, so the feature reads as larger than
 everything inside it (2026-11-11 corpus: 2,673 of 12,450 flows in no journey;
 473 of them of 100 lines or more).
 
-Rule, per unclaimed flow of at least ``MIN_ADOPT_LOC`` owned lines:
+Rule, per unclaimed flow of ``MIN_ADOPT_LOC`` to ``MAX_ADOPT_LOC`` owned lines:
 
   * look at the journeys that already hold a flow of the same developer
     feature whose entry file is in the same directory, then one and two
     directories up;
   * at the first level where such journeys exist, the one holding the most
     such flows adopts it; a tie adopts nothing.
+
+A flow above ``MAX_ADOPT_LOC`` is not a piece of a screen: it is a module
+(a generated API client, a whole service). Putting it into one journey would
+make that journey read as larger than its feature, so it stays unclaimed and
+is counted as ``too_large``.
 
 No journey is created and no flow moves between journeys. Deterministic,
 no model call. Runs before journey line counts are stamped, so the counts
@@ -30,11 +35,15 @@ from typing import Any
 from wystan.pipeline_v2.stage_6_97b_uf_loc import flow_owned_spans, union_span_len
 from wystan.pipeline_v2.stage_6_9_test_strip import is_test_path
 
-__all__ = ["MAX_LEVELS_UP", "MIN_ADOPT_LOC", "adopt_journeyless_flows"]
+__all__ = ["MAX_ADOPT_LOC", "MAX_LEVELS_UP", "MIN_ADOPT_LOC", "adopt_journeyless_flows"]
 
 # Below this a flow is a helper: adopting it would only add a step nobody
 # would name. At or above it the flow is a piece of a screen.
 MIN_ADOPT_LOC = 100
+# Above this a flow is a module, not a screen. On the first corpus rescans the
+# adopted flows that read right were 100 to 900 lines; the one that read wrong
+# was a 7,163-line generated client adopted into a five-flow journey.
+MAX_ADOPT_LOC = 1500
 # The directory itself, its parent and its grandparent.
 MAX_LEVELS_UP = 2
 _SAMPLE_SIZE = 20
@@ -73,7 +82,7 @@ def adopt_journeyless_flows(user_flows: list[Any] | None, flows: list[Any] | Non
     """Attach unclaimed flows to a neighbouring journey in place; telemetry."""
     telemetry: dict[str, Any] = {
         "unclaimed": 0, "considered": 0, "adopted": 0, "adopted_loc": 0,
-        "no_neighbour": 0, "tie": 0, "sample": [],
+        "no_neighbour": 0, "tie": 0, "too_large": 0, "sample": [],
     }
     journeys = list(user_flows or [])
     flow_by_key: dict[str, Any] = {}
@@ -113,6 +122,9 @@ def adopt_journeyless_flows(user_flows: list[Any] | None, flows: list[Any] | Non
             continue
         loc = _owned_loc(flow)
         if loc < MIN_ADOPT_LOC:
+            continue
+        if loc > MAX_ADOPT_LOC:
+            telemetry["too_large"] += 1
             continue
         telemetry["considered"] += 1
         owner = str(getattr(flow, "primary_feature", "") or "")
