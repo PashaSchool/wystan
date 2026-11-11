@@ -300,7 +300,12 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
     _pass(
         "mint_entry_group_features", "entry_group_features.mint_entry_group_features",
         reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
-        writes={F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT, F.NAMES_PRODUCT},
+        # It also removes the journeys of features judged plumbing and credits a
+        # joined developer feature's lines to the feature it joins.
+        writes={
+            F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT,
+            F.JOURNEY_SET, F.METRICS_LOC, F.NAMES_PRODUCT,
+        },
     ),
     _pass(
         "seed_route_group_journeys", "route_group_recall.seed_route_group_journeys",
@@ -642,7 +647,12 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
     _pass(
         "name_product_layer", "product_language_names.name_product_layer",
         reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
-        writes={F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT, F.NAMES_PRODUCT},
+        # It also removes the journeys of features judged plumbing and credits a
+        # joined developer feature's lines to the feature it joins.
+        writes={
+            F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT,
+            F.JOURNEY_SET, F.METRICS_LOC, F.NAMES_PRODUCT,
+        },
         calls_model=True,
         early_reads={
             facet: _JUDGED_AGAIN_LATER
@@ -778,7 +788,12 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
     _pass(
         "name_product_layer#2", "product_language_names.name_product_layer",
         reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
-        writes={F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT, F.NAMES_PRODUCT},
+        # It also removes the journeys of features judged plumbing and credits a
+        # joined developer feature's lines to the feature it joins.
+        writes={
+            F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT,
+            F.JOURNEY_SET, F.METRICS_LOC, F.NAMES_PRODUCT,
+        },
         calls_model=True,
     ),
     _pass(
@@ -811,7 +826,7 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
     _pass(
         "name_product_layer#3", "product_language_names.name_product_layer",
         reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
-        writes={F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
+        writes={F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT, F.METRICS_LOC},
         calls_model=True,
     ),
     _pass(

@@ -40,6 +40,7 @@ from wystan.pipeline_v2.naming_validator import EvidenceBundle, tokenize_name, v
 from wystan.pipeline_v2.product_name_laws import (
     KIND_FEATURE,
     KIND_FLOW,
+    LAW_PROTOCOL_STEP,
     LawContext,
     product_name_violations,
 )
@@ -296,6 +297,12 @@ class _Namer:
         text = " ".join(part.capitalize() for part in re.split(r"[-_\s]+", target.slug) if part)
         return text if text and self._rejection(target, text) is None else None
 
+    def _is_second_holder(self, target: NameTarget) -> bool:
+        if target.kind != KIND_FEATURE:
+            return False
+        holder = self._current.get((target.group, target.current.lower()))
+        return holder is not None and holder != target.key
+
     def _slug_name(self, target: NameTarget) -> str | None:
         """The feature's slug as words, when it passes the laws and no
         sibling has it. Unlike ``_identity_candidate`` it asks for no other
@@ -355,6 +362,15 @@ class _Namer:
             target.apply(target.url_name, "low", [SOURCE_URL, "bare-verb"])
             return
         broken = self._violations(target, target.current)
+        if not broken and self._is_second_holder(target):
+            # Two features wear this name. The first by slug keeps it; this
+            # one takes its own slug when that is a lawful, free name.
+            own = self._slug_name(target)
+            if own is not None and own.lower() != target.current.lower():
+                self.telemetry["renamed_duplicate"] = self.telemetry.get("renamed_duplicate", 0) + 1
+                self._take(target, own)
+                target.apply(own, "low", [EVIDENCE_IDENTITY])
+                return
         if not broken:
             self.telemetry["kept"] += 1
             self._take(target, target.current)
@@ -389,6 +405,13 @@ class _Namer:
             return False
         for candidate in target.authored:
             if product_name_violations(candidate.text, KIND_FEATURE, self._ctx, is_shown=True):
+                continue
+            # A word taken from the URL was not written by the product as a
+            # title: the exemption for a protocol word the product itself
+            # shows ("Callbacks") does not cover it.
+            if candidate.source == SOURCE_URL and LAW_PROTOCOL_STEP in product_name_violations(
+                candidate.text, KIND_FEATURE, self._ctx, is_shown=False,
+            ):
                 continue
             if candidate.text.lower() in self._taken.get(target.group, set()):
                 continue
@@ -813,9 +836,9 @@ def feature_name_judges(
             state["laws"] = build_law_context(state["index"], _brand_words(ctx.repo_path))
         return state["index"]
 
-    def violations(name: str) -> list[str]:
+    def violations(name: str, subject: frozenset[str] = frozenset()) -> list[str]:
         index()
-        return product_name_violations(name, KIND_FEATURE, state["laws"])
+        return product_name_violations(name, KIND_FEATURE, state["laws"], subject=subject)
 
     def stated() -> frozenset[str]:
         return frozenset(

@@ -201,6 +201,21 @@ def _flow_violations(words: list[str], ctx: LawContext, subject: frozenset[str])
     return []
 
 
+def _is_subject_noun(law: str, words: list[str], subject: frozenset[str]) -> bool:
+    """Two feature laws judge a word by a list: verb-led (the first word is
+    also a verb: "Access Tokens", "Read Replicas") and container (the word
+    is also a layer: "Models"). When that word is what the feature's own
+    journeys are about, it is the capability's noun and the law does not
+    apply."""
+    if not subject or not words:
+        return False
+    if law == LAW_VERB_LED:
+        return words[0] in subject
+    if law == LAW_CONTAINER_NAME:
+        return all(word in subject for word in words)
+    return False
+
+
 def product_name_violations(
     name: str,
     kind: str,
@@ -214,7 +229,9 @@ def product_name_violations(
     ``is_shown`` says the product itself uses this exact text as a page title
     or heading, which lets a one-word feature name that is also a verb stand
     ("Support", "Share"). ``subject`` holds the words for the thing a flow
-    is about; a flow name that starts with one of them is not verb-first."""
+    is about; a flow name that starts with one of them is not verb-first.
+    For a feature it holds the nouns its journeys are about, which excuses a
+    word that is only by a list a verb or a layer."""
     text = (name or "").strip()
     words = [word.lower() for word in _WORD.findall(text)]
     if not words:
@@ -225,4 +242,5 @@ def product_name_violations(
         found += _flow_violations(words, ctx, subject)
     else:
         found += _feature_violations(text, words, ctx, is_shown)
+        found = [law for law in found if not _is_subject_noun(law, words, subject)]
     return found
