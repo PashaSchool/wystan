@@ -716,6 +716,9 @@ def name_product_layer(
         writer=build_name_writer(**llm),
     )
     telemetry["entry_points"] = _entry_point_report(ctx, routes_index, index)
+    # A second opinion on the features about to be removed: some are
+    # capabilities that live in server code or behind another screen.
+    telemetry["demotion_veto"] = _veto(product_features, developer, user_flows, index, ctx, llm)
     # What has no product-language name is not shown as product.
     telemetry["features_removed"] = demote_unnameable_features(
         product_features, developer, user_flows, flows,
@@ -725,6 +728,26 @@ def name_product_layer(
         # Last pass before output: nothing reads the confidence after this.
         telemetry["feature_confidence"] = cap_confidence_by_evidence(product_features)
     return telemetry
+
+
+def _veto(
+    product_features: list[Any], developer: list[Any], user_flows: list[Any],
+    index: UiTextIndex, ctx: Any, llm: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the demotion veto; it never stops the naming pass."""
+    from wystan.pipeline_v2.demotion_veto import run_demotion_veto
+
+    laws = build_law_context(index, _brand_words(ctx.repo_path))
+    try:
+        return run_demotion_veto(
+            product_features, developer, user_flows,
+            is_candidate=is_unnameable,
+            violations=lambda name: product_name_violations(name, KIND_FEATURE, laws),
+            joins_prefix=JOINS_PREFIX,
+            llm={key: llm.get(key) for key in ("cost_tracker", "cache", "llm_health")},
+        )
+    except Exception as exc:  # noqa: BLE001 - without a verdict the removal goes ahead as before
+        return {"applied": False, "reason": f"failed: {exc}"[:200]}
 
 
 def _evidence_ceiling(evidence: Iterable[str]) -> str:
@@ -867,6 +890,8 @@ def route_files_without_ui(repo_path: Any, routes_index: list[dict[str, Any]]) -
 # minted and it has no page to be judged by: this pass leaves it alone.
 _AUTHOR_EVIDENCE = frozenset({
     "authored:description", "authored:schema", "cli-declared", "model:capability-split",
+    # A feature the demotion veto kept: judged once, not removed by a later call.
+    "model:capability",
 })
 
 
