@@ -4832,6 +4832,7 @@ def run_finalize_phase(
                     list(bipartite.flows), list(bipartite.edges),
                     product=product_name_of(ctx.repo_path),
                     violations=_cs_laws, stated_names=_cs_stated,
+                    loc_ledger=_pf_loc_ledger,
                     llm={
                         "cost_tracker": tracker,
                         "cache": getattr(ctx, "cache_backend", None),
@@ -5220,10 +5221,12 @@ def run_finalize_phase(
     if flow_name_v2_enabled():
         with StageLogger(run_dir, 7, "flow_name_v2") as log_fnv2:
             try:
+                from wystan.pipeline_v2.capability_split import carved_from
                 _fnv2_tele = apply_flow_name_v2(
                     list(bipartite.flows),
                     routes_index=lineage_result.routes_index,
                     repo_path=ctx.repo_path,
+                    naming_owner=carved_from(features),
                 )
                 log_fnv2.info(
                     "flow_name_v2: renamed %d/%d flows (route=%d symbol=%d "
