@@ -4917,18 +4917,6 @@ def run_finalize_phase(
     # never scan_meta, so the flag-ON vs flag-OFF diff is exactly ``loc``).
     # Kill-switch WYSTAN_UF_LOC=0 → loc stays None → serializer omits it
     # → byte-identical to the pre-B3 engine. Metric must never break a scan.
-    # Before the counts are stamped: a flow of a screen's size that no journey
-    # claimed joins the journey its same-directory neighbours are in, so a
-    # feature's journeys account for the code the feature is credited with.
-    try:
-        from wystan.pipeline_v2.journeyless_flow_adopt import adopt_journeyless_flows
-        scan_meta["journeyless_flow_adopt"] = adopt_journeyless_flows(
-            user_flows, list(bipartite.flows))
-    except Exception as exc:  # noqa: BLE001 — adoption never breaks a scan
-        scan_meta.setdefault("warnings", []).append(
-            f"journey-less flow adoption failed ({exc}); flows left unclaimed"
-        )
-
     from wystan.pipeline_v2.stage_6_97b_uf_loc import (
         apply_uf_loc,
         uf_loc_enabled,
