@@ -3703,7 +3703,7 @@ ENV_OUTPUT_FLAGS = (
 #: KS92-95 (2026-11-10): a page-less feature whose code is imported by the
 #: pages of one part of the product takes that page's name, or joins the
 #: feature that owns the page when no other part imports it.
-KEY_SCHEMA_VERSION = 95
+KEY_SCHEMA_VERSION = 97
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
