@@ -30,7 +30,13 @@ __all__ = ["ADAPTER", "ai_sdk_units", "enclosing_symbol", "tool_refs"]
 ADAPTER = "ai-sdk"
 _IMPORT = re.compile(r"""from\s+['"](?:ai|@ai-sdk/[\w-]+)['"]|require\(\s*['"](?:ai|@ai-sdk/[\w-]+)['"]""")
 # `const name = tool({`  or a property `name: tool({`
-_TOOL = re.compile(r"(?:\b(?:const|let|var)\s+(?P<bound>\w+)\s*(?::[^=]{0,80})?=\s*|\b(?P<key>\w+)\s*:\s*)tool\(\s*(?=\{)")
+# `const name = tool({`, a property `name: tool({`, or a factory that returns
+# the tool: `const name = ({ session }) => tool({`.
+_TOOL = re.compile(
+    r"(?:\b(?:const|let|var)\s+(?P<bound>\w+)\s*(?::[^=]{0,80})?=\s*"
+    r"(?:(?:async\s*)?(?:\([^()]{0,300}\)|\w+)\s*(?::[^=]{0,80})?=>\s*(?:\{\s*return\s+)?)?"
+    r"|\b(?P<key>\w+)\s*:\s*)tool\(\s*(?=\{)",
+)
 _CALL = re.compile(r"\b(?:generateText|streamText|generateObject|streamObject)\(\s*(?=\{)")
 _AGENT_CLASS = re.compile(r"(?:\b(?:const|let|var)\s+(?P<bound>\w+)\s*=\s*)?new\s+(?:Experimental_Agent|ToolLoopAgent|Agent)\(\s*(?=\{)")
 _TOOLS_KEY = re.compile(r"(?<![\w.])tools\s*(?P<sep>[:,}])")
