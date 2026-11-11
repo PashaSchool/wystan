@@ -214,6 +214,7 @@ class _Namer:
         self._writer = writer
         self._taken: dict[str, set[str]] = {}
         self._current: dict[tuple[str, str], str] = {}
+        self._slug_owner: dict[str, str] = {}
         self.telemetry = {
             "total": 0, "written": 0, "kept": 0, "from_label": 0,
             "unnameable": 0, "declined_by_writer": 0, "rejected_proposals": 0,
@@ -296,6 +297,12 @@ class _Namer:
             return None
         text = " ".join(part.capitalize() for part in re.split(r"[-_\s]+", target.slug) if part)
         return text if text and self._rejection(target, text) is None else None
+
+    def _is_anothers_slug(self, target: NameTarget, name: str) -> bool:
+        """True when ``name`` is the slug of a different feature, written as
+        words: that feature is the one the name belongs to."""
+        owner = self._slug_owner.get(name.lower())
+        return owner is not None and owner != target.key
 
     def _is_second_holder(self, target: NameTarget) -> bool:
         if target.kind != KIND_FEATURE:
@@ -409,6 +416,10 @@ class _Namer:
             # A word taken from the URL was not written by the product as a
             # title: the exemption for a protocol word the product itself
             # shows ("Callbacks") does not cover it.
+            if candidate.source == SOURCE_URL and self._is_anothers_slug(target, candidate.text):
+                # "/admin/bots" does not make the admin feature "Bots" when a
+                # feature whose own slug is "bots" exists.
+                continue
             if candidate.source == SOURCE_URL and LAW_PROTOCOL_STEP in product_name_violations(
                 candidate.text, KIND_FEATURE, self._ctx, is_shown=False,
             ):
@@ -430,6 +441,16 @@ class _Namer:
             # The page gave no name that is free: without one this is a
             # package some pages import, not a feature.
             target.has_no_surface = True
+        if (not target.has_no_surface and not self._violations(target, target.current)
+                and (self._is_second_holder(target) or self._is_anothers_slug(target, target.current))):
+            # Its name is another feature's: it takes its own slug instead,
+            # when that is a lawful, free name.
+            own = self._slug_name(target)
+            if own is not None and own.lower() != target.current.lower():
+                self.telemetry["renamed_duplicate"] = self.telemetry.get("renamed_duplicate", 0) + 1
+                self._take(target, own)
+                target.apply(own, "low", [EVIDENCE_IDENTITY])
+                return True
         if not target.has_no_surface and not self._violations(target, target.current):
             # It has a page; the product just does not label it. The current
             # name stands, marked as not authored.
@@ -464,6 +485,9 @@ class _Namer:
         # into it.
         for target in ordered:
             self._current.setdefault((target.group, target.current.lower()), target.key)
+            if target.kind == KIND_FEATURE and target.slug:
+                words = " ".join(part for part in re.split(r"[-_\s]+", target.slug.lower()) if part)
+                self._slug_owner.setdefault(words, target.key)
         # Features with a stated name first, so a URL word is judged against
         # the names its siblings really have.
         ordered.sort(key=lambda t: (not any(c.source != SOURCE_URL for c in t.authored), t.key))

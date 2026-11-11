@@ -3754,7 +3754,12 @@ ENV_OUTPUT_FLAGS = (
 #: a model twice (keep, rename from the feature's own evidence, not a
 #: capability); only an answer given both times is applied, and only a small
 #: feature can be rejected.
-KEY_SCHEMA_VERSION = 115
+#: KS116 (2026-11-11): no late pass deletes a journey (a journey that is not
+#: a product journey stays, parentless and marked); lines move through one
+#: shared rule and the platform lane is brought up to date before output; a
+#: carved feature takes only files its donor is credited with; a URL word
+#: that is another feature's slug is not taken as a name.
+KEY_SCHEMA_VERSION = 116
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
