@@ -309,6 +309,17 @@ class _Namer:
                 if not name:
                     if attempt == 0:
                         self.telemetry["declined_by_writer"] += 1
+                        broken = [] if target.url_name else self._violations(target, target.current)
+                        if broken:
+                            # Silence here removes the item: its current
+                            # name cannot stay. The writer is told so once,
+                            # as it is told why a proposal was rejected.
+                            self.telemetry["declined_asked_again"] = (
+                                self.telemetry.get("declined_asked_again", 0) + 1)
+                            notes[target.key] = (
+                                f'"{target.current}" breaks: ' + ", ".join(broken)
+                                + "; it cannot be kept")
+                            retry.append(target)
                     continue
                 reason = self._rejection(target, name)
                 if reason is None:
