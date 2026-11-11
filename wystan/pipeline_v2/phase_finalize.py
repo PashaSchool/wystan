@@ -4856,6 +4856,51 @@ def run_finalize_phase(
                 )
                 log_cs.info(f"capability_split: FAILED ({exc}) — continuing", feature=None)
 
+    # ── Name or reject ──────────────────────────────────────────────────
+    # A product owner's reading of the features the product did not name:
+    # keep, rename from the feature's own evidence, or not a capability.
+    # After the veto and the split (their features are judged too), before
+    # the metric passes and before the later naming calls, which apply the
+    # laws and the confidence cap to what is left.
+    if anchored_mint_applied and not uf_suppressed:
+        with StageLogger(run_dir, 6, "feature_names") as log_fn:
+            try:
+                from wystan.pipeline_v2.capability_split import product_name_of as _product_name
+                from wystan.pipeline_v2.feature_names import run_feature_names
+                from wystan.pipeline_v2.product_language_names import (
+                    JOINS_PREFIX as _joins_prefix,
+                    feature_name_judges as _name_judges,
+                )
+                _fn_laws, _ = _name_judges(features, product_features, list(bipartite.flows), ctx)
+                _fn_tele = run_feature_names(
+                    product_features,
+                    [f for f in features if getattr(f, "layer", None) != "product"],
+                    user_flows, list(bipartite.flows),
+                    product=_product_name(ctx.repo_path),
+                    violations=_fn_laws, joins_prefix=_joins_prefix,
+                    llm={
+                        "cost_tracker": tracker,
+                        "cache": getattr(ctx, "cache_backend", None),
+                        "llm_health": llm_health,
+                    },
+                )
+                scan_meta["feature_names"] = _fn_tele
+                log_fn.info(
+                    "feature_names: candidates=%d renamed=%d not_a_capability=%d "
+                    "too_large=%d disagreed=%d" % (
+                        _fn_tele["candidates"], len(_fn_tele["renamed"]),
+                        len(_fn_tele["not_a_capability"]), len(_fn_tele["too_large_to_reject"]),
+                        len(_fn_tele["disagreed"]),
+                    ),
+                    feature=None,
+                )
+            except Exception as exc:  # noqa: BLE001 — never break a scan
+                scan_meta["feature_names"] = {"applied": False, "reason": f"failed: {exc}"[:200]}
+                scan_meta.setdefault("warnings", []).append(
+                    f"feature name-or-reject failed ({exc}); names left as they were"
+                )
+                log_fn.info(f"feature_names: FAILED ({exc}) — continuing", feature=None)
+
     # ── Stage 6.998 — B76 metrics recompute-on-emission ────────────────
     # Stage 6 stamped commit metrics ONCE, before the whole Layer-2
     # surgery; every post-Stage-6 mint (8.9 subdecompose / 6.87
@@ -6247,6 +6292,17 @@ def run_finalize_phase(
         scan_meta.setdefault("warnings", []).append(
             f"orphan-uf owner-attach failed ({exc}); orphans left"
         )
+
+    # The platform lane was written mid-phase. Developer features that gave
+    # files to a carved one, or gained an owner, since then are brought up to
+    # date, so no line is in the lane and under a product feature at once.
+    try:
+        from wystan.pipeline_v2.ownership_moves import product_layer_total, sync_lane_rows
+        scan_meta["lane_sync"] = sync_lane_rows(platform_infrastructure, features, product_features)
+        scan_meta["product_layer_lines"] = product_layer_total(
+            product_features, [f for f in features if getattr(f, "layer", None) != "product"])
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
+        scan_meta.setdefault("warnings", []).append(f"lane sync failed ({exc}); lane rows left")
 
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import

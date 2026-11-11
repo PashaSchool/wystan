@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from http import HTTPStatus
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 __all__ = ["KIND_FEATURE", "KIND_FLOW", "LawContext", "product_name_violations"]
 
@@ -49,6 +49,7 @@ _MIN_STEM = 4
 _ARTICLES = frozenset({"the", "a", "an", "my", "your", "our"})
 # Lead words of a state or an outcome, not of something the user does.
 _OUTCOME_LEADS = frozenset({"unable", "failed", "invalid", "error", "no", "not", "success"})
+_SUBJECT_WORD = re.compile(r"[a-z][a-z0-9]*")
 _NUMBER = re.compile(r"(?<![\w.])\d{3}(?![\w.])")
 # Client and server errors: the statuses a product shows a page for.
 _FIRST_ERROR_STATUS = 400
@@ -199,6 +200,17 @@ def _flow_violations(words: list[str], ctx: LawContext, subject: frozenset[str])
     if is_subject or lead in _ARTICLES | _OUTCOME_LEADS or lead in ctx.listed("known_acronyms"):
         return [LAW_NOT_VERB_FIRST]
     return []
+
+
+def feature_subject(resources: Iterable[str]) -> frozenset[str]:
+    """The nouns a feature's journeys are about, singular and plural: what
+    ``subject`` means for a product feature. The engine and the name gate
+    both build it here, so they cannot judge one name differently."""
+    words: set[str] = set()
+    for resource in resources:
+        for word in _SUBJECT_WORD.findall(str(resource or "").lower()):
+            words.update({word, word + "s", word.rstrip("s")})
+    return frozenset(words)
 
 
 def _is_subject_noun(law: str, words: list[str], subject: frozenset[str]) -> bool:

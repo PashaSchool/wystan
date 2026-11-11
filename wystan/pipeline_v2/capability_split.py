@@ -31,7 +31,15 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from wystan.cache.backend import CacheKind
+from wystan.pipeline_v2.ownership_moves import (
+    conservation_report,
+    credit_lines,
+    is_not_product,
+    mark_not_product,
+    product_layer_total,
+)
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
+from wystan.pipeline_v2.product_name_laws import feature_subject
 
 __all__ = [
     "EVIDENCE_CAPABILITY_SPLIT",
@@ -203,7 +211,7 @@ def _unowned_journeys(
     flow_index = _flow_index(flows)
     return [
         journey for journey in parentless
-        if not any(
+        if not is_not_product(journey) and not any(
             owner.get(str(getattr(flow, "primary_feature", "") or ""))
             for flow in _members(journey, flow_index)
         )
@@ -298,15 +306,6 @@ def validate_reply(pool: Pool, existing: Iterable[str], reply: dict[str, Any] | 
     return groups, None
 
 
-def _subject_words(members: list[Any]) -> frozenset[str]:
-    """The nouns the group's journeys are about, singular and plural."""
-    words: set[str] = set()
-    for journey in members:
-        for word in _NAME_WORD.findall(str(getattr(journey, "resource", "") or "").lower()):
-            words.update({word, word + "s", word.rstrip("s")})
-    return frozenset(words)
-
-
 def _refusal(
     group: Group, pool: Pool, journeys: dict[str, Any], taken: set[str],
     violations: Callable[..., list[str]], stated: Callable[[], frozenset[str]],
@@ -316,7 +315,7 @@ def _refusal(
     # A word that is also a verb or a layer ("Access Tokens", "Models") is
     # the capability's noun when the group's own journeys are about it; the
     # laws take that as the name's subject, here and in the name gate.
-    broken = violations(group.name, _subject_words(members))
+    broken = violations(group.name, feature_subject(getattr(j, "resource", "") for j in members))
     if broken:
         return "unlawful_name:" + broken[0]
     if group.name.lower() in taken or _slug(group.name) in taken:
@@ -348,6 +347,7 @@ class _Carver:
         for edge in edges:
             self._edges.setdefault(str(getattr(edge, "flow_id", "")), []).append(edge)
         self._ledger = ledger if ledger and ledger.get("files_by_dev") is not None else None
+        self._product: dict[str, Any] = {}
         self.files_moved = 0
         self.lines_moved = 0
 
@@ -359,7 +359,14 @@ class _Carver:
             if id(flow) not in moving_ids:
                 kept.update(flow.paths or [])
         used = {path for flow in moving for path in flow.paths or []}
-        return sorted((used & own) - kept)
+        files = (used & own) - kept
+        if self._knows(dev):
+            # A file in the donor's list whose lines the line count credits
+            # to another developer feature is not the donor's to give: the
+            # carved feature's lines must be the lines of its files.
+            owner, me = self._ledger.get("owner_by_file") or {}, _ledger_key(dev)
+            files = {path for path in files if owner.get(path) == me}
+        return sorted(files)
 
     def _move_flow(self, chunk: Any, flow: Any) -> None:
         """The flow changes owner and nothing else: its id, uuid and name
@@ -403,6 +410,7 @@ class _Carver:
         if getattr(dev, "loc", None) is not None:
             dev.loc = int(dev.loc) - lines
         self.lines_moved += lines
+        credit_lines(lines, self._product.get(getattr(dev, "product_feature_id", None) or ""), None)
         if not self._knows(dev):
             return
         moved = set(files)
@@ -503,7 +511,7 @@ class _Run:
         journeys = {str(j.id): j for j in pool.journeys}
         row: dict[str, Any] = {
             "pool": pool.key, "journeys_in": len(journeys), "minted": [], "joined": {},
-            "left_in_host": 0, "not_product": 0, "rejected": [],
+            "left_in_host": 0, "not_product": 0, "not_product_journeys": [], "rejected": [],
         }
         # Code comes from the host and from developer features nobody owns:
         # journeys parked on a host have their flows in the lane. Another
@@ -512,13 +520,16 @@ class _Run:
         for group in sorted(groups, key=lambda g: (g.kind, g.name.lower())):
             members = [journeys[jid] for jid in group.journey_ids]
             if group.kind == KIND_NOT_PRODUCT:
+                # Not product journeys: kept, with no parent and a mark that
+                # keeps them out of the unowned pool of a later scan step.
                 row["not_product"] += len(members)
+                row["not_product_journeys"] += [mark_not_product(journey) for journey in members]
             elif group.kind == KIND_EXISTING:
                 self._join(pool, group, members, donors, row)
             else:
                 self._new(pool, group, members, donors, journeys, row)
         row["left_in_host"] = row["journeys_in"] - sum(m["journeys"] for m in row["minted"]) - sum(
-            row["joined"].values())
+            row["joined"].values()) - row["not_product"]
         return row
 
     def _join(self, pool: Pool, group: Group, members: list[Any], donors: set, row: dict) -> None:
@@ -534,7 +545,8 @@ class _Run:
         if target.name in self.mega:
             row["rejected"].append({"name": group.name, "reason": "target_is_mega", "journeys": len(members)})
             return
-        self.carver.carve(members, _slug(group.name), target.name, donors)
+        carved = self.carver.carve(members, _slug(group.name), target.name, donors)
+        credit_lines(sum(int(getattr(dev, "loc", None) or 0) for dev in carved), None, target)
         for journey in members:
             journey.product_feature_id = target.name
         row["joined"][target.name] = row["joined"].get(target.name, 0) + len(members)
@@ -551,6 +563,8 @@ class _Run:
             row["rejected"].append({"name": group.name, "reason": reason, "journeys": len(members)})
             return
         feature = _mint(group, carved, pool.display)
+        # Its lines are the lines of what was carved for it, no more.
+        feature.loc = sum(int(getattr(dev, "loc", None) or 0) for dev in carved)
         self.product_features.append(feature)
         for journey in members:
             journey.product_feature_id = feature.name
@@ -654,15 +668,21 @@ def run_capability_split(
     if not pools:
         telemetry["reason"] = "no_pool"
         return telemetry
-    before = _census(features)
-    telemetry["conservation"] = {**_delta(before, before), "lines_carved": 0}
+    before = product_layer_total(product_features, _developer_features(features))
+    counts = (len(user_flows), len(flows))
+    telemetry["conservation"] = {
+        **conservation_report(before, before, journeys=(counts[0],) * 2, flows=(counts[1],) * 2),
+        "lines_carved": 0,
+    }
     client = client_factory()
     if client is None:
         telemetry["reason"] = "no_key"
         telemetry["pools"] = [{"pool": p.key, "journeys_in": len(p.journeys)} for p in pools]
         return telemetry
+    carver = _Carver(features, flows, edges, loc_ledger)
+    carver._product = {pf.name: pf for pf in product_features}
     run = _Run(
-        product_features, _Carver(features, flows, edges, loc_ledger), violations, stated_names,
+        product_features, carver, violations, stated_names,
         {p.key for p in pools if not p.is_unowned}, telemetry,
     )
     for pool in pools:
@@ -688,7 +708,11 @@ def run_capability_split(
     # Lines and files of all developer features, owned or not: the split
     # moves them between developer features and may neither add nor lose one.
     telemetry["conservation"] = {
-        **_delta(before, _census(features)), "lines_carved": run.carver.lines_moved,
+        **conservation_report(
+            before, product_layer_total(product_features, _developer_features(features)),
+            journeys=(counts[0], len(user_flows)), flows=(counts[1], len(flows)),
+        ),
+        "lines_carved": run.carver.lines_moved,
     }
     telemetry["applied"] = telemetry["features_minted"] > 0 or telemetry["journeys_moved"] > 0
     if not telemetry["applied"]:
@@ -713,23 +737,6 @@ def carved_from(features: Iterable[Any]) -> dict[str, str]:
         if donor is not dev:
             origin[dev.name] = donor.name
     return origin
-
-
-def _census(features: list[Any]) -> dict[str, int]:
-    developers = _developer_features(features)
-    return {
-        "lines": sum(int(getattr(dev, "loc", None) or 0) for dev in developers),
-        "files": sum(len(dev.paths or []) for dev in developers),
-        "flows": sum(len(getattr(dev, "flows", None) or []) for dev in developers),
-    }
-
-
-def _delta(before: dict[str, int], after: dict[str, int]) -> dict[str, Any]:
-    report: dict[str, Any] = {}
-    for name in ("lines", "files", "flows"):
-        report[f"{name}_before"], report[f"{name}_after"] = before[name], after[name]
-    report["conserved"] = before == after
-    return report
 
 
 def product_name_of(repo_path: Any) -> str:

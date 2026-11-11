@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from wystan.pipeline_v2.ownership_moves import credit_lines, mark_not_product
 from wystan.pipeline_v2.product_language_names import JOINS_PREFIX, is_unnameable
 
 __all__ = ["SHARED_REASON", "demote_unnameable_features", "drop_unnameable_flows"]
@@ -101,30 +102,15 @@ def _code_went_to(
 
 def _credit_lines(dev: Any, home: str | None, by_slug: dict[str, Any]) -> None:
     """A developer feature that moves takes its lines along: the feature it
-    joins is credited with them at once, so no roll-up that ran earlier or
-    never runs again leaves them counted nowhere."""
-    lines = int(getattr(dev, "loc", None) or 0)
-    target = by_slug.get(home or "")
-    if not lines or target is None or getattr(target, "loc", None) is None:
-        return
-    target.loc = int(target.loc) + lines
+    joins is credited with them at once."""
+    credit_lines(int(getattr(dev, "loc", None) or 0), None, by_slug.get(home or ""))
 
 
-def _remove_not_product(not_product: list[Any], user_flows: list[Any], flows: list[Any]) -> list[str]:
-    """Journeys of plumbing that found no product feature leave the journey
-    layer: they are not something a user does in the product. Their flows
-    stay in the flow layer; their code is in the platform lane."""
-    if not not_product:
-        return []
-    ids = {journey.id for journey in not_product}
-    for flow in flows:
-        if flow.user_flow_id in ids:
-            flow.user_flow_id = None
-    from wystan.pipeline_v2.journey_lineage_audit import report_journey_kill
-
-    report_journey_kill("unnameable_demote.plumbing_journeys", sorted(str(i) for i in ids))
-    user_flows[:] = [journey for journey in user_flows if journey.id not in ids]
-    return sorted(str(journey.name) for journey in not_product)
+def _mark_not_product(not_product: list[Any]) -> list[dict[str, str]]:
+    """Journeys of plumbing that found no product feature are not product
+    journeys. They are not deleted: they stay in the journey layer with no
+    parent and a mark that keeps them out of the capability split."""
+    return [mark_not_product(journey) for journey in sorted(not_product, key=lambda j: str(j.id))]
 
 
 def _joined_feature(feature: Any, survivors: list[str]) -> str | None:
@@ -153,12 +139,14 @@ def demote_unnameable_features(
     plumbing = {pf.name for pf in demoted if PLUMBING_NOTE in (pf.name_evidence or [])}
     by_slug = {pf.name: pf for pf in product_features}
     new_home: dict[str, str | None] = {}
+    moved_from: dict[str, list[str]] = {}
     for dev in sorted(developer_features, key=lambda d: d.name):
         if dev.product_feature_id not in gone:
             continue
         # Plumbing has no home by resemblance: only a stated join moves it.
         by_name = None if dev.product_feature_id in plumbing else _home_for(dev, survivors)
         home = joins.get(dev.product_feature_id) or by_name
+        moved_from.setdefault(dev.product_feature_id, []).append(dev.name)
         _credit_lines(dev, home, by_slug)
         new_home[dev.name] = home
         dev.product_feature_id = home
@@ -203,7 +191,15 @@ def demote_unnameable_features(
         })
     # How much of the journey layer sat on features that were removed.
     telemetry["journeys_on_demoted"] = sum(journeys_of.values())
-    telemetry["plumbing_journeys_removed"] = _remove_not_product(not_product, user_flows, all_flows)
+    telemetry["plumbing_journeys"] = _mark_not_product(not_product)
+    # A removed feature's own line count leaves with it; what its developer
+    # features carry stays. The difference is the part of any change in the
+    # layer's total that this removal explains.
+    telemetry["ruler_gap"] = sum(
+        sum(int(getattr(d, "loc", None) or 0) for d in developer_features if d.name in moved_from.get(pf.name, ()))
+        - int(getattr(pf, "loc", None) or 0)
+        for pf in demoted if getattr(pf, "loc", None) is not None
+    )
     return telemetry
 
 
