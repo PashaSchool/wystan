@@ -3750,7 +3750,11 @@ ENV_OUTPUT_FLAGS = (
 #: counted in its target; a wrong "existing feature" drops one group, not the
 #: reply; a protocol word from a URL is not a shown name; two features do not
 #: keep one name.
-KEY_SCHEMA_VERSION = 114
+#: KS115 (2026-11-11): product features the product did not name are read by
+#: a model twice (keep, rename from the feature's own evidence, not a
+#: capability); only an answer given both times is applied, and only a small
+#: feature can be rejected.
+KEY_SCHEMA_VERSION = 115
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

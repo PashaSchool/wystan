@@ -692,6 +692,28 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
                            "is large enough to split; the final counts are stamped after",
         },
     ),
+    # Written by hand. After the veto and the split, whose features it also
+    # judges; before the metric passes. It removes a rejected feature through
+    # the same removal the naming pass uses (join, journeys by code, lines
+    # credited to the target).
+    _pass(
+        "run_feature_names", "feature_names.run_feature_names",
+        reads={
+            F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP,
+            F.JOURNEY_PARENT, F.JOURNEY_SET, F.METRICS_LOC, F.NAMES_PRODUCT,
+        },
+        writes={
+            F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT, F.METRICS_LOC, F.NAMES_PRODUCT,
+        },
+        calls_model=True,
+        early_reads={
+            facet: _JUDGED_AGAIN_LATER
+            for facet in (
+                F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP,
+                F.JOURNEY_PARENT, F.JOURNEY_SET, F.METRICS_LOC, F.NAMES_PRODUCT,
+            )
+        },
+    ),
     _pass(
         "apply_uf_loc", "stage_6_97b_uf_loc.apply_uf_loc",
         reads={F.JOURNEY_MEMBERSHIP, F.JOURNEY_SET, F.METRICS_LOC},

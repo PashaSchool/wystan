@@ -915,6 +915,9 @@ _AUTHOR_EVIDENCE = frozenset({
     "authored:description", "authored:schema", "cli-declared", "model:capability-split",
     # A feature the demotion veto kept: judged once, not removed by a later call.
     "model:capability",
+    # A name the name-or-reject pass gave: checked against the laws and the
+    # feature's own evidence when it was given.
+    "model:name",
 })
 
 
