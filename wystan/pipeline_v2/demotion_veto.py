@@ -33,6 +33,7 @@ from typing import Any, Callable, Iterable
 from wystan.cache.backend import CacheKind
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
 from wystan.pipeline_v2.stage_6_9_test_strip import is_test_path
+from wystan.pipeline_v2.unnameable_demote import PLUMBING_NOTE
 
 __all__ = [
     "EVIDENCE_MODEL_CAPABILITY",
@@ -224,6 +225,7 @@ def _apply(
     kind, parent = verdict
     if kind == VERDICT_PLUMBING:
         telemetry["plumbing"].append(feature.name)
+        feature.name_evidence = [*(feature.name_evidence or []), PLUMBING_NOTE]
     elif kind == VERDICT_PART_OF:
         if parent in targets and parent != feature.name:
             notes = [n for n in feature.name_evidence or [] if not str(n).startswith(joins_prefix)]
@@ -350,4 +352,9 @@ def merge_counts(first: dict[str, Any] | None, later: dict[str, Any] | None) -> 
             merged[key] = merge_counts(earlier, value)
         elif value is not None or key not in merged:
             merged[key] = value
+    if "reason" in merged and "applied" in merged:
+        # Why nothing was done is a statement about all the calls: none when
+        # one of them did something, else the first reason given.
+        first_reason = (first or {}).get("reason")
+        merged["reason"] = None if merged["applied"] else (first_reason or merged["reason"])
     return merged

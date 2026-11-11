@@ -3743,7 +3743,14 @@ ENV_OUTPUT_FLAGS = (
 #: flow ids and names alone, asks again for an unreadable reply and remembers
 #: one that stays unreadable, and no longer counts lines under a removed
 #: parent in a feature's share.
-KEY_SCHEMA_VERSION = 113
+#: KS114 (2026-11-11): a carved feature's lines are read from the line-count
+#: ledger by developer-feature uuid (they were 0); journeys of features judged
+#: plumbing leave the journey layer; a removed feature's code no longer joins
+#: a feature whose slug only starts with its directory's name; joined code is
+#: counted in its target; a wrong "existing feature" drops one group, not the
+#: reply; a protocol word from a URL is not a shown name; two features do not
+#: keep one name.
+KEY_SCHEMA_VERSION = 114
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
