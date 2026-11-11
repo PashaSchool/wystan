@@ -20,7 +20,7 @@ import re
 
 from wystan.pipeline_v2.agents.record import KIND_MCP_SERVER, KIND_TOOL, AgentUnit
 from wystan.pipeline_v2.agents.source import SourceFile
-from wystan.pipeline_v2.agents.text import balanced, first_string, shallow, string_value
+from wystan.pipeline_v2.agents.text import balanced, closed_spans, first_string, shallow, string_value
 
 __all__ = ["ADAPTER", "mcp_units", "python_docstring"]
 
@@ -55,16 +55,11 @@ def _config_object(arguments: str) -> str:
 
 def _script_units(source: SourceFile) -> list[AgentUnit]:
     units = []
-    for match in _SERVER_JS.finditer(source.text):
-        end = balanced(source.text, match.end())
-        name = string_value(shallow(source.text[match.end() + 1:end - 1]), "name") if end else None
-        if end and name:
+    for match, end in closed_spans(_SERVER_JS, source.text, lambda m: m.end()):
+        name = string_value(shallow(source.text[match.end() + 1:end - 1]), "name")
+        if name:
             units.append(source.unit(KIND_MCP_SERVER, match.start(), end, ADAPTER, name=name, symbol=match.group("bound")))
-    for match in _REGISTER.finditer(source.text):
-        open_paren = source.text.find("(", match.start())
-        end = balanced(source.text, open_paren)
-        if end is None:
-            continue
+    for match, end in closed_spans(_REGISTER, source.text, lambda m: source.text.find("(", m.start())):
         rest = source.text[match.end():end - 1]
         config = _config_object(rest)
         # The author's own words for the tool: its description, else its title.

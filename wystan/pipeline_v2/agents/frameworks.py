@@ -26,7 +26,7 @@ from wystan.pipeline_v2.agents.ai_sdk import enclosing_symbol, tool_refs
 from wystan.pipeline_v2.agents.mcp_server import python_docstring
 from wystan.pipeline_v2.agents.record import KIND_AGENT, KIND_TOOL, AgentUnit
 from wystan.pipeline_v2.agents.source import SourceFile
-from wystan.pipeline_v2.agents.text import balanced, shallow, string_value
+from wystan.pipeline_v2.agents.text import balanced, closed_spans, shallow, string_value
 
 __all__ = ["ADAPTER", "framework_units"]
 
@@ -42,11 +42,15 @@ _JS_TOOL_NEW = re.compile(r"(?:\b(?:const|let|var)\s+(?P<bound>\w+)\s*=\s*)?new\
 # LangChain's `tool(fn, { name, description, schema })`: the function comes first.
 _JS_TOOL_FN = re.compile(r"(?:\b(?:const|let|var)\s+(?P<bound>\w+)\s*=\s*)?\btool\((?=\s*(?:async\b|\(|function\b))")
 _JS_LANGCHAIN = re.compile(r"""['"]@?langchain[\w/@.-]*['"]|['"]@langchain/[\w/.-]+['"]""")
+# The factory is found first; what it is bound to is read by looking a short
+# way back from it. One pattern with an optional unanchored `\w+` prefix would
+# backtrack quadratically on a long run of word characters in an untrusted file.
 _AGENT_FACTORY = re.compile(
-    r"(?:\b(?:const|let|var)\s+)?(?:(?P<bound>\w+)\s*(?::[^=\n]{0,60})?=\s*)?(?:await\s+)?"
     r"\b(?P<factory>createReactAgent|create_react_agent|createAgent|create_agent|createToolCallingAgent|"
     r"create_tool_calling_agent|create_openai_tools_agent|initialize_agent|AgentExecutor|AssistantAgent|Agent)\((?!\s*\))",
 )
+_BINDING = re.compile(r"(?<![\w.])(?:self\.)?(?P<bound>\w{1,80})[ \t]*(?::[^=\n]{0,60})?=[ \t]*(?:await[ \t]+)?(?:new[ \t]+)?(?:[\w$]{1,40}\.)?\Z")
+_BINDING_WINDOW = 200
 # `Agent(` is an ordinary word (an HTTP agent, a sales agent): it only counts in
 # a file that imports an agent library.
 _AGENT_LIBRARY = re.compile(
@@ -86,30 +90,27 @@ def _python_tools(source: SourceFile) -> list[AgentUnit]:
 
 def _script_tools(source: SourceFile) -> list[AgentUnit]:
     units = []
-    for match in _JS_TOOL_NEW.finditer(source.text):
-        end = balanced(source.text, match.end())
-        body = shallow(source.text[match.end() + 1:end - 1]) if end else ""
+    for match, end in closed_spans(_JS_TOOL_NEW, source.text, lambda m: m.end()):
+        body = shallow(source.text[match.end() + 1:end - 1])
         name = string_value(body, "name")
         if name:
             units.append(source.unit(
-                KIND_TOOL, match.start(), end or match.end(), ADAPTER, name=name,
+                KIND_TOOL, match.start(), end, ADAPTER, name=name,
                 description=string_value(body, "description"),
                 symbol=match.group("bound") or enclosing_symbol(source.text, match.start()), has_handler=True,
             ))
-    for match in _JS_TOOL_CLASS.finditer(source.text):
-        end = balanced(source.text, match.end())
-        body = source.text[match.end():end] if end else ""
+    for match, end in closed_spans(_JS_TOOL_CLASS, source.text, lambda m: m.end()):
+        body = source.text[match.end():end]
         name = _NAME_ATTR.search(body)
         if name:
             units.append(source.unit(
-                KIND_TOOL, match.start(), end or match.end(), ADAPTER, name=name.group(1),
+                KIND_TOOL, match.start(), end, ADAPTER, name=name.group(1),
                 description=string_value(body, "description"), symbol=match.group("cls"), has_handler=True,
             ))
     if _JS_LANGCHAIN.search(source.text):
-        for match in _JS_TOOL_FN.finditer(source.text):
-            open_paren = source.text.find("(", match.end() - 1)
-            end = balanced(source.text, open_paren)
-            call = source.text[open_paren + 1:end - 1] if end else ""
+        for match, end in closed_spans(_JS_TOOL_FN, source.text, lambda m: m.end() - 1):
+            open_paren = match.end() - 1
+            call = source.text[open_paren + 1:end - 1]
             # The options object is the call's last argument.
             top = shallow(call)
             last = top.rfind("{")
@@ -118,7 +119,7 @@ def _script_tools(source: SourceFile) -> list[AgentUnit]:
             name = string_value(options, "name")
             if name:
                 units.append(source.unit(
-                    KIND_TOOL, match.start(), end or match.end(), ADAPTER, name=name,
+                    KIND_TOOL, match.start(), end, ADAPTER, name=name,
                     description=string_value(options, "description"),
                     symbol=match.group("bound") or enclosing_symbol(source.text, match.start()), has_handler=True,
                 ))
@@ -142,13 +143,13 @@ def _list_refs(arguments: str) -> tuple[tuple[str, ...], bool, bool]:
 def _agents(source: SourceFile) -> list[AgentUnit]:
     units = []
     library = bool(_AGENT_LIBRARY.search(source.text))
-    for match in _AGENT_FACTORY.finditer(source.text):
-        if source.text[max(0, match.start() - 6):match.start()].rstrip().endswith(("class", "def", "function")):
+    for match, end in closed_spans(_AGENT_FACTORY, source.text, lambda m: source.text.find("(", m.end() - 1)):
+        before = source.text[max(0, match.start() - _BINDING_WINDOW):match.start()]
+        if before.rstrip().endswith(("class", "def", "function")):
             continue                              # a definition, not a construction
+        binding = _BINDING.search(before)
+        bound = binding.group("bound") if binding else None
         open_paren = source.text.find("(", match.end() - 1)
-        end = balanced(source.text, open_paren)
-        if end is None:
-            continue
         arguments = source.text[open_paren + 1:end - 1]
         # A single options object: read its top level, not the call's.
         if arguments.lstrip()[:1] == "{" and (close := balanced(arguments, arguments.find("{"))):
@@ -167,7 +168,7 @@ def _agents(source: SourceFile) -> list[AgentUnit]:
         units.append(source.unit(
             KIND_AGENT, match.start(), end, ADAPTER, name=name,
             description=string_value(top, "description"),
-            symbol=match.group("bound") or enclosing_symbol(source.text, match.start()),
+            symbol=bound or enclosing_symbol(source.text, match.start()),
             has_handler=True, model=model.group(1) if model else None,
             tool_refs=refs, tools_resolved=resolved if has_tools else True,
         ))
