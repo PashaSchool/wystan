@@ -7,10 +7,16 @@ adapters do. These helpers keep the reading bounded and string-aware.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterator
 
-__all__ = ["balanced", "first_string", "line_of", "shallow", "string_value"]
+__all__ = ["balanced", "closed_spans", "first_string", "line_of", "shallow", "string_value"]
 
 _MAX_SPAN = 40_000
+# Scanned files are untrusted. A file is read for at most this many
+# declarations of one shape, and is left alone once this many of them turn
+# out not to close: each unclosed one costs a full ``_MAX_SPAN`` scan.
+_MAX_MATCHES = 1_000
+_MAX_UNCLOSED = 12
 _PAIRS = {"{": "}", "(": ")", "[": "]"}
 _QUOTES = "'\"`"
 _STRING = re.compile(
@@ -23,16 +29,17 @@ def line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
-def balanced(text: str, start: int) -> int | None:
+def balanced(text: str, start: int, *, limit: int = _MAX_SPAN) -> int | None:
     """Offset just past the bracket that closes the one at ``start``.
 
     Brackets inside string literals are ignored. ``None`` when the span is not
-    closed within ``_MAX_SPAN`` characters, so a malformed file costs nothing."""
+    closed within ``limit`` characters (at most ``_MAX_SPAN``), so a malformed
+    file costs a bounded amount of work."""
     opener = text[start]
     closer = _PAIRS.get(opener)
     if closer is None:
         return None
-    depth, cursor, limit = 0, start, min(len(text), start + _MAX_SPAN)
+    depth, cursor, limit = 0, start, min(len(text), start + min(limit, _MAX_SPAN))
     quote: str | None = None
     while cursor < limit:
         char = text[cursor]
@@ -106,3 +113,22 @@ def shallow(body: str, *, keep_strings: bool = True) -> str:
             out.append(char)
             cursor += 1
     return "".join(out)
+
+
+def closed_spans(
+    pattern: re.Pattern[str], text: str, opener: Callable[[re.Match[str]], int],
+) -> Iterator[tuple[re.Match[str], int]]:
+    """Each match of ``pattern`` whose bracket at ``opener(match)`` closes,
+    with the offset just past the closing bracket.
+
+    The work per file is bounded: see ``_MAX_MATCHES`` and ``_MAX_UNCLOSED``."""
+    unclosed = 0
+    for seen, match in enumerate(pattern.finditer(text)):
+        if seen >= _MAX_MATCHES or unclosed >= _MAX_UNCLOSED:
+            return
+        start = opener(match)
+        end = balanced(text, start) if 0 <= start < len(text) else None
+        if end is None:
+            unclosed += 1
+            continue
+        yield match, end

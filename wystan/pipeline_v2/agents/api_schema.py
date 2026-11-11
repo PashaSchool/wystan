@@ -25,18 +25,27 @@ ADAPTER = "api-schema"
 _SCHEMA_KEY = re.compile(r"""['"]?(?:input_schema|inputSchema|parameters)['"]?\s*:\s*(?=\{)""")
 _MODEL_API = re.compile(r"anthropic|openai|messages\.create|chat\.completions|responses\.create|bedrock|genai|\btools\b", re.I)
 _LOOK_BACK = 1_500
+_MAX_OPENERS = 8
+_MAX_TOOL_SPAN = 12_000
+# After this many schema keys that turn out not to be tools, the file is left alone.
+_MAX_MISSES = 30
+# Schema keys read per file: a generated file with thousands of them is not a tool list.
+_MAX_SCHEMAS = 200
 _TOOL_NAME = re.compile(r"[\w.\-]{2,64}")
 
 
 def _enclosing_object(text: str, offset: int) -> tuple[int, int] | None:
-    """The innermost ``{…}`` that contains ``offset``."""
+    """The innermost ``{…}`` that contains ``offset``.
+
+    Scanned files are untrusted, so the work is bounded twice: the search
+    looks back ``_LOOK_BACK`` characters, and tries ``_MAX_OPENERS`` braces."""
     cursor = offset
     floor = max(0, offset - _LOOK_BACK)
-    while cursor > floor:
+    for _ in range(_MAX_OPENERS):
         cursor = text.rfind("{", floor, cursor)
         if cursor == -1:
             return None
-        end = balanced(text, cursor)
+        end = balanced(text, cursor, limit=_MAX_TOOL_SPAN)
         if end is not None and end > offset:
             return cursor, end
     return None
@@ -47,9 +56,15 @@ def api_schema_units(source: SourceFile) -> list[AgentUnit]:
     if not (source.is_script or source.is_python) or not _MODEL_API.search(source.text):
         return []
     units: dict[int, AgentUnit] = {}
-    for match in _SCHEMA_KEY.finditer(source.text):
+    misses = 0
+    for seen, match in enumerate(_SCHEMA_KEY.finditer(source.text)):
+        if seen >= _MAX_SCHEMAS or misses >= _MAX_MISSES:
+            break
         span = _enclosing_object(source.text, match.start())
-        if span is None or span[0] in units:
+        if span is None:
+            misses += 1
+            continue
+        if span[0] in units:
             continue
         schema_end = balanced(source.text, match.end()) or match.end()
         # Read the object without its schema, whose properties also carry
@@ -57,6 +72,7 @@ def api_schema_units(source: SourceFile) -> list[AgentUnit]:
         body = shallow(source.text[span[0] + 1:match.start()] + source.text[schema_end:span[1] - 1])
         name, description = string_value(body, "name"), string_value(body, "description")
         if not name or not description or not _TOOL_NAME.fullmatch(name):
+            misses += 1
             continue
         units[span[0]] = source.unit(
             KIND_TOOL, span[0], span[1], ADAPTER, name=name, description=description,

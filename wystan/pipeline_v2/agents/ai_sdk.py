@@ -18,10 +18,12 @@ A model call with no ``tools`` is not an agent and produces nothing here.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
+from functools import lru_cache
 
 from wystan.pipeline_v2.agents.record import KIND_AGENT, KIND_TOOL, AgentUnit
 from wystan.pipeline_v2.agents.source import SourceFile
-from wystan.pipeline_v2.agents.text import balanced, shallow, string_value
+from wystan.pipeline_v2.agents.text import balanced, closed_spans, shallow, string_value
 
 __all__ = ["ADAPTER", "ai_sdk_units", "enclosing_symbol", "tool_refs"]
 
@@ -40,12 +42,18 @@ _SHORTHAND = re.compile(r"\{\s*([A-Za-z_$][\w$]*(?:\s*,\s*[A-Za-z_$][\w$]*)*)\s*
 _REF = re.compile(r"(?P<spread>\.\.\.)?\s*(?P<name>[A-Za-z_$][\w$]*)\s*(?P<colon>:)?")
 
 
+@lru_cache(maxsize=4)
+def _function_offsets(text: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """Where each function of a file starts, and its name: one pass per file."""
+    found = [(m.start(), m.group(1) or m.group(2)) for m in _FUNCTION.finditer(text)]
+    return tuple(offset for offset, _ in found), tuple(name for _, name in found)
+
+
 def enclosing_symbol(text: str, offset: int) -> str | None:
     """Name of the last function declared before ``offset``."""
-    last = None
-    for match in _FUNCTION.finditer(text, 0, offset):
-        last = match.group(1) or match.group(2)
-    return last
+    offsets, names = _function_offsets(text)
+    index = bisect_right(offsets, offset) - 1
+    return names[index] if index >= 0 else None
 
 
 def tool_refs(body: str) -> tuple[tuple[str, ...], bool, bool]:
@@ -102,10 +110,7 @@ def tool_refs(body: str) -> tuple[tuple[str, ...], bool, bool]:
 
 def _tools(source: SourceFile) -> list[AgentUnit]:
     units = []
-    for match in _TOOL.finditer(source.text):
-        end = balanced(source.text, match.end())
-        if end is None:
-            continue
+    for match, end in closed_spans(_TOOL, source.text, lambda m: m.end()):
         body = shallow(source.text[match.end() + 1:end - 1])
         if not re.search(r"\b(?:description|inputSchema|parameters|execute)\s*[:(]", body):
             continue
@@ -122,10 +127,7 @@ def _tools(source: SourceFile) -> list[AgentUnit]:
 def _agents(source: SourceFile) -> list[AgentUnit]:
     units = []
     for pattern in (_CALL, _AGENT_CLASS):
-        for match in pattern.finditer(source.text):
-            end = balanced(source.text, match.end())
-            if end is None:
-                continue
+        for match, end in closed_spans(pattern, source.text, lambda m: m.end()):
             body = source.text[match.end() + 1:end - 1]
             refs, resolved, has_tools = tool_refs(body)
             if not has_tools:
