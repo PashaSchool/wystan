@@ -503,7 +503,7 @@ def run_finalize_phase(
         "paths_removed": 0,
         "features_dropped": 0,
         "flows_dropped": 0,
-        "flow_entries_recomputed": 0,
+        "flows_dropped_test_entry": 0,
     }
     write_stage_input(run_dir, 6, "test_strip", {
         "features": features,
@@ -515,12 +515,12 @@ def run_finalize_phase(
             test_strip_telemetry = strip_test_paths(features, bipartite.flows)
             log6_9.info(
                 "test_strip: paths_removed=%d features_dropped=%d "
-                "flows_dropped=%d flow_entries_recomputed=%d"
+                "flows_dropped=%d flows_dropped_test_entry=%d"
                 % (
                     test_strip_telemetry["paths_removed"],
                     test_strip_telemetry["features_dropped"],
                     test_strip_telemetry["flows_dropped"],
-                    test_strip_telemetry["flow_entries_recomputed"],
+                    test_strip_telemetry["flows_dropped_test_entry"],
                 ),
             )
         else:
@@ -4917,6 +4917,18 @@ def run_finalize_phase(
     # never scan_meta, so the flag-ON vs flag-OFF diff is exactly ``loc``).
     # Kill-switch WYSTAN_UF_LOC=0 → loc stays None → serializer omits it
     # → byte-identical to the pre-B3 engine. Metric must never break a scan.
+    # Before the counts are stamped: a flow of a screen's size that no journey
+    # claimed joins the journey its same-directory neighbours are in, so a
+    # feature's journeys account for the code the feature is credited with.
+    try:
+        from wystan.pipeline_v2.journeyless_flow_adopt import adopt_journeyless_flows
+        scan_meta["journeyless_flow_adopt"] = adopt_journeyless_flows(
+            user_flows, list(bipartite.flows))
+    except Exception as exc:  # noqa: BLE001 — adoption never breaks a scan
+        scan_meta.setdefault("warnings", []).append(
+            f"journey-less flow adoption failed ({exc}); flows left unclaimed"
+        )
+
     from wystan.pipeline_v2.stage_6_97b_uf_loc import (
         apply_uf_loc,
         uf_loc_enabled,
@@ -6136,6 +6148,24 @@ def run_finalize_phase(
                 f"product-language-names failed ({exc}); names left as-is"
             )
             log_pln.info(f"product_language_names: FAILED ({exc})", feature=None)
+
+    # ── Orphan journeys, last look ──────────────────────────────────────
+    # The path-attach runs mid-finalize. Passes after it still move code
+    # between product features and dissolve containers, and the naming pass
+    # just above is the last of them (a feature with no page of its own joins
+    # the feature whose pages show it). That leaves real journeys with no
+    # parent although one feature now owns their code (langflow: 14 journeys
+    # beside a feature showing one). Ownership is final only here, so each
+    # parentless journey is judged once more, by the product feature that
+    # owns its member flows.
+    try:
+        from wystan.pipeline_v2.orphan_uf_path_attach import run_orphan_uf_owner_attach
+        scan_meta["orphan_uf_owner_attach"] = run_orphan_uf_owner_attach(
+            product_features, features, user_flows, list(bipartite.flows))
+    except Exception as exc:  # noqa: BLE001 — attach never breaks a scan
+        scan_meta.setdefault("warnings", []).append(
+            f"orphan-uf owner-attach failed ({exc}); orphans left"
+        )
 
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import

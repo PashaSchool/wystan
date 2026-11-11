@@ -3707,7 +3707,12 @@ ENV_OUTPUT_FLAGS = (
 #: and MCP servers a repository declares.
 #: KS99 (2026-11-11): a product feature's name confidence is capped by its
 #: evidence; a name with none is "low" and says ``not-evidenced``.
-KEY_SCHEMA_VERSION = 99
+#: KS100 (2026-11-11): parentless journeys are attached a second time, by
+#: the same ownership rule, once code ownership is final.
+#: KS101-104 (2026-11-11): a flow that starts in a test file is dropped instead of
+#: re-pointed; a screen-sized flow no journey claimed joins the journey of
+#: its same-directory neighbours.
+KEY_SCHEMA_VERSION = 104
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
