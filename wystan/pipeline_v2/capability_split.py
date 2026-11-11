@@ -32,7 +32,6 @@ from typing import Any, Callable, Iterable
 
 from wystan.cache.backend import CacheKind
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
-from wystan.pipeline_v2.product_name_laws import LAW_CONTAINER_NAME, LAW_VERB_LED
 
 __all__ = [
     "EVIDENCE_CAPABILITY_SPLIT",
@@ -278,10 +277,10 @@ def _parse_groups(reply: dict[str, Any] | None) -> list[Group] | None:
 
 
 def validate_reply(pool: Pool, existing: Iterable[str], reply: dict[str, Any] | None) -> tuple[list[Group], str | None]:
-    """(groups, failure). A reply is used whole or not at all: an unknown,
-    repeated or missing journey id, a repeated group name, or an existing
-    feature that does not exist means the model did not follow the task, and
-    nothing it says about this pool is trusted."""
+    """(groups, failure). A reply is refused whole when the journeys do not
+    add up: an unknown, repeated or missing journey id, or a repeated group
+    name. A group that names an existing feature which does not exist is one
+    wrong assignment: it is dropped later and the other groups stand."""
     groups = _parse_groups(reply)
     if groups is None:
         return [], "unparsable"
@@ -296,42 +295,28 @@ def validate_reply(pool: Pool, existing: Iterable[str], reply: dict[str, Any] | 
     names = [group.name.lower() for group in groups if group.kind != KIND_NOT_PRODUCT]
     if len(names) != len(set(names)):
         return [], "repeated_group_name"
-    offered = {name.lower() for name in existing}
-    if any(g.kind == KIND_EXISTING and g.name.lower() not in offered for g in groups):
-        return [], "unknown_existing_feature"
     return groups, None
 
 
-def _subject_words(members: list[Any]) -> set[str]:
+def _subject_words(members: list[Any]) -> frozenset[str]:
     """The nouns the group's journeys are about, singular and plural."""
     words: set[str] = set()
     for journey in members:
         for word in _NAME_WORD.findall(str(getattr(journey, "resource", "") or "").lower()):
             words.update({word, word + "s", word.rstrip("s")})
-    return words
-
-
-def _excused(law: str, name: str, members: list[Any]) -> bool:
-    """Two laws judge a word by a list: "verb-led" (the first word is also a
-    verb: "Access Tokens", "Read Replicas") and "container" (the word is also
-    a layer: "Models"). When that word is what the group's own journeys are
-    about, it is the capability's noun and the law does not apply."""
-    words = _NAME_WORD.findall(name.lower())
-    subject = _subject_words(members)
-    if law == LAW_VERB_LED:
-        return bool(words) and words[0] in subject
-    if law == LAW_CONTAINER_NAME:
-        return bool(words) and all(word in subject for word in words)
-    return False
+    return frozenset(words)
 
 
 def _refusal(
     group: Group, pool: Pool, journeys: dict[str, Any], taken: set[str],
-    violations: Callable[[str], list[str]], stated: Callable[[], frozenset[str]],
+    violations: Callable[..., list[str]], stated: Callable[[], frozenset[str]],
 ) -> str | None:
     """Why a new group is not minted; its journeys then stay where they are."""
     members = [journeys[jid] for jid in group.journey_ids]
-    broken = [law for law in violations(group.name) if not _excused(law, group.name, members)]
+    # A word that is also a verb or a layer ("Access Tokens", "Models") is
+    # the capability's noun when the group's own journeys are about it; the
+    # laws take that as the name's subject, here and in the name gate.
+    broken = violations(group.name, _subject_words(members))
     if broken:
         return "unlawful_name:" + broken[0]
     if group.name.lower() in taken or _slug(group.name) in taken:
@@ -344,6 +329,11 @@ def _refusal(
     if all(getattr(journeys[jid], "category", None) == SYSTEM_CATEGORY for jid in group.journey_ids):
         return "system_only"
     return None
+
+
+def _ledger_key(dev: Any) -> str:
+    """How the line-count ledger names a developer feature: by its uuid."""
+    return str(getattr(dev, "uuid", "") or "")
 
 
 class _Carver:
@@ -382,12 +372,18 @@ class _Carver:
             if getattr(edge, "type", None) == "primary":
                 edge.feature = chunk.name
 
+    def _knows(self, dev: Any) -> bool:
+        """The ledger names developer features by uuid; one it does not
+        list was not counted by the line-count stage."""
+        return self._ledger is not None and _ledger_key(dev) in self._ledger["files_by_dev"]
+
     def _lines_of(self, dev: Any, files: list[str]) -> int:
         """Lines the donor is credited with for ``files``."""
-        if self._ledger is not None:
+        if self._knows(dev):
             file_loc = self._ledger.get("file_loc") or {}
             owner = self._ledger.get("owner_by_file") or {}
-            return sum(int(file_loc.get(f, 0)) for f in files if owner.get(f, dev.name) == dev.name)
+            me = _ledger_key(dev)
+            return sum(int(file_loc.get(f, 0)) for f in files if owner.get(f) == me)
         by_path = {
             (m.get("path") if isinstance(m, dict) else getattr(m, "path", None)):
             (m.get("loc") if isinstance(m, dict) else getattr(m, "loc", None))
@@ -407,16 +403,17 @@ class _Carver:
         if getattr(dev, "loc", None) is not None:
             dev.loc = int(dev.loc) - lines
         self.lines_moved += lines
-        if self._ledger is None:
+        if not self._knows(dev):
             return
         moved = set(files)
+        donor_key, chunk_key = _ledger_key(dev), _ledger_key(chunk)
         by_dev = self._ledger["files_by_dev"]
-        by_dev[dev.name] = tuple(f for f in by_dev.get(dev.name, ()) if f not in moved)
-        by_dev[chunk.name] = tuple(files)
+        by_dev[donor_key] = tuple(f for f in by_dev.get(donor_key, ()) if f not in moved)
+        by_dev[chunk_key] = tuple(files)
         owner = self._ledger.setdefault("owner_by_file", {})
         for path in files:
-            if owner.get(path, dev.name) == dev.name:
-                owner[path] = chunk.name
+            if owner.get(path) == donor_key:
+                owner[path] = chunk_key
 
     def carve(self, journeys: list[Any], slug: str, target: str, donors: set[str | None]) -> list[Any]:
         """Carved developer features, owned by ``target``. Only developer
@@ -445,8 +442,10 @@ class _Carver:
             dev.flows = [flow for flow in dev.flows if not any(flow is m for m in moving)]
             for flow in moving:
                 self._move_flow(chunk, flow)
-            _remove_files_from_shell(dev, set(files))
+            # Lines first: the donor's per-file counts are read before its
+            # file list loses the files.
             self._move_lines(dev, chunk, files)
+            _remove_files_from_shell(dev, set(files))
             self._features.append(chunk)
             self._by_name[chunk.name] = chunk
             self.files_moved += len(files)
@@ -523,7 +522,13 @@ class _Run:
         return row
 
     def _join(self, pool: Pool, group: Group, members: list[Any], donors: set, row: dict) -> None:
-        target = self._existing()[group.name.lower()]
+        target = self._existing().get(group.name.lower())
+        if target is None:
+            # A feature that is not on the list (invented, or about to be
+            # removed): these journeys stay; the other groups still count.
+            row["rejected"].append({
+                "name": group.name, "reason": "unknown_existing_feature", "journeys": len(members)})
+            return
         if target.name == pool.key:
             return
         if target.name in self.mega:
