@@ -2483,7 +2483,7 @@ def _run_test_strip(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
         "paths_removed": 0,
         "features_dropped": 0,
         "flows_dropped": 0,
-        "flow_entries_recomputed": 0,
+        "flows_dropped_test_entry": 0,
     }
     with StageLogger(env.run_dir, 6, "test_strip") as log6_9:
         if stage_6_9_enabled():
