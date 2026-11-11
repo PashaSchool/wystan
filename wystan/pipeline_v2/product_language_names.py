@@ -57,6 +57,7 @@ __all__ = [
     "REACH_COVERAGE_FLOOR",
     "build_ui_index",
     "cap_confidence_by_evidence",
+    "feature_name_judges",
     "is_unnameable",
     "name_product_layer",
     "route_files_without_ui",
@@ -774,6 +775,35 @@ def build_ui_index(
     return collect_ui_text(ctx.repo_path, candidates, ctx.tracked_files)
 
 
+def feature_name_judges(
+    features: list[Any], product_features: list[Any], flows: list[Any], ctx: Any,
+) -> tuple[Callable[[str], list[str]], Callable[[], frozenset[str]]]:
+    """For a pass that mints product features outside the ladder: the laws
+    a feature name breaks, and the names the product itself shows as a title
+    or heading (lower-cased). The user-visible text is read on first use, so
+    a caller that mints nothing pays nothing."""
+    state: dict[str, Any] = {}
+
+    def index() -> UiTextIndex:
+        if "index" not in state:
+            state["index"] = build_ui_index(features, product_features, flows, ctx)
+            state["laws"] = build_law_context(state["index"], _brand_words(ctx.repo_path))
+        return state["index"]
+
+    def violations(name: str) -> list[str]:
+        index()
+        return product_name_violations(name, KIND_FEATURE, state["laws"])
+
+    def stated() -> frozenset[str]:
+        return frozenset(
+            label.text.lower()
+            for labels in index().by_file.values() for label in labels
+            if label.kind in _FEATURE_LABEL_KINDS
+        )
+
+    return violations, stated
+
+
 def is_unnameable(item: Any) -> bool:
     """True when the ladder found no product-language name for ``item``."""
     return any(
@@ -832,7 +862,12 @@ def route_files_without_ui(repo_path: Any, routes_index: list[dict[str, Any]]) -
     return silent
 
 
-_AUTHOR_EVIDENCE = frozenset({"authored:description", "authored:schema", "cli-declared"})
+# ``model:capability-split``: a feature the capability split minted from a
+# group of journeys. Its name was validated against the laws when it was
+# minted and it has no page to be judged by: this pass leaves it alone.
+_AUTHOR_EVIDENCE = frozenset({
+    "authored:description", "authored:schema", "cli-declared", "model:capability-split",
+})
 
 
 def _is_author_named(item: Any) -> bool:
