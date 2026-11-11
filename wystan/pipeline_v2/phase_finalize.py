@@ -5681,6 +5681,10 @@ def run_finalize_phase(
             },
         )
         scan_meta["unnameable_features_removed"] = _unf_tele["features_removed"]
+        # Which features this pass removes depends on page reach; record
+        # how much of it there was (below the floor nothing is removed for
+        # having no surface).
+        scan_meta["entry_reach_coverage"] = _unf_tele.get("entry_reach_coverage")
     except Exception as exc:  # noqa: BLE001 — never break a scan
         scan_meta.setdefault("warnings", []).append(
             f"unnameable-feature removal failed ({exc}); none removed"
@@ -6128,6 +6132,8 @@ def run_finalize_phase(
                 },
             )
             scan_meta["entry_points"] = pln_tele.pop("entry_points", None)
+            scan_meta["entry_reach_coverage"] = pln_tele.pop(
+                "entry_reach_coverage", scan_meta.get("entry_reach_coverage"))
             scan_meta["agents"] = _agent_units_report(ctx)
             scan_meta["product_language_names"] = pln_tele
             # The writer's calls happen after the full-bill refresh above.

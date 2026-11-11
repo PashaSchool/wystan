@@ -3712,7 +3712,10 @@ ENV_OUTPUT_FLAGS = (
 #: KS101-104 (2026-11-11): a flow that starts in a test file is dropped instead of
 #: re-pointed; a screen-sized flow no journey claimed joins the journey of
 #: its same-directory neighbours.
-KEY_SCHEMA_VERSION = 104
+#: KS105 (2026-11-11): page reach reads files that have no signature (single-file
+#: components, re-export modules) and sigil aliases; below the reach coverage
+#: floor no product feature is judged to have no user surface.
+KEY_SCHEMA_VERSION = 105
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
