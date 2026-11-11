@@ -3730,7 +3730,11 @@ ENV_OUTPUT_FLAGS = (
 #: KS110 (2026-11-11): a product feature may not be named as an error screen,
 #: a lone object verb or a protocol step; a feature whose page words all break
 #: a law takes its own slug before it is given up.
-KEY_SCHEMA_VERSION = 110
+#: KS111 (2026-11-11): a product feature that holds most of the product's
+#: journeys, and the parentless journeys on unowned code, are split into
+#: capabilities by one model call per pool; a split-out feature owns the
+#: flows of its journeys and the files only they use.
+KEY_SCHEMA_VERSION = 111
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

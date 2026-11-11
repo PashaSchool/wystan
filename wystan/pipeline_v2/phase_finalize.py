@@ -4778,6 +4778,54 @@ def run_finalize_phase(
                     feature=None,
                 )
 
+    # ── Capability split ────────────────────────────────────────────────
+    # A product feature that holds most of the product's journeys is split
+    # into the capabilities inside it (one model call per such feature and
+    # one for the parentless journeys on unowned code). Here: after the last
+    # structural pass that sets a journey's parent or a developer feature's
+    # owner before anything is counted, and before the metric and line-count
+    # passes, so nothing is counted on the unsplit layer and nothing has to
+    # run twice (order checked in finalize_passes.py).
+    if anchored_mint_applied and not uf_suppressed:
+        with StageLogger(run_dir, 6, "capability_split") as log_cs:
+            try:
+                from wystan.pipeline_v2.capability_split import (
+                    product_name_of,
+                    run_capability_split,
+                )
+                from wystan.pipeline_v2.product_language_names import (
+                    feature_name_judges,
+                )
+                _cs_laws, _cs_stated = feature_name_judges(
+                    features, product_features, list(bipartite.flows), ctx)
+                _cs_tele = run_capability_split(
+                    product_features, user_flows, features,
+                    list(bipartite.flows), list(bipartite.edges),
+                    product=product_name_of(ctx.repo_path),
+                    violations=_cs_laws, stated_names=_cs_stated,
+                    llm={
+                        "cost_tracker": tracker,
+                        "cache": getattr(ctx, "cache_backend", None),
+                        "llm_health": llm_health,
+                    },
+                )
+                scan_meta["capability_split"] = _cs_tele
+                log_cs.info(
+                    "capability_split: applied=%s reason=%s pools=%d minted=%d "
+                    "journeys_moved=%d files_carved=%d" % (
+                        _cs_tele["applied"], _cs_tele["reason"], len(_cs_tele["pools"]),
+                        _cs_tele["features_minted"], _cs_tele["journeys_moved"],
+                        _cs_tele["files_carved"],
+                    ),
+                    feature=None,
+                )
+            except Exception as exc:  # noqa: BLE001 — never break a scan
+                scan_meta["capability_split"] = {"applied": False, "reason": f"failed: {exc}"[:200]}
+                scan_meta.setdefault("warnings", []).append(
+                    f"capability split failed ({exc}); product layer left as it was"
+                )
+                log_cs.info(f"capability_split: FAILED ({exc}) — continuing", feature=None)
+
     # ── Stage 6.998 — B76 metrics recompute-on-emission ────────────────
     # Stage 6 stamped commit metrics ONCE, before the whole Layer-2
     # surgery; every post-Stage-6 mint (8.9 subdecompose / 6.87

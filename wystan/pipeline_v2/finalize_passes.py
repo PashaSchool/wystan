@@ -152,6 +152,12 @@ def unread_writes(
 
 
 F = Facet
+# The split must run before anything is counted; the late demotion and naming
+# passes then refine a layer that already has its capabilities.
+_SPLIT_BEFORE_COUNTS = (
+    "must precede the metric and line-count passes; the late demotes and the "
+    "naming passes refine the split layer afterwards"
+)
 
 # In the order ``run_finalize_phase`` calls them. Registered: every pass that
 # reads or writes journey membership, journey parent or feature ownership, and
@@ -622,6 +628,34 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
         "run_ws_containment_fold", "stage_ws_containment_fold.run_ws_containment_fold",
         reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
         writes={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT},
+    ),
+    # Written by hand. Placed after the last structural writer of journey
+    # parent and feature ownership before the metric passes, so nothing is
+    # counted on the unsplit layer. Journeys it marks "not product" stay in
+    # the host, so it does not write the journey set.
+    _pass(
+        "run_capability_split", "capability_split.run_capability_split",
+        reads={
+            F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.FLOW_OWNERSHIP,
+            F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.METRICS_LOC, F.NAMES_PRODUCT,
+        },
+        writes={
+            F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.FLOW_OWNERSHIP,
+            F.JOURNEY_PARENT, F.NAMES_PRODUCT,
+        },
+        calls_model=True,
+        early_reads={
+            F.FEATURE_FILES: _SPLIT_BEFORE_COUNTS,
+            F.FEATURE_OWNERSHIP: _SPLIT_BEFORE_COUNTS,
+            F.FEATURE_SET: _SPLIT_BEFORE_COUNTS,
+            F.JOURNEY_MEMBERSHIP: _SPLIT_BEFORE_COUNTS,
+            F.JOURNEY_PARENT: _SPLIT_BEFORE_COUNTS,
+            F.JOURNEY_SET: _SPLIT_BEFORE_COUNTS,
+            F.NAMES_PRODUCT: "journey names before the product-language pass are "
+                             "deterministic, which the reply cache needs",
+            F.METRICS_LOC: "developer-feature line counts only decide which feature "
+                           "is large enough to split; the final counts are stamped after",
+        },
     ),
     _pass(
         "apply_uf_loc", "stage_6_97b_uf_loc.apply_uf_loc",
