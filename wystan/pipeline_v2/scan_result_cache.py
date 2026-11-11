@@ -3717,7 +3717,17 @@ ENV_OUTPUT_FLAGS = (
 #: KS106 (2026-11-11): page reach reads files that have no signature (single-file
 #: components, re-export modules) and sigil aliases; below the reach coverage
 #: floor no product feature is judged to have no user surface.
-KEY_SCHEMA_VERSION = 106
+#: KS107 (2026-11-11): the adoption of journey-less flows by directory is
+#: withdrawn: a shared directory is not evidence that a flow belongs to a
+#: journey (one journey grew from 3 to 82 members).
+#: KS108 (2026-11-11): the name writer's answer is remembered per item, so an
+#: item whose evidence did not change is not asked about again; an item the
+#: writer declined whose current name breaks a law is asked about once more.
+#: KS109 (2026-11-11): a product feature's user surface is judged on all the
+#: code it owns (its developer features' pages and API operations), not on
+#: the anchor's own file list; a journey follows a joined feature only when
+#: its code went there.
+KEY_SCHEMA_VERSION = 109
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

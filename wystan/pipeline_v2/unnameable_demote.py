@@ -10,9 +10,11 @@ built. This pass removes it from what a product owner is shown:
     developer features joins the surviving product feature its code lives
     under by name (``packages/ee/server-only/signing`` joins ``signing``), or
     becomes unowned. When the feature's code is what another feature's pages
-    render, all of it joins that feature. Its user flows follow their developer feature, else the
-    product feature that owns the pages they start on, else lose their
-    parent.
+    render, all of it joins that feature. A user flow goes with the join only
+    when its own code went there: the strong share of its member flows must
+    belong to developer features that now have that home. Otherwise it
+    follows its developer feature, else the product feature that owns the
+    pages it starts on, else it loses its parent.
   * an unnameable **user flow** leaves ``user_flows``. Its member code flows
     stay in the flow layer without a ``user_flow_id``.
 
@@ -30,6 +32,9 @@ __all__ = ["SHARED_REASON", "demote_unnameable_features", "drop_unnameable_flows
 
 SHARED_REASON = "unnameable_product_feature"
 _MIN_STEM = 4
+# A journey belongs where this share of its member flows is owned: the same
+# share the owner attach uses (orphan_uf_path_attach).
+_STRONG_SHARE = 0.6
 
 
 def _same_stem(left: str, right: str) -> bool:
@@ -70,6 +75,21 @@ def _flow_home(user_flow: Any, flows: list[Any], owner_of: dict[str, str]) -> st
     if not ranked or (len(ranked) == 2 and ranked[0][1] == ranked[1][1]):
         return None
     return ranked[0][0]
+
+
+def _code_went_to(
+    user_flow: Any, target: str, flows: list[Any], owner_of_dev: dict[str, str | None],
+) -> bool:
+    """True when the strong share of a user flow's member flows belongs to
+    developer features whose product feature is now ``target``."""
+    members = [flow for flow in flows if flow.user_flow_id == user_flow.id]
+    if not members:
+        return False
+    there = sum(
+        1 for flow in members
+        if owner_of_dev.get(str(getattr(flow, "primary_feature", "") or "")) == target
+    )
+    return there / len(members) >= _STRONG_SHARE
 
 
 def _joined_feature(feature: Any, survivors: list[str]) -> str | None:
@@ -113,19 +133,31 @@ def demote_unnameable_features(
         for path in pf.paths or []
     }
     telemetry["flows_rehomed"] = telemetry["flows_unparented"] = 0
+    telemetry["flows_not_following_join"] = 0
+    owner_of_dev = {dev.name: dev.product_feature_id for dev in developer_features}
+    journeys_of: Counter[str] = Counter()
+    all_flows = list(flows)
     for user_flow in user_flows:
         if user_flow.product_feature_id not in gone:
             continue
-        home = joins.get(user_flow.product_feature_id) or new_home.get(
-            str(getattr(user_flow, "domain", "") or ""))
-        user_flow.product_feature_id = home or _flow_home(user_flow, list(flows), owner_of)
+        journeys_of[user_flow.product_feature_id] += 1
+        joined = joins.get(user_flow.product_feature_id)
+        if joined and not _code_went_to(user_flow, joined, all_flows, owner_of_dev):
+            # The feature joined another one; this journey's code did not.
+            telemetry["flows_not_following_join"] += 1
+            joined = None
+        home = joined or new_home.get(str(getattr(user_flow, "domain", "") or ""))
+        user_flow.product_feature_id = home or _flow_home(user_flow, all_flows, owner_of)
         key = "flows_rehomed" if user_flow.product_feature_id else "flows_unparented"
         telemetry[key] += 1
     for pf in demoted:
         product_features.remove(pf)
         telemetry["demoted"].append({
             "pf": pf.name, "name": pf.display_name, "laws": list(pf.name_evidence or []),
+            "journeys": journeys_of.get(pf.name, 0),
         })
+    # How much of the journey layer sat on features that were removed.
+    telemetry["journeys_on_demoted"] = sum(journeys_of.values())
     return telemetry
 
 

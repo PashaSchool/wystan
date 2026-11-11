@@ -309,6 +309,17 @@ class _Namer:
                 if not name:
                     if attempt == 0:
                         self.telemetry["declined_by_writer"] += 1
+                        broken = [] if target.url_name else self._violations(target, target.current)
+                        if broken:
+                            # Silence here removes the item: its current
+                            # name cannot stay. The writer is told so once,
+                            # as it is told why a proposal was rejected.
+                            self.telemetry["declined_asked_again"] = (
+                                self.telemetry.get("declined_asked_again", 0) + 1)
+                            notes[target.key] = (
+                                f'"{target.current}" breaks: ' + ", ".join(broken)
+                                + "; it cannot be kept")
+                            retry.append(target)
                     continue
                 reason = self._rejection(target, name)
                 if reason is None:
@@ -470,6 +481,22 @@ def _flow_target(
     )
 
 
+def _operations_in(paths: Iterable[str], operations_by_file: dict[str, set[str]]) -> set[str]:
+    """API operations served by the files in ``paths``."""
+    return set().union(*(operations_by_file.get(path, set()) for path in paths))
+
+
+def _owned_paths(product_features: list[Any], developer_features: Iterable[Any]) -> dict[str, list[str]]:
+    """Every file a product feature owns: its own list and the files of the
+    developer features that belong to it, own list first."""
+    owned: dict[str, list[str]] = {f.name: list(f.paths or []) for f in product_features}
+    for dev in sorted(developer_features, key=lambda d: str(d.name)):
+        home = getattr(dev, "product_feature_id", None)
+        if home in owned:
+            owned[home].extend(dev.paths or [])
+    return {name: list(dict.fromkeys(paths)) for name, paths in owned.items()}
+
+
 def _paths_shared_between_user_flows(flows_of: dict[str, list[Any]]) -> frozenset[str]:
     owners: dict[str, set[str]] = {}
     for user_flow_id, members in flows_of.items():
@@ -525,8 +552,20 @@ def run_product_language_names(
     # With no page to follow at all there is nothing we failed to see.
     reach_is_evidence = coverage["coverage"] is None or coverage["coverage"] >= REACH_COVERAGE_FLOOR
     coverage.update(floor=REACH_COVERAGE_FLOOR, abstained=not reach_is_evidence, features_not_judged=[])
+    owned_paths = _owned_paths(product_features, developer_features)
+    surface_from_owned_code: list[str] = []
     for target, feature in zip(feature_targets, product_features):
         page = top_page(feature.paths or [], target.identity_words, pages)
+        owned = owned_paths[feature.name]
+        if page is None:
+            # The feature's own list is the anchor's files. Its surface is
+            # in everything it owns: a page or the API operations may sit in
+            # a developer feature that belongs to it.
+            page = top_page(owned, target.identity_words, pages)
+            operations = _operations_in(owned, operations_by_file)
+            own_operations = _operations_in(feature.paths or [], operations_by_file)
+            if page is not None or len(own_operations) < _MIN_GROUP_ENTRIES <= len(operations):
+                surface_from_owned_code.append(feature.name)
         if page is None and not reach_is_evidence:
             coverage["features_not_judged"].append(feature.name)
             continue
@@ -535,7 +574,6 @@ def run_product_language_names(
             # serves a group of API operations: an API is something a user
             # addresses too. One lone endpoint is a leaf, not a feature. In a
             # product with no pages at all the lack of a page says nothing.
-            operations = set().union(*(operations_by_file.get(p, set()) for p in feature.paths or []))
             target.has_no_surface = bool(pages) and len(operations) < _MIN_GROUP_ENTRIES
             shown_on, only_there = (
                 _page_that_shows(feature, pages, page_reach, scope_words)
@@ -564,7 +602,8 @@ def run_product_language_names(
         )
         # Evidence for the writer is the feature's own pages, not every
         # shared component its code reaches.
-        page_files = {p.file for p in pages} & set(feature.paths or [])
+        own_files = set(feature.paths or [])
+        page_files = {p.file for p in pages} & (own_files if page.file in own_files else set(owned))
         target.labels = index.labels_for(page_files)
         target.routes = sorted({p.pattern for p in pages if p.file in page_files})
     members_of: dict[str, list[str]] = {}
@@ -600,6 +639,7 @@ def run_product_language_names(
         "product_features": feature_namer.telemetry,
         "user_flows": flow_namer.telemetry,
         "entry_reach_coverage": coverage,
+        "surface_from_owned_code": sorted(surface_from_owned_code),
     }
 
 
