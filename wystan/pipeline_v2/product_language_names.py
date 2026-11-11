@@ -34,6 +34,7 @@ from wystan.pipeline_v2.authored_names import (
     page_rows,
     top_page,
 )
+from wystan.pipeline_v2.entry_points.page_reach import reach_coverage
 from wystan.pipeline_v2.naming_contract import _verb_class_tokens, load_naming_vocab
 from wystan.pipeline_v2.naming_validator import EvidenceBundle, tokenize_name, validate_name
 from wystan.pipeline_v2.product_name_laws import (
@@ -53,6 +54,7 @@ __all__ = [
     "JOINS_PREFIX",
     "UNNAMEABLE_PREFIX",
     "NameTarget",
+    "REACH_COVERAGE_FLOOR",
     "build_ui_index",
     "cap_confidence_by_evidence",
     "is_unnameable",
@@ -72,6 +74,14 @@ _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 UNNAMEABLE_PREFIX = "unnameable:"
 NO_USER_SURFACE = "no_user_surface"
 JOINS_PREFIX = "joins:"
+
+# Page reach is evidence only when it works. Measured on seven corpus
+# clones: where the import graph followed the pages, 72 % to 100 % of them
+# reached other files; where it could not read the page files at all, 0 % did and
+# every pageless feature was judged to have no surface. Half is midway
+# between a broken graph and the weakest working one. Pages that import
+# none of the repository's code are left out of the share.
+REACH_COVERAGE_FLOOR = 0.5
 
 _MAX_PROMPT_LABELS = 30
 _MAX_PROMPT_ROUTES = 8
@@ -481,9 +491,13 @@ def run_product_language_names(
     nav_pairs: Iterable[tuple[str, str | None]] = (),
     files_without_ui: Iterable[str] = (),
     page_reach: dict[str, frozenset[str]] | None = None,
+    pages_without_imports: Iterable[str] = (),
     writer: NameWriter | None = None,
 ) -> dict[str, Any]:
-    """Rename product features and user flows in place; returns telemetry."""
+    """Rename product features and user flows in place; returns telemetry.
+
+    ``pages_without_imports`` are pages that import no code of the
+    repository: their empty reach does not count against reach coverage."""
     nav_pairs = list(nav_pairs)
     page_reach = page_reach or {}
     # A name the author wrote (a command's description) is not ours to judge
@@ -505,8 +519,17 @@ def run_product_language_names(
     for row in routes_index:
         if row.get("method") != "PAGE" and row.get("file") and row.get("pattern"):
             operations_by_file.setdefault(str(row["file"]), set()).add(str(row["pattern"]))
+    coverage = reach_coverage(page_reach, (p.file for p in pages), pages_without_imports)
+    # Below the floor "no page shows this code" is not a finding: we could
+    # not look. Nothing is judged surfaceless or joined to a page then.
+    # With no page to follow at all there is nothing we failed to see.
+    reach_is_evidence = coverage["coverage"] is None or coverage["coverage"] >= REACH_COVERAGE_FLOOR
+    coverage.update(floor=REACH_COVERAGE_FLOOR, abstained=not reach_is_evidence, features_not_judged=[])
     for target, feature in zip(feature_targets, product_features):
         page = top_page(feature.paths or [], target.identity_words, pages)
+        if page is None and not reach_is_evidence:
+            coverage["features_not_judged"].append(feature.name)
+            continue
         if page is None:
             # No page. The feature still has a surface when its own code
             # serves a group of API operations: an API is something a user
@@ -554,6 +577,7 @@ def run_product_language_names(
     feature_namer = _Namer(ctx, writer)
     feature_namer.reserve("pf", (f.display_name or f.name for f in authored_features))
     feature_namer.run(feature_targets, {})
+    coverage["features_not_judged"].sort()
 
     flows_of: dict[str, list[Any]] = {}
     for flow in flows:
@@ -575,6 +599,7 @@ def run_product_language_names(
         "ui_text_files": len(index.by_file),
         "product_features": feature_namer.telemetry,
         "user_flows": flow_namer.telemetry,
+        "entry_reach_coverage": coverage,
     }
 
 
@@ -616,12 +641,13 @@ def name_product_layer(
 
     index = build_ui_index(features, product_features, flows, ctx)
     developer = [f for f in features if getattr(f, "layer", None) != "product"]
+    page_reach, quiet_pages = _page_reach(ctx, routes_index)
     telemetry = run_product_language_names(
         product_features, user_flows if name_flows else [], flows,
         index=index, routes_index=routes_index, developer_features=developer,
         brand_words=_brand_words(ctx.repo_path), nav_pairs=_nav_pairs(ctx, index),
         files_without_ui=route_files_without_ui(ctx.repo_path, routes_index),
-        page_reach=_page_reach(ctx, routes_index),
+        page_reach=page_reach, pages_without_imports=quiet_pages,
         writer=build_name_writer(**llm),
     )
     telemetry["entry_points"] = _entry_point_report(ctx, routes_index, index)
@@ -785,19 +811,29 @@ def _entry_point_report(ctx: Any, routes_index: list[dict[str, Any]], index: UiT
     return entry_report(entries, errors)
 
 
-def _page_reach(ctx: Any, routes_index: list[dict[str, Any]]) -> dict[str, frozenset[str]]:
-    """Files each page imports. Empty when the unit has no pages or the
-    import graph cannot be built."""
+def _page_reach(
+    ctx: Any, routes_index: list[dict[str, Any]],
+) -> tuple[dict[str, frozenset[str]], frozenset[str]]:
+    """Files each page imports, and the pages that import nothing of the
+    repository. Both empty when the unit has no pages or the import graph
+    cannot be built; the caller then reads the reach as missing."""
     page_files = {str(r["file"]) for r in routes_index if r.get("method") == "PAGE" and r.get("file")}
     if not page_files:
-        return {}
+        return {}, frozenset()
     try:
-        from wystan.pipeline_v2.entry_points.page_reach import files_reached_from
+        from wystan.pipeline_v2.entry_points.page_reach import (
+            files_reached_from,
+            pages_with_nothing_to_follow,
+        )
         from wystan.pipeline_v2.flow_reach import build_reach_context
 
-        return files_reached_from(build_reach_context(ctx), page_files)
+        reach_context = build_reach_context(ctx)
+        return (
+            files_reached_from(reach_context, page_files),
+            pages_with_nothing_to_follow(reach_context, page_files),
+        )
     except Exception:  # noqa: BLE001 — reach is evidence, never a requirement
-        return {}
+        return {}, frozenset()
 
 
 def _page_that_shows(
