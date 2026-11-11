@@ -67,6 +67,8 @@ EVIDENCE_UI_TEXT = "ui-text"
 EVIDENCE_UI_LABEL = "ui-label"
 EVIDENCE_NOT_AUTHORED = "not-authored"
 EVIDENCE_NONE = "not-evidenced"
+# The name is the feature's own slug written as words: nobody stated it.
+EVIDENCE_IDENTITY = "identity"
 # Evidence that the product itself states the name. Only these earn "high".
 _STATED_PREFIX = "authored:"
 _STATED_EVIDENCE = frozenset({"cli-declared"})
@@ -293,6 +295,18 @@ class _Namer:
         text = " ".join(part.capitalize() for part in re.split(r"[-_\s]+", target.slug) if part)
         return text if text and self._rejection(target, text) is None else None
 
+    def _slug_name(self, target: NameTarget) -> str | None:
+        """The feature's slug as words, when it passes the laws and no
+        sibling has it. Unlike ``_identity_candidate`` it asks for no other
+        evidence: the slug is the anchor's own word for the feature."""
+        text = " ".join(part.capitalize() for part in re.split(r"[-_\s]+", target.slug) if part)
+        if not text or self._violations(target, text):
+            return None
+        if text.lower() in self._taken.get(target.group, set()):
+            return None
+        holder = self._current.get((target.group, text.lower()))
+        return text if holder in (None, target.key) else None
+
     def _propose(self, targets: list[NameTarget], parents: dict[str, str]) -> dict[str, str]:
         """Accepted writer proposals by target key, after one retry."""
         accepted: dict[str, str] = {}
@@ -399,6 +413,16 @@ class _Namer:
             self.telemetry["kept"] += 1
             target.apply(target.current, "low", [EVIDENCE_NOT_AUTHORED])
             return True
+        if not target.has_no_surface:
+            # The page's own words all break a law ("Edit" from /x/:id/edit,
+            # "Callback"). The feature is still what its anchor says it is:
+            # its slug, written as words, names it when that passes the laws.
+            identity = self._slug_name(target)
+            if identity is not None:
+                self._take(target, identity)
+                self.telemetry["from_identity"] = self.telemetry.get("from_identity", 0) + 1
+                target.apply(identity, "low", [EVIDENCE_IDENTITY])
+                return True
         law = NO_USER_SURFACE if target.has_no_surface else "no_lawful_page_name"
         self.telemetry["unnameable"] += 1
         by_law = self.telemetry["unnameable_by_law"]
