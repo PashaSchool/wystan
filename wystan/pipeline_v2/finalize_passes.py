@@ -152,6 +152,12 @@ def unread_writes(
 
 
 F = Facet
+# The first naming call exists so the split sees removals in the same scan;
+# what later passes change is judged by the second and the final call.
+_JUDGED_AGAIN_LATER = (
+    "removals must be known before the capability split; the two later calls "
+    "judge again on what the passes in between produce"
+)
 # The split must run before anything is counted; the late demotion and naming
 # passes then refine a layer that already has its capabilities.
 _SPLIT_BEFORE_COUNTS = (
@@ -629,6 +635,23 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
         reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
         writes={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT},
     ),
+    # The first of three calls, placed before the capability split so the
+    # split sees which features stay (demotion veto) and which journeys lose
+    # their parent. Features only; the two later calls judge what the passes
+    # in between produce.
+    _pass(
+        "name_product_layer", "product_language_names.name_product_layer",
+        reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
+        writes={F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT, F.NAMES_PRODUCT},
+        calls_model=True,
+        early_reads={
+            facet: _JUDGED_AGAIN_LATER
+            for facet in (
+                F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP,
+                F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT,
+            )
+        },
+    ),
     # Written by hand. Placed after the last structural writer of journey
     # parent and feature ownership before the metric passes, so nothing is
     # counted on the unsplit layer. Journeys it marks "not product" stay in
@@ -749,7 +772,7 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
     ),
     # Also runs demote_unnameable_features: re-homes developer features and journeys.
     _pass(
-        "name_product_layer", "product_language_names.name_product_layer",
+        "name_product_layer#2", "product_language_names.name_product_layer",
         reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
         writes={F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_PARENT, F.NAMES_PRODUCT},
         calls_model=True,
@@ -782,7 +805,7 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
     ),
     # Also runs demote_unnameable_features: re-homes developer features and journeys; the final call also drops unnameable journeys.
     _pass(
-        "name_product_layer#2", "product_language_names.name_product_layer",
+        "name_product_layer#3", "product_language_names.name_product_layer",
         reads={F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
         writes={F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.NAMES_PRODUCT},
         calls_model=True,

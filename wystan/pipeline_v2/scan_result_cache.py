@@ -3734,7 +3734,11 @@ ENV_OUTPUT_FLAGS = (
 #: journeys, and the parentless journeys on unowned code, are split into
 #: capabilities by one model call per pool; a split-out feature owns the
 #: flows of its journeys and the files only they use.
-KEY_SCHEMA_VERSION = 111
+#: KS112 (2026-11-11): a product feature about to be removed for having no
+#: name gets a model's verdict first (capability: kept; part of another
+#: feature: joined; plumbing: removed); features are judged a first time
+#: before the capability split.
+KEY_SCHEMA_VERSION = 112
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

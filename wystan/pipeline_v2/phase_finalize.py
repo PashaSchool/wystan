@@ -4778,6 +4778,35 @@ def run_finalize_phase(
                     feature=None,
                 )
 
+    # ── Features with no product-language name, judged before the split ──
+    # The naming pass removes the features it cannot name, after a model's
+    # second opinion (demotion veto). Run here, before the capability split,
+    # so that in this same scan the split sees the product layer as it will
+    # be: a feature the veto keeps is a feature, and the journeys of a
+    # removed one are parentless and can be grouped. The two later calls
+    # stay where they were and judge what the passes in between produce.
+    if anchored_mint_applied and not uf_suppressed:
+        try:
+            from wystan.pipeline_v2.product_language_names import (
+                name_product_layer as _name_features_first,
+            )
+            _nf_tele = _name_features_first(
+                features, product_features, user_flows, list(bipartite.flows),
+                ctx=ctx, routes_index=lineage_result.routes_index, name_flows=False,
+                llm={
+                    "model_id": model_id, "cost_tracker": tracker,
+                    "cache": getattr(ctx, "cache_backend", None),
+                    "llm_health": llm_health,
+                },
+            )
+            scan_meta["unnameable_features_removed"] = _nf_tele["features_removed"]
+            scan_meta["demotion_veto"] = _nf_tele.get("demotion_veto")
+            scan_meta["entry_reach_coverage"] = _nf_tele.get("entry_reach_coverage")
+        except Exception as exc:  # noqa: BLE001 — never break a scan
+            scan_meta.setdefault("warnings", []).append(
+                f"early unnameable-feature removal failed ({exc}); none removed"
+            )
+
     # ── Capability split ────────────────────────────────────────────────
     # A product feature that holds most of the product's journeys is split
     # into the capabilities inside it (one model call per such feature and
@@ -5716,7 +5745,11 @@ def run_finalize_phase(
                 "llm_health": llm_health,
             },
         )
-        scan_meta["unnameable_features_removed"] = _unf_tele["features_removed"]
+        from wystan.pipeline_v2.demotion_veto import merge_counts as _merge_counts
+        scan_meta["unnameable_features_removed"] = _merge_counts(
+            scan_meta.get("unnameable_features_removed"), _unf_tele["features_removed"])
+        scan_meta["demotion_veto"] = _merge_counts(
+            scan_meta.get("demotion_veto"), _unf_tele.get("demotion_veto"))
         # Which features this pass removes depends on page reach; record
         # how much of it there was (below the floor nothing is removed for
         # having no surface).
@@ -6168,6 +6201,9 @@ def run_finalize_phase(
                 },
             )
             scan_meta["entry_points"] = pln_tele.pop("entry_points", None)
+            from wystan.pipeline_v2.demotion_veto import merge_counts as _merge_veto
+            scan_meta["demotion_veto"] = _merge_veto(
+                scan_meta.get("demotion_veto"), pln_tele.pop("demotion_veto", None))
             scan_meta["entry_reach_coverage"] = pln_tele.pop(
                 "entry_reach_coverage", scan_meta.get("entry_reach_coverage"))
             scan_meta["agents"] = _agent_units_report(ctx)
