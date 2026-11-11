@@ -3727,7 +3727,10 @@ ENV_OUTPUT_FLAGS = (
 #: code it owns (its developer features' pages and API operations), not on
 #: the anchor's own file list; a journey follows a joined feature only when
 #: its code went there.
-KEY_SCHEMA_VERSION = 109
+#: KS110 (2026-11-11): a product feature may not be named as an error screen,
+#: a lone object verb or a protocol step; a feature whose page words all break
+#: a law takes its own slug before it is given up.
+KEY_SCHEMA_VERSION = 110
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
