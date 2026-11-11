@@ -6293,6 +6293,17 @@ def run_finalize_phase(
             f"orphan-uf owner-attach failed ({exc}); orphans left"
         )
 
+    # The platform lane was written mid-phase. Developer features that gave
+    # files to a carved one, or gained an owner, since then are brought up to
+    # date, so no line is in the lane and under a product feature at once.
+    try:
+        from wystan.pipeline_v2.ownership_moves import product_layer_total, sync_lane_rows
+        scan_meta["lane_sync"] = sync_lane_rows(platform_infrastructure, features, product_features)
+        scan_meta["product_layer_lines"] = product_layer_total(
+            product_features, [f for f in features if getattr(f, "layer", None) != "product"])
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
+        scan_meta.setdefault("warnings", []).append(f"lane sync failed ({exc}); lane rows left")
+
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import
     write_stage_input(run_dir, 7, "output", {

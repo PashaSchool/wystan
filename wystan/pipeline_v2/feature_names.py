@@ -28,6 +28,7 @@ import re
 from typing import Any, Callable, Iterable
 
 from wystan.cache.backend import CacheKind
+from wystan.pipeline_v2.ownership_moves import conservation_report, product_layer_total
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
 from wystan.pipeline_v2.unnameable_demote import demote_unnameable_features
 
@@ -344,16 +345,6 @@ class _Applier:
         self._tele["not_a_capability"].append({"pf": feature.name, "belongs_to": parent or None})
 
 
-def _census(product_features: list[Any], developers: list[Any], user_flows: list[Any], flows: list[Any]) -> dict[str, int]:
-    alive = {f.name for f in product_features}
-    owned = sum(int(getattr(d, "loc", None) or 0) for d in developers if d.product_feature_id in alive)
-    return {
-        "journeys": len(user_flows), "flows": len(flows),
-        "developer_lines": sum(int(getattr(d, "loc", None) or 0) for d in developers),
-        "owned_lines": owned,
-    }
-
-
 def run_feature_names(
     product_features: list[Any],
     developer_features: list[Any],
@@ -393,18 +384,17 @@ def run_feature_names(
             for slug, answer in fresh.items():
                 _remember(cache, _cache_key(rows[slug]), answer)
             answers.update(fresh)
-    before = _census(product_features, developer_features, user_flows, flows)
+    before = product_layer_total(product_features, developer_features)
+    counts = (len(user_flows), len(flows))
     _Applier(product_features, rows, violations, joins_prefix, telemetry).apply(answers)
     if telemetry["not_a_capability"]:
         telemetry["removal"] = demote_unnameable_features(
             product_features, developer_features, user_flows, flows)
-    after = _census(product_features, developer_features, user_flows, flows)
-    telemetry["conservation"] = {
-        "journeys_before": before["journeys"], "journeys_after": after["journeys"],
-        "flows_before": before["flows"], "flows_after": after["flows"],
-        "lines_before": before["developer_lines"], "lines_after": after["developer_lines"],
-        "conserved": all(before[k] == after[k] for k in ("journeys", "flows", "developer_lines")),
-    }
+    telemetry["conservation"] = conservation_report(
+        before, product_layer_total(product_features, developer_features),
+        journeys=(counts[0], len(user_flows)), flows=(counts[1], len(flows)),
+        ruler_gap=int((telemetry.get("removal") or {}).get("ruler_gap", 0)),
+    )
     telemetry["unanswered"] = sorted(set(rows) - set(answers))
     telemetry["applied"] = bool(telemetry["renamed"] or telemetry["not_a_capability"])
     if not telemetry["applied"] and telemetry["reason"] is None:
