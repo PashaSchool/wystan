@@ -73,6 +73,7 @@ from wystan.pipeline_v2.stage_8_9_anchor_subdecompose import (
     _owned_paths,
     _slug,
 )
+from wystan.llm.client import build_client
 
 if TYPE_CHECKING:
     from wystan.models.types import Feature
@@ -321,7 +322,7 @@ def _default_client_factory() -> Any | None:  # pragma: no cover — IO
         import anthropic
     except ImportError:
         return None
-    return anthropic.Anthropic(api_key=api_key)
+    return build_client(api_key)
 
 
 def llm_component_split(

@@ -74,6 +74,7 @@ from wystan.pipeline_v2.nav_taxonomy import aggregate_product_feature
 from wystan.pipeline_v2.stage_6_7c_uf_splitter import (
     residual_citability_enabled as _residual_citability_enabled,
 )
+from wystan.llm.client import build_client
 
 if TYPE_CHECKING:
     from wystan.cache.backend import CacheBackend
@@ -267,13 +268,13 @@ def _default_client_factory() -> Any | None:  # pragma: no cover - IO
     """Lazy Anthropic client. ``None`` when SDK / key absent → the stage
     degrades to the deterministic inputs without erroring."""
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         return None
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
-    return Anthropic(api_key=api_key)
+    return build_client(api_key)
 
 
 def is_enabled() -> bool:

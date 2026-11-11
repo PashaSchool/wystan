@@ -32,6 +32,7 @@ from wystan.models.types import FeatureMap
 
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
+from wystan.llm.client import build_client
 
 _DEFAULT_MODEL = "claude-sonnet-5-5"
 _MAX_ORPHANS_IN_PROMPT = 80
@@ -230,7 +231,7 @@ def _llm_classify_group(
 ) -> list[FeatureProposal] | None:
     """Ask Claude whether this group extends an existing feature or is new."""
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         logger.warning("anthropic not installed — skipping LLM classification")
         return None
@@ -241,7 +242,7 @@ def _llm_classify_group(
     prompt = _build_prompt(group, feature_map)
 
     try:
-        client = Anthropic(api_key=api_key) if api_key else Anthropic()
+        client = build_client(api_key)
         response = client.messages.create(
             model=gateway_model(model),
             max_tokens=1500,

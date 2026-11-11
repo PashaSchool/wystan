@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
+from wystan.llm.client import build_client
 
 
 # ── Source priority ────────────────────────────────────────────────────────
@@ -624,7 +625,7 @@ def _llm_pick_name(
     try:
         # Local import to keep ``anthropic`` from being a hard dep of
         # Stage 2 callers that don't enable the 2nd-opinion path.
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         logger.warning("anthropic package not available; LLM reconcile skipped")
         return None
@@ -640,7 +641,7 @@ def _llm_pick_name(
     )
 
     try:
-        client = Anthropic()
+        client = build_client()
         msg = client.messages.create(
             model=gateway_model(_HAIKU_MODEL_ID),
             max_tokens=24,

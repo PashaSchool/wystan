@@ -78,6 +78,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
+from wystan.llm.client import build_client
 
 
 # ── Tunables ────────────────────────────────────────────────────────────────
@@ -338,13 +339,13 @@ def _default_client_factory() -> Any | None:  # pragma: no cover - IO
     Stage-6.7 verdict without erroring.
     """
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         return None
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
-    return Anthropic(api_key=api_key)
+    return build_client(api_key)
 
 
 # ── Code-grounded input builders (README-FORBIDDEN) ─────────────────────────
