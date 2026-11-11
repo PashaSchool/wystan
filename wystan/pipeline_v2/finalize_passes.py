@@ -662,9 +662,11 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
             F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.FLOW_OWNERSHIP,
             F.JOURNEY_MEMBERSHIP, F.JOURNEY_PARENT, F.JOURNEY_SET, F.METRICS_LOC, F.NAMES_PRODUCT,
         },
+        # It moves the lines of the files it carves between developer features
+        # (and keeps the line-count ledger true), so it writes line counts.
         writes={
             F.FEATURE_FILES, F.FEATURE_OWNERSHIP, F.FEATURE_SET, F.FLOW_OWNERSHIP,
-            F.JOURNEY_PARENT, F.NAMES_PRODUCT,
+            F.JOURNEY_PARENT, F.METRICS_LOC, F.NAMES_PRODUCT,
         },
         calls_model=True,
         early_reads={
@@ -700,9 +702,11 @@ FINALIZE_PASSES: tuple[FinalizePass, ...] = (
         reads={F.JOURNEY_MEMBERSHIP, F.JOURNEY_SET},
         writes=set(),
     ),
+    # Reads which developer features were carved from which, to name a
+    # carved flow as part of its donor.
     _pass(
         "apply_flow_name_v2", "flow_name_v2.apply_flow_name_v2",
-        reads={F.FLOW_OWNERSHIP, F.NAMES_PRODUCT},
+        reads={F.FLOW_OWNERSHIP, F.NAMES_PRODUCT, F.FEATURE_SET},
         writes={F.NAMES_PRODUCT},
     ),
     _pass(

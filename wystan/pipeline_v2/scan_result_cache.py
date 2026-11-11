@@ -3738,7 +3738,12 @@ ENV_OUTPUT_FLAGS = (
 #: name gets a model's verdict first (capability: kept; part of another
 #: feature: joined; plumbing: removed); features are judged a first time
 #: before the capability split.
-KEY_SCHEMA_VERSION = 112
+#: KS113 (2026-11-11): the capability split moves the lines of the files it
+#: carves (a carved feature no longer carries its donor's line count), leaves
+#: flow ids and names alone, asks again for an unreadable reply and remembers
+#: one that stays unreadable, and no longer counts lines under a removed
+#: parent in a feature's share.
+KEY_SCHEMA_VERSION = 113
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

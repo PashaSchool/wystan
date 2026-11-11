@@ -607,6 +607,7 @@ def apply_flow_name_v2(
     flows: list["Flow"],
     routes_index: list[dict[str, Any]] | None,
     repo_path: Path | str | None,
+    naming_owner: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Rename path-echo flows to verb+resource IN PLACE; return telemetry.
 
@@ -740,7 +741,11 @@ def apply_flow_name_v2(
         candidate = f"{core}-flow"
         used_qualifier = False
         if core_counts[_name_key(core)] > 1 or _name_key(candidate) in taken:
-            qualified = _feature_qualified(core, flow.primary_feature)
+            # A flow carved into a developer feature of its own is still
+            # named as part of the one it came from: its name says what it
+            # is, not who lists it.
+            owner = (naming_owner or {}).get(flow.primary_feature or "", flow.primary_feature)
+            qualified = _feature_qualified(core, owner)
             if qualified is not None:
                 candidate = qualified
                 used_qualifier = True
