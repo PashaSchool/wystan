@@ -2952,7 +2952,8 @@ def run_finalize_phase(
     if shared_leaf_consistency_enabled() and anchored_mint_applied:
         try:
             slc_tele = enforce_shared_leaf_consistency(
-                features, product_features, lineage_result.routes_index)
+                features, product_features, lineage_result.routes_index,
+                module_scopes=getattr(ctx, "module_scopes", None))
             scan_meta["shared_leaf_consistency"] = slc_tele
         except Exception as exc:  # noqa: BLE001 — never break a scan
             scan_meta.setdefault("warnings", []).append(

@@ -466,10 +466,72 @@ def sparse_below(peer_median: float) -> float:
     return peer_median / _OVERSIZED_MEDIAN_MULT
 
 
+# ── Rule 3, continued: product breadth is counted among possible users ──────
+
+
+@dataclass(frozen=True)
+class ProductBreadth:
+    """How many product features a shared file is measured against.
+
+    "Shared by a fair part of the product" is a share of the product
+    features. A feature made only of a nested module's new rows cannot
+    use a file outside that module, so it is not part of the product
+    such a file is shared across: counted, it raises the bar for every
+    other file of the repository by the number of packages the module
+    happens to have.
+    """
+
+    total: int
+    # Module root -> product features whose every row is a new row of it.
+    module_only: Mapping[str, int] = field(default_factory=dict)
+
+    # One locator for every file asked about: it remembers each directory
+    # it resolved, so the cost does not grow with files x modules.
+    _locator: ModuleLocator = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_locator", ModuleLocator(self.module_only))
+
+    def around(self, path: str) -> int:
+        """The breadth for the file at ``path``: every product feature
+        except those wholly inside a module that does not hold it."""
+        if not self.module_only:
+            return self.total
+        home = set(self._locator.enclosing(_parent_dir(path)))
+        elsewhere = sum(
+            count for root, count in self.module_only.items() if root not in home
+        )
+        return self.total - elsewhere
+
+
+def product_breadth(
+    total: int,
+    rows_of_feature: Mapping[str, Sequence[Sequence[str]]],
+    module_scopes: ModuleScopes | None,
+) -> ProductBreadth:
+    """The scan's :class:`ProductBreadth`.
+
+    ``total`` is the number of product features; ``rows_of_feature``
+    gives, per product feature, the files each of its developer rows
+    owns. A feature with no row, or with rows in two scopes, belongs to
+    the repository. With no record every file is measured against
+    ``total``, as before nested modules were read.
+    """
+    if not module_scopes:
+        return ProductBreadth(total)
+    module_only: Counter[str] = Counter()
+    for feature in sorted(rows_of_feature):
+        scopes = set(grain_scopes(rows_of_feature[feature], module_scopes))
+        if len(scopes) == 1 and REPOSITORY_ROOT not in scopes:
+            module_only[scopes.pop()] += 1
+    return ProductBreadth(total, dict(sorted(module_only.items())))
+
+
 __all__ = [
     "NO_MODULE_SCOPES",
     "GrainRuler",
     "ModuleScopes",
+    "ProductBreadth",
     "ScopeGuard",
     "grain_rulers",
     "grain_scopes",
@@ -477,6 +539,7 @@ __all__ = [
     "leave_claimed_files",
     "measure_grain",
     "peer_medians",
+    "product_breadth",
     "qualify_shared_names",
     "record_module_scopes",
     "sparse_below",

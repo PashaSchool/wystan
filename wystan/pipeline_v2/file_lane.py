@@ -26,7 +26,11 @@ Mechanism (scale-invariant, mechanisms-not-vocabularies — a file F joins the
     shared-floor of ``>= 2`` (a file imported by fewer than two product features
     is that feature's private util, not shared infrastructure). ``pct`` is a
     single corpus-calibrated fraction (``WYSTAN_FILE_LANE_PCT``), never a
-    per-repo absolute integer (rule-no-magic-tuning).
+    per-repo absolute integer (rule-no-magic-tuning). ``num_product_features``
+    is counted per file: a product feature that lives wholly in a nested
+    module counts only for files of that module
+    (``module_scope.ProductBreadth``), so reading a module of many packages
+    does not raise the bar for the rest of the repository.
   * **S3 no-product-surface (HARD)** — F is not a route/page (``routes_index``)
     and not any product feature's anchor file. A product surface is NEVER laned,
     however widely imported (anti-case: a shared dashboard page).
@@ -58,6 +62,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from wystan.pipeline_v2.module_scope import ProductBreadth, product_breadth
 from wystan.pipeline_v2.spine_anchors import owned_paths_of
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -178,6 +183,37 @@ def _pf_key(pf: Any) -> str | None:
     return getattr(pf, "id", None) or getattr(pf, "name", None)
 
 
+def _fanin_threshold(num_pfs: int) -> int:
+    """Distinct product features that make a file shared, for a product of
+    ``num_pfs`` features."""
+    return max(SHARED_FLOOR, math.ceil(file_lane_pct() * num_pfs))
+
+
+def _breadth(
+    developer_features: list["Feature"], pf_keys: set[str], module_scopes: Any,
+) -> ProductBreadth:
+    """Product breadth per file: the features wholly inside a nested module
+    count only for files of that module (``module_scope.ProductBreadth``)."""
+    rows_of_feature: dict[str, list[list[str]]] = {key: [] for key in pf_keys}
+    for dev in developer_features or []:
+        if getattr(dev, "layer", "developer") != "developer":
+            continue
+        home = getattr(dev, "product_feature_id", None)
+        if home in rows_of_feature:
+            rows_of_feature[home].append(sorted(owned_paths_of(dev)))
+    return product_breadth(len(pf_keys), rows_of_feature, module_scopes)
+
+
+def _stamp_breadth(tele: dict[str, Any], breadth: ProductBreadth) -> None:
+    """Record the ruler: the threshold of a file outside every module,
+    which is the one threshold when there is no nested module."""
+    tele["threshold"] = _fanin_threshold(breadth.around(""))
+    if breadth.module_only:
+        # Only when a module holds product features of its own, so a
+        # repository without one keeps the telemetry it had.
+        tele["module_only_product_features"] = dict(breadth.module_only)
+
+
 def _parent_dir(rel: str) -> str:
     rel = rel.replace("\\", "/")
     return rel.rsplit("/", 1)[0] if "/" in rel else ""
@@ -267,8 +303,10 @@ def run_file_lane_infra(
     tele["num_product_features"] = num_pfs
     if num_pfs == 0:
         return tele
-    threshold = max(SHARED_FLOOR, math.ceil(file_lane_pct() * num_pfs))
-    tele["threshold"] = threshold
+    breadth = _breadth(
+        developer_features, set(pf_by_key), getattr(ctx, "module_scopes", None),
+    )
+    _stamp_breadth(tele, breadth)
 
     # ── ownership maps (mirror validator.file_owner_pf + provenance_rehome) ──
     # file -> owning product PF key (product-homed dev primary claims); the set
@@ -329,7 +367,7 @@ def run_file_lane_infra(
             file_owner_pf[s] for s in importers[tgt] if s in file_owner_pf
         }
         fanin = len(pf_importers)
-        if fanin < threshold:
+        if fanin < _fanin_threshold(breadth.around(tgt)):
             tele["blocked_low_fanin"] += 1
             continue
         laned[tgt] = fanin
@@ -514,6 +552,7 @@ def enforce_shared_leaf_consistency(
     developer_features: list["Feature"],
     product_features: list["Feature"],
     routes_index: list[dict[str, Any]] | None,
+    module_scopes: Any = None,
 ) -> dict[str, Any]:
     """B15 — role-CONSISTENCY law for shared-leaf member files.
 
@@ -543,8 +582,10 @@ def enforce_shared_leaf_consistency(
     num_pfs = len(pf_list)
     if num_pfs == 0:
         return tele
-    threshold = max(SHARED_FLOOR, math.ceil(file_lane_pct() * num_pfs))
-    tele["threshold"] = threshold
+    breadth = _breadth(
+        developer_features, {_pf_key(pf) or "" for pf in pf_list}, module_scopes,
+    )
+    _stamp_breadth(tele, breadth)
     surface = _surface_paths(product_features, routes_index)
 
     # cross-PF claim fan-in + already-shared-somewhere over PF member files.
@@ -562,7 +603,8 @@ def enforce_shared_leaf_consistency(
 
     forced = {
         p for p, pfs_ in claim_pfs.items()
-        if len(pfs_) >= threshold and p not in surface and p in shared_somewhere
+        if len(pfs_) >= _fanin_threshold(breadth.around(p))
+        and p not in surface and p in shared_somewhere
     }
     if not forced:
         return tele

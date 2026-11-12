@@ -3768,7 +3768,9 @@ ENV_OUTPUT_FLAGS = (
 #: KS120 (2026-11-12): the same rule as KS118, rebuilt; 118 and 119 are
 #: skipped because maps of two rejected builds were written under them.
 #: KS121 (2026-11-12): the unit that registers a command tool's commands
-#: takes the tool's anchor where it would stand alone under its package name.
+#: takes the tool's anchor where it would stand alone under its package name;
+#: the file lane counts a product feature that lives wholly in a nested
+#: module only for files of that module.
 KEY_SCHEMA_VERSION = 121
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
