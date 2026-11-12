@@ -69,7 +69,6 @@ from wystan.pipeline_v2.naming_validator import (
     retry_prohibition,
     validate_name,
 )
-from wystan.pipeline_v2.scan_id_order import scan_id_order
 
 if TYPE_CHECKING:
     from wystan.cache.backend import CacheBackend
@@ -234,135 +233,158 @@ def _refine_cache_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
-# ── A domain is asked by its content ────────────────────────────────────────
+# ── A domain is remembered by its content, and asked as it always was ───────
 #
-# A journey's id (``UF-123``) is its ordinal in the scan. With that id in the
-# prompt, one new journey anywhere earlier in the list changed the prompt, and
-# so the cache key, of every later domain: the model was asked again about
+# A journey's id (``UF-123``) is its ordinal in the scan. The id is in the
+# prompt, the prompt was the key, so one new journey anywhere earlier in the
+# list changed the key of every later domain: the model was asked again about
 # journeys that had not changed, and they came back with other names (measured
 # by adding one unrelated module to a repository of 52 domains: 51 were asked
 # again with nothing but their ids shifted, cache hits 74 -> 1, and the new
 # names moved journeys in every later stage).
 #
-# So no ordinal reaches the prompt or the key:
-#   * a journey is named by its place in its own domain batch (``u1``...),
-#   * the rows keep the order every earlier build sent them in: the order
-#     of their scan ids, read as numbers (never the list order of the call),
-# and the answer is mapped back to scan ids. Only the ORDER of a domain's own
-# ids is read, and that does not move when journeys are added elsewhere: ids
-# are dealt in the order of (domain, resource, intent), so between two
-# journeys of one domain only that domain's own journeys decide who is first.
-# A domain whose journeys did not change therefore has the same prompt, the
-# same key and the same remembered answer whatever was added elsewhere. A
-# journey added INTO a domain changes that domain's question, as any change
-# of its journeys does, and the domain is asked again.
+# The QUESTION is not touched: the model is sent the scan ids, the rows, the
+# order and the wording it was always sent. A build that sent local ids
+# (``u1``) instead got other answers from the model on a first scan (names of
+# 5 of 17 and 24 of 135 journeys on two repositories) and thinner maps.
 #
-# Why the rows are not put in an order of their own (by content): the model
-# answers a reordered batch differently. Measured on two repositories asked
-# with an empty memory, 119 rows in 28 reordered domains came back with 57
-# other names, against 4 of 33 where only the id tokens differed, and the
-# other names cost journeys in later stages. The question is therefore the
-# earlier builds' question with nothing but the id tokens replaced. Answers
-# cached while the scan id was in the prompt are still read (``_recall``), so
-# this change renames nothing.
+# Only the KEY is made of something else: the same question with each scan id
+# replaced by a local one, counted in the order the ids first appear in it
+# (:func:`_local_ids`). The answer is stored by local id and read back
+# through the same replacement. So a domain whose rows and their order did
+# not change has the same key and the same remembered answer whatever its
+# ordinals became. Any other change of the question (a row, the order of the
+# rows, the domain's name) is another key, as it is another question.
+#
+# The key under the raw question is still read (``_recall``): it is where
+# every earlier build stored its answers.
 _LOCAL_ID_PREFIX = "u"
+# Marks a key made of the question with local ids, so that it can never be
+# the key of a question as sent (and so that the answers of the builds that
+# SENT local ids, which are answers to another question, are not read).
+_KEY_IDS_LOCAL = "local"
 # Why a domain degraded when its reply parsed but answered other ids than
 # the ones asked.
 DEGRADED_ANSWER_IDS_UNKNOWN = "answer_ids_unknown"
 
 
-def _in_scan_order(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The rows in the order of their scan ids, whatever order they came in.
+def _content_key(model: str, content_prompt: str, max_tokens: int) -> str:
+    """Memory key of a question whose scan ids are replaced by local ones.
 
-    This is the order builds before local ids sent them in (the scan lists
-    its journeys by ordinal). The ids are compared, never written: two
-    scans that number a domain's journeys differently but in the same
-    order give the same rows in the same places.
+    Same components as :func:`_refine_cache_key` plus the marker.
     """
-    return sorted(payloads, key=lambda row: scan_id_order(row["id"]))
+    body: dict[str, Any] = {
+        "version": STAGE_6_7B_CACHE_VERSION,
+        "model": model,
+        "system": _SYSTEM_PROMPT,
+        "user": content_prompt,
+        "ids": _KEY_IDS_LOCAL,
+    }
+    if max_tokens != DEFAULT_MAX_TOKENS:
+        body["max_tokens"] = max_tokens
+    payload = json.dumps(body, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
 def _local_ids(payloads: list[dict[str, Any]]) -> dict[str, str]:
-    """``{scan id: id used in the prompt}`` for one domain batch."""
-    return {
-        row["id"]: f"{_LOCAL_ID_PREFIX}{n}"
-        for n, row in enumerate(_in_scan_order(payloads), start=1)
-    }
+    """``{scan id: local id}``, counted in the order the ids first appear.
+
+    The ids are never compared or parsed, so no shape of id can raise and
+    two questions that differ only in their id tokens get the same local ids.
+    """
+    local_ids: dict[str, str] = {}
+    for row in payloads:
+        local_ids.setdefault(
+            row["id"], f"{_LOCAL_ID_PREFIX}{len(local_ids) + 1}",
+        )
+    return local_ids
 
 
 def _with_local_ids(
     payloads: list[dict[str, Any]], local_ids: dict[str, str],
 ) -> list[dict[str, Any]]:
-    """The rows as the model sees them: local ids, in scan order."""
-    return [
-        {**row, "id": local_ids[row["id"]]}
-        for row in _in_scan_order(payloads)
-    ]
+    """The rows of the question with local ids, in the order they are sent."""
+    return [{**row, "id": local_ids[row["id"]]} for row in payloads]
 
 
-def _by_scan_id(
-    rows: dict[str, dict], local_ids: dict[str, str],
-) -> dict[str, dict]:
-    """Answer rows keyed by scan id.
+def _renamed(rows: dict[str, dict], new_id_of: dict[str, str]) -> dict[str, dict]:
+    """Answer rows re-keyed through ``new_id_of``; other rows are left out.
 
-    Rows arrive keyed by the prompt's local ids; a row already keyed by a
-    scan id of this batch (an answer cached before local ids) is kept.
+    A row carries its id inside too (``{"id": ...}``); it is renamed with
+    the key, so a remembered row never shows an ordinal of another scan.
     """
-    scan_id_of = {local: scan for scan, local in local_ids.items()}
     out: dict[str, dict] = {}
-    for key, row in rows.items():
-        scan_id = scan_id_of.get(key) or (key if key in local_ids else None)
-        if scan_id is not None:
-            out.setdefault(scan_id, row)
+    for old_id, row in rows.items():
+        new_id = new_id_of.get(old_id)
+        if new_id is None:
+            continue
+        out[new_id] = {**row, "id": new_id} if "id" in row else row
     return out
 
 
-def _by_local_id(
+def _to_local_ids(
     rows: dict[str, dict], local_ids: dict[str, str],
 ) -> dict[str, dict]:
-    return {local_ids[k]: v for k, v in rows.items() if k in local_ids}
+    """Rows of the asked journeys as they are stored: by local id.
+
+    A row whose id is none of the asked ones is not stored: under other
+    ordinals its id could be a journey it was never an answer for.
+    """
+    return _renamed(rows, local_ids)
+
+
+def _to_scan_ids(
+    rows: dict[str, dict], local_ids: dict[str, str],
+) -> dict[str, dict]:
+    """Stored rows keyed by the ids of this scan."""
+    return _renamed(rows, {local: scan for scan, local in local_ids.items()})
+
+
+def _remember(
+    cache: "CacheBackend | None",
+    key: str | None,
+    rows: dict[str, dict],
+    local_ids: dict[str, str],
+) -> None:
+    """Store an answer under the content key, by local id.
+
+    Nothing is stored when no row answers an asked journey: there is
+    nothing in such a reply that outlives the ordinals it was given under.
+    """
+    if cache is None or key is None:
+        return
+    stored = _to_local_ids(rows, local_ids)
+    if stored:
+        _cache_put_parsed(cache, key, stored)
 
 
 def _recall(
-    cache: "CacheBackend | None",
-    model: str,
-    prompts: tuple[str, str],
-    local_ids: dict[str, str],
-    max_tokens: int,
+    cache: "CacheBackend | None", model: str, question: "_DomainQuestion",
 ) -> tuple[str | None, dict[str, dict] | None]:
-    """``(key to store under, cached rows by scan id or None)``.
+    """``(content key to store under, remembered rows by scan id or None)``.
 
-    ``prompts`` is ``(content prompt, the prompt with scan ids)``.
-    The second is never sent: it is only the key older answers sit under.
-    Such an answer is copied to the content key, so it survives the next
-    renumbering.
-
-    Why the old key is still read: it is, byte for byte, the key every
-    build before local ids used as its only key (same
-    :func:`_refine_cache_key`, same prompt builder, rows in list order;
-    checked on two recorded scans of such a build: 52 of 52 and 8 of 8
-    domains found under it). It can hit only when
-    the whole batch, scan ids included, is the one that build would send,
-    and then it returns what that build itself would have read. Without
-    it, the change of key alone would ask the model again about every
-    journey of every repository, and asked twice it does not answer the
-    same. The key holds no engine version: a machine that ran a build
-    which was later rejected keeps that build's answers under it, so
-    such a machine must scan from a cache copied before that build ran.
+    The content key is read first. Then the key of the question as sent,
+    which is, byte for byte, the only key earlier builds used: a hit there
+    returns the stored rows untouched, exactly what such a build read
+    (also when none of them answers an asked journey: that was a hit with
+    nothing to apply, and stays one), and the answer is copied to the
+    content key so that the next scan no longer needs the ordinals to
+    stay put. Without this read the change of key alone would ask the
+    model again about every journey of every repository, and asked twice
+    it does not answer the same.
     """
     if cache is None:
         return None, None
-    key = _refine_cache_key(model, prompts[0], max_tokens)
-    rows = _cache_get_parsed(cache, key)
-    if rows is None:
-        rows = _cache_get_parsed(
-            cache, _refine_cache_key(model, prompts[1], max_tokens),
-        )
-        if rows is not None:
-            _cache_put_parsed(cache, key, _by_local_id(rows, local_ids))
-    if rows is None:
-        return key, None
-    return key, _by_scan_id(rows, local_ids) or None
+    key = question.content_key(model)
+    stored = _cache_get_parsed(cache, key)
+    if stored is not None:
+        rows = _to_scan_ids(stored, question.local_ids)
+        if rows:
+            return key, rows
+    as_sent = _cache_get_parsed(cache, question.sent_key(model))
+    if as_sent is not None:
+        _remember(cache, key, as_sent, question.local_ids)
+    return key, as_sent
 
 
 def _cache_get_parsed(
@@ -726,27 +748,37 @@ def _build_user_prompt(domain: str | None, uf_payloads: list[dict]) -> str:
 
 @dataclass(frozen=True)
 class _DomainQuestion:
-    """What one domain is asked, and how its answer maps back.
+    """What one domain is asked, and what it is remembered by.
 
-    ``user_prompt`` is what the model sees and what the memory key is made
-    of: the domain's name and its journeys' own rows, nothing of the scan's
-    numbering and nothing of another domain. ``positional_prompt`` is never
-    sent: it is the prompt builds before local ids sent (scan ids, list
-    order), kept only to find the answers they stored.
+    ``user_prompt`` is sent to the model: scan ids, rows in list order.
+    ``content_prompt`` is never sent: it is ``user_prompt`` with each scan
+    id replaced by its local id, and only the memory key is made of it.
     """
 
     user_prompt: str
-    positional_prompt: str
-    # {scan id: local id}; the answer arrives keyed by local id.
+    content_prompt: str
+    # {scan id: local id}; a remembered answer is stored by local id.
     local_ids: dict[str, str]
     max_tokens: int
 
-    def key(self, model: str) -> str:
+    def sent_key(self, model: str) -> str:
+        """Key of the question as sent: the only key of earlier builds."""
         return _refine_cache_key(model, self.user_prompt, self.max_tokens)
 
-    def positional_key(self, model: str) -> str:
-        return _refine_cache_key(
-            model, self.positional_prompt, self.max_tokens,
+    def content_key(self, model: str) -> str:
+        return _content_key(model, self.content_prompt, self.max_tokens)
+
+    def followed_by(self, suffix: str) -> "_DomainQuestion":
+        """The same question with ``suffix`` appended (the retry).
+
+        The suffix must hold no scan id; the retry's names its journeys
+        by their refined names.
+        """
+        return _DomainQuestion(
+            user_prompt=self.user_prompt + suffix,
+            content_prompt=self.content_prompt + suffix,
+            local_ids=self.local_ids,
+            max_tokens=self.max_tokens,
         )
 
 
@@ -756,13 +788,14 @@ def _domain_question(
     """The question for one domain, from its journeys' prompt rows."""
     local_ids = _local_ids(payloads)
     return _DomainQuestion(
-        user_prompt=_build_user_prompt(
+        user_prompt=_build_user_prompt(domain, payloads),
+        content_prompt=_build_user_prompt(
             domain, _with_local_ids(payloads, local_ids),
         ),
-        positional_prompt=_build_user_prompt(domain, payloads),
         local_ids=local_ids,
-        # One budget per domain (its whole batch shares one call); it
-        # depends on the domain's own journey count only.
+        # S2 Seg B' — one budget per domain (its whole batch shares one
+        # call). OFF/unset (or a small domain) -> DEFAULT_MAX_TOKENS -> key +
+        # request unchanged.
         max_tokens=_effective_max_tokens(len(payloads)),
     )
 
@@ -950,13 +983,10 @@ def _compute_domain(
     question = _domain_question(domain, payloads)
     local_ids = question.local_ids
     user_prompt = question.user_prompt
-    positional_prompt = question.positional_prompt
     max_tokens = question.max_tokens
 
     # ── Cache lookup for call #1 ──
-    key1, cached_call1 = _recall(
-        cache, model, (user_prompt, positional_prompt), local_ids, max_tokens,
-    )
+    key1, cached_call1 = _recall(cache, model, question)
 
     if cached_call1 is not None:
         # HIT: no Haiku call, no tokens, $0. The parsed rows feed the SAME
@@ -1003,8 +1033,8 @@ def _compute_domain(
         if parsed_or_none is None:
             result.degraded_reason = "json_parse_failed"
             return result
-        parsed = _by_scan_id(parsed_or_none, local_ids)
-        if not parsed:
+        parsed = parsed_or_none
+        if not any(scan_id in parsed for scan_id in local_ids):
             # The reply names none of the journeys it was asked about. It
             # is invalid like an unparsed one: nothing is applied or
             # stored, and the domain is counted as degraded instead of as
@@ -1018,8 +1048,8 @@ def _compute_domain(
         # flush) would silently bake the retry's correction into the call-1
         # artifact (audit IMPORTANT, 2026-07-02). Shallow suffices — the later
         # mutation replaces top-level rows, never mutates a nested row dict.
-        if key1 is not None and cache is not None:
-            _cache_put_parsed(cache, key1, _by_local_id(parsed, local_ids))
+        # (``_remember`` builds a new mapping keyed by local ids.)
+        _remember(cache, key1, parsed, local_ids)
 
     # ── Anti-hallucination name validation (naming review №2) ──
     # Every content token of a refined name must be evidenced in the UF's
@@ -1052,12 +1082,11 @@ def _compute_domain(
             # the evidence bundles (both content-derived), so it caches under
             # its OWN content key. If the evidence changed since the entry
             # was written, the prompt changes → clean miss → live call.
-            prohibition = "\n" + retry_prohibition(violations)
-            retry_user = user_prompt + prohibition
-            key2, cached_retry = _recall(
-                cache, model, (retry_user, positional_prompt + prohibition),
-                local_ids, max_tokens,
+            retry_question = question.followed_by(
+                "\n" + retry_prohibition(violations),
             )
+            retry_user = retry_question.user_prompt
+            key2, cached_retry = _recall(cache, model, retry_question)
             if cached_retry is not None:
                 result.cache_hits += 1
                 retry_parsed: dict[str, dict] = cached_retry
@@ -1073,13 +1102,8 @@ def _compute_domain(
                 result.llm_calls += 1
                 result.retry_in_tok = r_in
                 result.retry_out_tok = r_out
-                retry_parsed = _by_scan_id(
-                    _parse_refinement(retry_text) or {}, local_ids,
-                )
-                if retry_parsed and key2 is not None and cache is not None:
-                    _cache_put_parsed(
-                        cache, key2, _by_local_id(retry_parsed, local_ids),
-                    )
+                retry_parsed = _parse_refinement(retry_text) or {}
+                _remember(cache, key2, retry_parsed, local_ids)
             for uf_id in failing_ids:
                 row2 = retry_parsed.get(uf_id)
                 nm2 = row2.get("name") if row2 else None

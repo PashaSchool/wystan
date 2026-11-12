@@ -5,8 +5,8 @@ nothing in the evidence says which answer is whose. The answers are dealt in
 the order of the items' ids, so a second scan of the same input deals them
 the same way.
 
-The id itself never enters a prompt or a memory key: only "k-th among its
-equals" does. That place does not move when unrelated items are added (they
+The id itself never enters a memory key: only "k-th among its equals"
+does. That place does not move when unrelated items are added (they
 are not among the equals) or when the scan renumbers its items (a renumbering
 shifts ids, it does not reorder them among themselves). The list order of
 the items is not read at all.

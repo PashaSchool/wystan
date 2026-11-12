@@ -14,9 +14,11 @@ way lost its place in the product layer.
 The item's id is not evidence. A journey's id is its ordinal in the scan
 ("uf:UF-123"), so one new journey earlier in the list shifts the id of every
 later one; with the id in the key all of them were asked again and many came
-back renamed. The key therefore leaves the id out. Answers stored before that
-change sit under the old key (id included) and are still read, so the change
-itself renames nothing.
+back renamed. The key therefore leaves the id out. Only the key: the request
+sent to the model is unchanged (the items with their ids, in list order), so
+a first scan asks what it always asked. Answers stored before that change sit
+under the old key (id included) and are still read, so the change itself
+renames nothing.
 
 Two items with equal evidence are one question with two answers. They do not
 share one key (the second answer would overwrite the first, and the next scan
