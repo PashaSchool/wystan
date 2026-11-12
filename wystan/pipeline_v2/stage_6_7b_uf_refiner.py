@@ -233,6 +233,96 @@ def _refine_cache_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
+# ── Position-free prompt ids ────────────────────────────────────────────────
+#
+# A journey's id (``UF-123``) is its ordinal in the scan. With that id in the
+# prompt, one new journey anywhere earlier in the list changed the prompt —
+# and so the cache key — of every later domain, the model was asked again
+# about journeys that had not changed, and they came back with other names
+# (measured on three repositories: 72 of 103 domains differed from the
+# previous scan in nothing but these ids). The prompt therefore names each
+# journey by its place inside its own domain batch, and the answer is mapped
+# back. Answers cached while the scan id was in the prompt are still read
+# (``_recall``), so this change by itself renames nothing.
+_LOCAL_ID_PREFIX = "u"
+
+
+def _local_ids(ufs: list["UserFlow"]) -> dict[str, str]:
+    """``{scan id: id used in the prompt}`` for one domain batch."""
+    return {
+        uf.id: f"{_LOCAL_ID_PREFIX}{n}" for n, uf in enumerate(ufs, start=1)
+    }
+
+
+def _with_local_ids(
+    payloads: list[dict[str, Any]], local_ids: dict[str, str],
+) -> list[dict[str, Any]]:
+    return [{**row, "id": local_ids[row["id"]]} for row in payloads]
+
+
+def _by_scan_id(
+    rows: dict[str, dict], local_ids: dict[str, str],
+) -> dict[str, dict]:
+    """Answer rows keyed by scan id.
+
+    Rows arrive keyed by the prompt's local ids; a row already keyed by a
+    scan id of this batch (an answer cached before local ids) is kept.
+    """
+    scan_id_of = {local: scan for scan, local in local_ids.items()}
+    out: dict[str, dict] = {}
+    for key, row in rows.items():
+        scan_id = scan_id_of.get(key) or (key if key in local_ids else None)
+        if scan_id is not None:
+            out.setdefault(scan_id, row)
+    return out
+
+
+def _by_local_id(
+    rows: dict[str, dict], local_ids: dict[str, str],
+) -> dict[str, dict]:
+    return {local_ids[k]: v for k, v in rows.items() if k in local_ids}
+
+
+def _recall(
+    cache: "CacheBackend | None",
+    model: str,
+    prompts: tuple[str, str],
+    local_ids: dict[str, str],
+    max_tokens: int,
+) -> tuple[str | None, dict[str, dict] | None]:
+    """``(key to store under, cached rows by scan id or None)``.
+
+    ``prompts`` is ``(position-free prompt, the prompt with scan ids)``.
+    The second is never sent: it is only the key older answers sit under.
+    Such an answer is copied to the position-free key, so it survives the
+    next renumbering.
+
+    Why the old key is still read: it is, byte for byte, the key every
+    build before position-free ids used as its only key (same
+    :func:`_refine_cache_key`, same prompt builder). It can hit only when
+    the whole batch, scan ids included, is the one that build would send,
+    and then it returns what that build itself would have read. Without
+    it, the change of key alone would ask the model again about every
+    journey of every repository, and asked twice it does not answer the
+    same. The key holds no engine version: a machine that ran a build
+    which was later rejected keeps that build's answers under it, so
+    such a machine must scan from a cache copied before that build ran.
+    """
+    if cache is None:
+        return None, None
+    key = _refine_cache_key(model, prompts[0], max_tokens)
+    rows = _cache_get_parsed(cache, key)
+    if rows is None:
+        rows = _cache_get_parsed(
+            cache, _refine_cache_key(model, prompts[1], max_tokens),
+        )
+        if rows is not None:
+            _cache_put_parsed(cache, key, _by_local_id(rows, local_ids))
+    if rows is None:
+        return key, None
+    return key, _by_scan_id(rows, local_ids) or None
+
+
 def _cache_get_parsed(
     cache: "CacheBackend", key: str,
 ) -> dict[str, dict] | None:
@@ -772,17 +862,22 @@ def _compute_domain(
         _uf_payload(uf, members_by_uf[uf.id], product_strings)
         for uf in ufs
     ]
-    user_prompt = _build_user_prompt(domain, payloads)
+    # The prompt names each journey by its place in this batch, not by its
+    # scan id (see ``_local_ids``). ``positional_prompt`` is never sent: it
+    # is the key answers were cached under while the scan id was in it.
+    local_ids = _local_ids(ufs)
+    user_prompt = _build_user_prompt(
+        domain, _with_local_ids(payloads, local_ids),
+    )
+    positional_prompt = _build_user_prompt(domain, payloads)
     # S2 Seg B' — one budget per domain (its whole batch shares one call). OFF/
     # unset (or a small domain) -> DEFAULT_MAX_TOKENS -> key + request unchanged.
     max_tokens = _effective_max_tokens(len(ufs))
 
     # ── Cache lookup for call #1 ──
-    key1: str | None = None
-    cached_call1: dict[str, dict] | None = None
-    if cache is not None:
-        key1 = _refine_cache_key(model, user_prompt, max_tokens)
-        cached_call1 = _cache_get_parsed(cache, key1)
+    key1, cached_call1 = _recall(
+        cache, model, (user_prompt, positional_prompt), local_ids, max_tokens,
+    )
 
     if cached_call1 is not None:
         # HIT: no Haiku call, no tokens, $0. The parsed rows feed the SAME
@@ -829,7 +924,7 @@ def _compute_domain(
         if parsed_or_none is None:
             result.degraded_reason = "json_parse_failed"
             return result
-        parsed = parsed_or_none
+        parsed = _by_scan_id(parsed_or_none, local_ids)
         # MISS → persist the parsed rows for future runs. Degrades (cost cap /
         # parse failure / empty response) returned above are NEVER cached.
         # Store a COPY: the retry path below mutates parsed[uf_id] in place,
@@ -837,8 +932,8 @@ def _compute_domain(
         # flush) would silently bake the retry's correction into the call-1
         # artifact (audit IMPORTANT, 2026-07-02). Shallow suffices — the later
         # mutation replaces top-level rows, never mutates a nested row dict.
-        if key1 is not None and cache is not None:
-            _cache_put_parsed(cache, key1, dict(parsed))
+        if key1 is not None and cache is not None and parsed:
+            _cache_put_parsed(cache, key1, _by_local_id(parsed, local_ids))
 
     # ── Anti-hallucination name validation (naming review №2) ──
     # Every content token of a refined name must be evidenced in the UF's
@@ -871,12 +966,12 @@ def _compute_domain(
             # the evidence bundles (both content-derived), so it caches under
             # its OWN content key. If the evidence changed since the entry
             # was written, the prompt changes → clean miss → live call.
-            retry_user = user_prompt + "\n" + retry_prohibition(violations)
-            key2: str | None = None
-            cached_retry: dict[str, dict] | None = None
-            if cache is not None:
-                key2 = _refine_cache_key(model, retry_user, max_tokens)
-                cached_retry = _cache_get_parsed(cache, key2)
+            prohibition = "\n" + retry_prohibition(violations)
+            retry_user = user_prompt + prohibition
+            key2, cached_retry = _recall(
+                cache, model, (retry_user, positional_prompt + prohibition),
+                local_ids, max_tokens,
+            )
             if cached_retry is not None:
                 result.cache_hits += 1
                 retry_parsed: dict[str, dict] = cached_retry
@@ -892,10 +987,13 @@ def _compute_domain(
                 result.llm_calls += 1
                 result.retry_in_tok = r_in
                 result.retry_out_tok = r_out
-                retry_parsed_or_none = _parse_refinement(retry_text)
-                if retry_parsed_or_none is not None and key2 is not None and cache is not None:
-                    _cache_put_parsed(cache, key2, retry_parsed_or_none)
-                retry_parsed = retry_parsed_or_none or {}
+                retry_parsed = _by_scan_id(
+                    _parse_refinement(retry_text) or {}, local_ids,
+                )
+                if retry_parsed and key2 is not None and cache is not None:
+                    _cache_put_parsed(
+                        cache, key2, _by_local_id(retry_parsed, local_ids),
+                    )
             for uf_id in failing_ids:
                 row2 = retry_parsed.get(uf_id)
                 nm2 = row2.get("name") if row2 else None

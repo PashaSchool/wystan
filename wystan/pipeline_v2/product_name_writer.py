@@ -10,6 +10,13 @@ item, keyed by that item's own evidence. An item whose evidence did not change
 is never asked about again, whatever happened to its neighbours: asked twice,
 the model does not answer twice the same, and an item that lost its name that
 way lost its place in the product layer.
+
+The item's id is not evidence. A journey's id is its ordinal in the scan
+("uf:UF-123"), so one new journey earlier in the list shifts the id of every
+later one; with the id in the key all of them were asked again and many came
+back renamed. The key therefore leaves the id out. Answers stored before that
+change sit under the old key (id included) and are still read, so the change
+itself renames nothing.
 """
 
 from __future__ import annotations
@@ -61,8 +68,12 @@ def _batches(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return [items[i:i + _BATCH_SIZE] for i in range(0, len(items), _BATCH_SIZE)]
 
 
-def _item_key(model_id: str, item: dict[str, Any]) -> str:
-    """Cache key of one item's answer: the question as the model sees it."""
+# The prompt-row field that says where the item stands in this scan, not what
+# the item is. It is left out of the memory key.
+_POSITION_FIELD = "id"
+
+
+def _key_of(model_id: str, item: dict[str, Any]) -> str:
     payload = {
         "v": _ITEM_CACHE_VERSION, "role": _ITEM_ROLE, "model": model_id,
         "system": _SYSTEM, "item": item,
@@ -70,6 +81,37 @@ def _item_key(model_id: str, item: dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
+
+
+def _item_key(model_id: str, item: dict[str, Any]) -> str:
+    """Memory key of one item's answer: its evidence, without its position."""
+    evidence = {k: v for k, v in item.items() if k != _POSITION_FIELD}
+    return _key_of(model_id, evidence)
+
+
+def _positional_key(model_id: str, item: dict[str, Any]) -> str:
+    """The key answers were stored under while the id was part of it."""
+    return _key_of(model_id, item)
+
+
+def _recall(cache: Any, model_id: str, item: dict[str, Any]) -> tuple[bool, str | None]:
+    """(known, name) for an item, from either key.
+
+    An answer found only under the positional key is copied to the item's
+    own key, so it survives the next shift of ids.
+
+    The positional key is the only key builds before this one used, so a
+    hit is the answer such a build would itself have read for this exact
+    row. Neither key holds an engine version: answers of a build that was
+    later rejected stay readable on the machine that ran it.
+    """
+    known, name = _remembered(cache, _item_key(model_id, item))
+    if known:
+        return True, name
+    known, name = _remembered(cache, _positional_key(model_id, item))
+    if known:
+        _remember(cache, _item_key(model_id, item), name)
+    return known, name
 
 
 def _remembered(cache: Any, key: str) -> tuple[bool, str | None]:
@@ -113,7 +155,7 @@ def build_name_writer(
         keys = {item["id"]: _item_key(model_id, item) for item in items}
         unanswered: list[dict[str, Any]] = []
         for item in items:
-            known, name = _remembered(cache, keys[item["id"]])
+            known, name = _recall(cache, model_id, item)
             if not known:
                 unanswered.append(item)
             elif name:
