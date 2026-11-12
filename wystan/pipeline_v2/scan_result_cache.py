@@ -3767,7 +3767,9 @@ ENV_OUTPUT_FLAGS = (
 #: name only inside it); every row a repository had before is unchanged.
 #: KS120 (2026-11-12): the same rule as KS118, rebuilt; 118 and 119 are
 #: skipped because maps of two rejected builds were written under them.
-KEY_SCHEMA_VERSION = 120
+#: KS121 (2026-11-12): the unit that registers a command tool's commands
+#: takes the tool's anchor where it would stand alone under its package name.
+KEY_SCHEMA_VERSION = 121
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
