@@ -501,6 +501,9 @@ def run_pipeline_v2(
         )
         deterministic_features = stage2.features
         unattributed = stage2.unattributed
+        # Stage 2 saw a copy of ``ctx``; the record of nested-module
+        # rows goes on the live one for the later stages.
+        ctx.module_scopes = stage2.module_scopes
         for f in deterministic_features:
             log2.emit(
                 f.name,

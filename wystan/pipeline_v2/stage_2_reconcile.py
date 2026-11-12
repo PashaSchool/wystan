@@ -51,6 +51,15 @@ from typing import TYPE_CHECKING, Literal
 from wystan.llm.cost import response_text
 from wystan.pipeline_v2.extractors.base import AnchorCandidate
 from wystan.pipeline_v2.llm_health import LlmHealth
+from wystan.pipeline_v2.module_scope import (
+    NO_MODULE_SCOPES,
+    ModuleScopes,
+    ScopeGuard,
+    group_scope,
+    leave_claimed_files,
+    qualify_shared_names,
+    record_module_scopes,
+)
 
 if TYPE_CHECKING:
     from wystan.models.types import MemberFile
@@ -167,7 +176,6 @@ _SOURCE_PRIORITY: dict[str, int] = {
 
 _LOW_PRIORITY_DEFAULT = 0  # Unknown sources fall below all known ones.
 
-
 def _priority(source: str) -> int:
     return _SOURCE_PRIORITY.get(source, _LOW_PRIORITY_DEFAULT)
 
@@ -270,6 +278,12 @@ class Stage2Result:
     # this in ``scan_meta`` so a non-zero count is visible telemetry.
     schema_only_suppressed_count: int = 0
     schema_only_suppressed_sample: list[str] = field(default_factory=list)
+    # Which rows exist only because a nested module was read, as file
+    # sets (``module_scope.record_module_scopes``). Empty for a
+    # repository without such rows. The orchestrator puts it on
+    # ``ScanContext.module_scopes`` for the stages that judge size and
+    # name flows.
+    module_scopes: ModuleScopes = NO_MODULE_SCOPES
 
 
 # ── Similarity ─────────────────────────────────────────────────────────────
@@ -576,15 +590,20 @@ def _build_merge_groups(
     """
     n = len(candidates)
     uf = _UnionFind(n)
+    # A name joins two candidates only inside one module scope. Shared
+    # files (the last rule below) need no guard: a nested-module unit
+    # holds no file an older anchor claims (``leave_claimed_files``).
+    guard = ScopeGuard(candidates)
     for i in range(n):
         for j in range(i + 1, n):
-            if _should_merge(
+            by_name = not (guard.is_active and guard.are_apart(i, j))
+            if by_name and _should_merge(
                 candidates[i].name,
                 candidates[j].name,
                 threshold=jaccard_threshold,
             ):
                 uf.union(i, j)
-            elif rails_merge and _rails_should_merge(
+            elif by_name and rails_merge and _rails_should_merge(
                 candidates[i].name, candidates[j].name,
             ):
                 uf.union(i, j)
@@ -981,6 +1000,19 @@ def stage_2_reconcile(
             f"{baredir_tele['sample'][:5]}",
         )
 
+    # The nested rule only adds (``module_scope`` rule 2): a file that an
+    # anchor read without it claims stays with that anchor, and a
+    # nested-module unit left with nothing is not a second row over the
+    # same files. Done before the merge so that every older row is built
+    # from exactly the candidates it would have had.
+    flat, emptied_units = leave_claimed_files(flat)
+    if emptied_units:
+        notes_pre.append(
+            f"module-scope: {len(emptied_units)} nested-module unit(s) own no "
+            f"file another anchor does not claim and are not emitted: "
+            f"{emptied_units[:10]}",
+        )
+
     if not flat:
         return Stage2Result(
             features=[],
@@ -1002,6 +1034,7 @@ def stage_2_reconcile(
     # 2) Per group: choose canonical name + assemble DeveloperFeature.
     features: list[DeveloperFeature] = []
     notes: list[str] = list(notes_pre)
+    named_groups: list[tuple[list[AnchorCandidate], str, str | None]] = []
     for group_indices in groups:
         group = [flat[i] for i in group_indices]
         canonical, llm_note = _pick_canonical_name(
@@ -1011,7 +1044,28 @@ def stage_2_reconcile(
         )
         if llm_note:
             notes.append(llm_note)
-        features.append(_build_feature_from_group(group, canonical, llm_note))
+        named_groups.append((group, canonical, llm_note))
+
+    # 2.5) Groups kept apart by module scope can share a name; feature
+    #      names must be unique, so nested-module groups take their
+    #      module's name in front. A no-op without nested modules.
+    unique_names = qualify_shared_names(
+        [group for group, _name, _note in named_groups],
+        [name for _group, name, _note in named_groups],
+    )
+    # Which features exist only because a nested module was read. Later
+    # stages keep every other row as it was (``module_scope``).
+    scope_by_name: dict[str, str] = {}
+    for (group, canonical, llm_note), unique in zip(named_groups, unique_names):
+        scope_by_name[unique] = group_scope(group)
+        if unique != canonical:
+            # Rename the units themselves, so the bare name is not
+            # reported as a second slug merged into the feature.
+            group = [
+                replace(c, name=unique) if c.name == canonical else c
+                for c in group
+            ]
+        features.append(_build_feature_from_group(group, unique, llm_note))
 
     # 2.8) Schema-only phantom suppression. A merged feature whose ONLY
     #      contributing sources are schema-declaration sources is a bare
@@ -1131,6 +1185,9 @@ def stage_2_reconcile(
         zero_path_drops_sample=zero_path_drops_sample,
         schema_only_suppressed_count=len(suppressed_phantoms),
         schema_only_suppressed_sample=suppressed_phantoms[:10],
+        module_scopes=record_module_scopes(
+            ((f.name, f.paths) for f in features), scope_by_name,
+        ),
     )
 
 

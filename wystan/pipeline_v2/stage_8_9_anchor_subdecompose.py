@@ -183,15 +183,18 @@ Default ON; disable via ``WYSTAN_STAGE_8_9_SUBDECOMPOSE=0``.
 
 from __future__ import annotations
 
-import math
 import os
 import re
-import statistics
 import uuid as _uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from wystan.pipeline_v2.module_scope import (
+    GrainRuler,
+    ModuleScopes,
+    grain_rulers,
+)
 from wystan.pipeline_v2.stage_8_7_anchor_desink import _FILE_KEYED_SURFACES
 
 if TYPE_CHECKING:
@@ -448,8 +451,6 @@ _FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]+$")
 _MIN_DOMAINS = 2          # a feature splitting into <2 domains is not a split
 _DEPTH_CAP = 6            # max segments to descend looking for a domain
 _SUBDOMAIN_MARKER = "sub-domain"
-_OVERSIZED_SHARE = 0.15   # a feature owning >15% of the repo is oversized…
-_OVERSIZED_MEDIAN_MULT = 2  # …OR more than 2x the repo's median feature size
 
 # Defensive recursion-depth cap for the fixed-point loop (step 1). This is a
 # SAFETY BOUND, not a tuned magic number: termination is already guaranteed by
@@ -1461,8 +1462,60 @@ def _split_one_feature(
     return minted
 
 
+@dataclass(frozen=True)
+class _Ruler:
+    """Grain thresholds of one module scope (see the stage docstring)."""
+
+    floor: int        # a promoted domain holds at least this many files
+    cut: int          # a feature owning more than this is oversized
+    max_domains: int  # anti-shatter cap on domains promoted per feature
+
+
+def _ruler(grain: GrainRuler) -> _Ruler:
+    """Stage thresholds from the grain of the rows a feature is measured by.
+
+    Scale-invariant, RELATIVE to the rows' own owned-file grain
+    (rule-no-magic-tuning). ``floor`` = the median owned-feature size
+    (sub-features must be peers of that grain). ``cut`` = the oversized
+    cut (``module_scope.measure_grain``). ``max_domains`` = the number of
+    OTHER rows: a single feature decomposing into more domains than it
+    has peers is pathological (it alone would more than double the
+    feature set with a long thin tail), so the largest domains survive
+    and the tail folds to the shared residual. The cap IS exercised by
+    the validated corpus (infisical's backend holds ~140 service domains
+    under a 134-ish feature repo) and it never suppresses a legitimately
+    large decomposition because the SURVIVING domains are the largest
+    ones.
+    """
+    return _Ruler(
+        floor=grain.median, cut=grain.cut,
+        max_domains=max(_MIN_DOMAINS, grain.peers - 1),
+    )
+
+
+def _rulers_by_feature(
+    devs: list["Feature"], module_scopes: ModuleScopes | None,
+) -> dict[int, _Ruler]:
+    """``{id(feature): ruler}`` for the developer rows that have one.
+
+    A row that exists because a nested module was read is measured among
+    the rows of that module, and every other row among the others
+    (``module_scope.grain_rulers``). One repo-wide ruler let
+    the size of one module decide what was oversized in another: reading
+    a large backend module raised the cut above every front-end feature,
+    which then stopped being split.
+    """
+    grains = grain_rulers([_owned_paths(f) for f in devs], module_scopes)
+    return {
+        id(feature): _ruler(grain)
+        for feature, grain in zip(devs, grains) if grain is not None
+    }
+
+
 def subdecompose_oversized_features(
     features: list["Feature"],
+    *,
+    module_scopes: ModuleScopes | None = None,
 ) -> SubdecomposeResult:
     """Split OVERSIZED developer features into per-domain sub-features along
     the repo's own directory tree — RECURSIVELY, to a fixed point.
@@ -1473,6 +1526,12 @@ def subdecompose_oversized_features(
     decomposable domain structure is decomposed AGAIN, and so on until no
     oversized-decomposable feature remains (the fixed point). Returns
     telemetry.
+
+``module_scopes`` is the scan's record of the rows that belong to a
+    nested module (``module_scope.ModuleScopes``, made by Stage 2); the
+    rows of one nested module are measured among themselves (see
+    :func:`_rulers_by_feature`). ``None`` or empty — the default — means
+    one repo-wide ruler.
 
     Recursion design + termination (step 1)
     ---------------------------------------
@@ -1529,35 +1588,12 @@ def subdecompose_oversized_features(
     if not devs:
         return result
 
-    # Scale-invariant grain floor + oversized cut, both RELATIVE to the repo's
-    # own owned-file grain (rule-no-magic-tuning), computed ONCE over the full
-    # current developer-feature set and held FIXED for every recursion level.
-    # ``floor`` = the repo's median owned-feature size (sub-features must be
-    # peers of the repo's grain). ``cut`` = oversized iff owning > max(2x
-    # median, 15% of all owned files).
-    owned_by_feature = {id(f): _owned_paths(f) for f in devs}
-    sizes = [len(v) for v in owned_by_feature.values() if v]
-    if not sizes:
+    # One ruler per module scope (``module_scope`` rule 3), computed ONCE
+    # and held FIXED for every recursion level. Without nested modules
+    # there is a single scope and the ruler is the repo-wide one.
+    ruler_of = _rulers_by_feature(devs, module_scopes)
+    if not ruler_of:
         return result
-    median = max(2, int(statistics.median(sizes)))
-    total_owned = len({p for v in owned_by_feature.values() for p in v})
-    floor = median
-    cut = max(
-        _OVERSIZED_MEDIAN_MULT * median,
-        math.ceil(_OVERSIZED_SHARE * total_owned),
-    )
-    # Guard 3 — defensive anti-shatter cap, scale-invariant. A single feature
-    # decomposing into MORE domains than the repo has OTHER developer features
-    # is pathological: it alone would more than double the feature set with a
-    # long thin tail. Cap promoted domains at that count (the repo's own grain)
-    # so a true shatter coarsens gracefully (largest domains survive, tail folds
-    # to the shared residual). The cap IS exercised by the validated corpus —
-    # e.g. infisical's backend holds ~140 real service domains under a 134-ish
-    # feature repo, so the cap fires there and coarsens the thin tail — and it
-    # never suppresses a legitimately large decomposition because the SURVIVING
-    # domains are the largest ones. No corpus-tuned constant — the cap is the
-    # repo's existing developer-feature count (rule-no-magic-tuning).
-    max_domains = max(_MIN_DOMAINS, len(devs) - 1)
 
     used_names = {f.name for f in features}
     all_new: list["Feature"] = []
@@ -1576,12 +1612,20 @@ def subdecompose_oversized_features(
         iteration += 1
         next_round: list["Feature"] = []
         for source in worklist:
+            ruler = ruler_of.get(id(source))
+            if ruler is None:
+                continue  # no row this one is measured with owns a file
             minted = _split_one_feature(
                 source,
-                floor=floor, cut=cut, max_domains=max_domains,
+                floor=ruler.floor, cut=ruler.cut,
+                max_domains=ruler.max_domains,
                 used_names=used_names, result=result,
             )
             if minted:
+                # A sub-feature is judged by its parent's ruler: it lies
+                # inside the parent's files, so in the same scope.
+                for sub in minted:
+                    ruler_of[id(sub)] = ruler
                 all_new.extend(minted)
                 if id(source) not in split_source_ids:
                     split_source_ids.add(id(source))
@@ -1607,13 +1651,18 @@ def subdecompose_oversized_features(
     # ACTING on the split sources. Conserves every file. Must run after
     # ``features.extend(all_new)`` so the conservation/claim test sees the full
     # post-stage feature set.
-    _cleanup_husks(features, split_sources, cut=cut, result=result)
+    _cleanup_husks(
+        features, split_sources,
+        cut=max(ruler.cut for ruler in ruler_of.values()), result=result,
+    )
     return result
 
 
 # Back-compat alias — phase_layer2 + older callers import this name.
 def subdecompose_workspace_anchors(
     features: list["Feature"],
+    *,
+    module_scopes: ModuleScopes | None = None,
 ) -> SubdecomposeResult:
     """Deprecated name retained for the pipeline wiring + existing imports.
 
@@ -1622,7 +1671,9 @@ def subdecompose_workspace_anchors(
     workspace anchors); it now decomposes ANY oversized feature. See
     :func:`subdecompose_oversized_features`.
     """
-    return subdecompose_oversized_features(features)
+    return subdecompose_oversized_features(
+        features, module_scopes=module_scopes,
+    )
 
 
 __all__ = [

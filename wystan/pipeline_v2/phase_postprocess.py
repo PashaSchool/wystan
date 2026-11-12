@@ -201,9 +201,16 @@ def run_postprocess_phase(
     # (id, primary_feature, secondary_features, shared_with_*_count,
     # cross_cutting), then returns a top-level flows[] projection and
     # the feature_flow_edges[] list. NO LLM — path-overlap only.
-    write_stage_input(run_dir, 5, "bipartite", {"features": features})
+    # A flow name is unique inside its module scope, so the stage is
+    # told which rows belong to a nested module (recorded by Stage 2).
+    module_scopes = getattr(ctx, "module_scopes", None)
+    write_stage_input(run_dir, 5, "bipartite", {
+        "features": features, "module_scopes": module_scopes,
+    })
     with StageLogger(run_dir, 5, "bipartite") as log5_5:
-        bipartite = stage_5_5_bipartite(features, log=log5_5)
+        bipartite = stage_5_5_bipartite(
+            features, log=log5_5, module_scopes=module_scopes,
+        )
         log5_5.info(
             f"bipartite: flows={bipartite.telemetry['flows_total']} "
             f"edges_primary={bipartite.telemetry['bipartite_edges_primary']} "

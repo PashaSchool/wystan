@@ -45,7 +45,6 @@ import logging
 import math
 import os
 import re
-import statistics
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -72,16 +71,16 @@ from wystan.pipeline_v2.flow_anchor_pref import (
     prefer_callable_entry_line,
 )
 from wystan.pipeline_v2.llm_health import LlmHealth
-
-# Stage-8.9 OVERSIZED contract — imported, not duplicated
-# (rule-no-magic-tuning): a feature is oversized iff it owns
-# > max(_OVERSIZED_MEDIAN_MULT * median, ceil(_OVERSIZED_SHARE * total))
-# files, computed over the CURRENT feature set's owned sizes.
-from wystan.pipeline_v2.stage_8_9_anchor_subdecompose import (
-    _MIN_DOMAINS,
-    _OVERSIZED_MEDIAN_MULT,
-    _OVERSIZED_SHARE,
+from wystan.pipeline_v2.module_scope import (
+    ModuleScopes,
+    grain_rulers,
+    measure_grain,
 )
+
+# The OVERSIZED contract is Stage 8.9's and is computed in one place
+# (``module_scope.grain_rulers``): a feature is oversized iff it owns more
+# files than its peers' cut, over the CURRENT feature set's owned sizes.
+from wystan.pipeline_v2.stage_8_9_anchor_subdecompose import _MIN_DOMAINS
 from wystan.pipeline_v2.profiles._flow_lines import resolve_handler_line
 from wystan.llm.client import build_client
 
@@ -463,25 +462,52 @@ def _sorted_flows(flows: list["FlowSpec"]) -> list["FlowSpec"]:
 
 
 def _oversized_cut(features: list["DeveloperFeature"]) -> tuple[int, int] | None:
-    """``(cut, median)`` per the Stage-8.9 oversized contract, computed over
-    the CURRENT Stage-3 feature set's owned sizes (``len(f.paths)``).
+    """``(cut, median)`` over the CURRENT Stage-3 feature set's owned sizes
+    (``len(f.paths)``), all features measured as one group.
 
     A feature is oversized iff ``len(f.paths) > cut``. Returns ``None`` when
-    no feature owns any path (degenerate input). Mirrors
-    ``stage_8_9_anchor_subdecompose.stage_8_9_anchor_subdecompose``'s
-    median/cut computation exactly — the constants are imported from there so
-    the two stages can never drift apart.
+    no feature owns any path (degenerate input). The formula is
+    ``module_scope.measure_grain`` — the one place it is computed.
     """
-    sizes = [len(f.paths) for f in features if f.paths]
-    if not sizes:
+    ruler = measure_grain([f.paths for f in features])
+    if ruler is None:
         return None
-    median = max(2, int(statistics.median(sizes)))
-    total_owned = len({p for f in features for p in f.paths})
-    cut = max(
-        _OVERSIZED_MEDIAN_MULT * median,
-        math.ceil(_OVERSIZED_SHARE * total_owned),
-    )
-    return cut, median
+    return ruler.cut, ruler.median
+
+
+def _plan_feature_chunks(
+    features: list["DeveloperFeature"], module_scopes: ModuleScopes | None,
+) -> dict[int, list[tuple[str, list[str]]]]:
+    """Chunk plans (by ``id(feature)``) for every oversized feature.
+
+    A feature is judged against its peers: the rows of the nested module
+    that holds it, or — for everything outside a nested module — the rest
+    of the repository (``module_scope.grain_rulers``). One repo-wide ruler
+    made the size of one module decide whether the features of another
+    were chunked, so reading a large backend module took flows away from
+    an unchanged front end. Without nested modules there is one scope and
+    the ruler is the historical repo-wide one.
+
+    The chunk-call cap is SCALE-INVARIANT (rule-no-magic-tuning): at
+    ``len(paths) // median`` chunks, each chunk averages at least one
+    median-feature worth of files — so the LLM-call count is bounded by the
+    number of median-grain features this oversized feature is "worth". A
+    pathological 200-child fan-out on a feature worth 10 median features
+    fires ≤10 calls: ``_plan_chunks`` merges the smallest children into the
+    residual chunk.
+    """
+    rulers = grain_rulers([f.paths for f in features], module_scopes)
+    plans: dict[int, list[tuple[str, list[str]]]] = {}
+    for feature, ruler in zip(features, rulers):
+        if ruler is None or len(feature.paths) <= ruler.cut:
+            continue
+        plan = _plan_chunks(
+            sorted(feature.paths),
+            max_chunks=len(feature.paths) // ruler.median,
+        )
+        if plan is not None:
+            plans[id(feature)] = plan
+    return plans
 
 
 def _widest_fanout(paths: list[str]) -> tuple[str, dict[str, list[str]]] | None:
@@ -1184,16 +1210,13 @@ def stage_3_flows(
     profile_flows = _profile_flows_by_feature(profile, ctx, features)
 
     # Chunked flow detection for OVERSIZED features (Stage-8.9 contract,
-    # constants imported — see module docs at ``_CHUNKING_ENV``). The cut
-    # and median are computed ONCE over the CURRENT feature set and shared
-    # by every worker. ``chunk_cut is None`` ⇒ chunking fully disabled and
-    # every feature takes the pre-existing single-call path.
-    chunk_cut: int | None = None
-    chunk_median: int = 2
-    if _chunking_enabled():
-        _oc = _oversized_cut(features)
-        if _oc is not None:
-            chunk_cut, chunk_median = _oc
+    # constants imported — see module docs at ``_CHUNKING_ENV``). Plans are
+    # made ONCE, up front (deterministic, pure path-string work — no IO),
+    # keyed by object identity: the features list is fixed for the lifetime
+    # of this call. Doing it up front (a) gives the wall-time formula EXACT
+    # per-feature call-unit counts and (b) keeps worker threads free of
+    # planning work. An empty dict ⇒ every feature takes the pre-existing
+    # single-call path (chunking disabled, or nothing oversized).
     chunk_stats: dict[str, int] = {
         "features_chunked": 0,
         "chunks_total": 0,
@@ -1201,29 +1224,11 @@ def stage_3_flows(
         "chunk_cache_hits": 0,
         "flows_from_chunks": 0,
     }
-    # Pre-plan chunks ONCE for every oversized feature (deterministic, pure
-    # path-string work — no IO). Keyed by object identity: the features list
-    # is fixed for the lifetime of this call. Doing it up front (a) gives the
-    # wall-time formula EXACT per-feature call-unit counts instead of the
-    # loose ``paths // median`` upper bound, and (b) keeps worker threads
-    # free of planning work. The chunk-call cap is SCALE-INVARIANT
-    # (rule-no-magic-tuning): at ``len(paths) // median`` chunks, each chunk
-    # averages at least one repo-median-feature worth of files — so the
-    # LLM-call count is bounded by the number of median-grain features this
-    # oversized feature is "worth" (the cost it would have incurred had
-    # Stage 2 emitted it at the repo's own grain). A pathological 200-child
-    # fan-out on a feature worth 10 median features fires ≤10 calls:
-    # ``_plan_chunks`` merges the smallest children into the residual chunk.
     chunk_plans: dict[int, list[tuple[str, list[str]]]] = {}
-    if chunk_cut is not None:
-        for f in features:
-            if len(f.paths) > chunk_cut:
-                plan = _plan_chunks(
-                    sorted(f.paths),
-                    max_chunks=len(f.paths) // chunk_median,
-                )
-                if plan is not None:
-                    chunk_plans[id(f)] = plan
+    if _chunking_enabled():
+        chunk_plans = _plan_feature_chunks(
+            features, getattr(ctx, "module_scopes", None),
+        )
 
     # Scale wall-time cap to LLM-call-unit count when caller didn't pin it:
     # 1 unit per ordinary feature, the EXACT planned chunk count per chunked

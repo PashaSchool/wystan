@@ -1035,7 +1035,7 @@ ENV_OUTPUT_FLAGS = (
     # between the 6.86 mint window and the Stage 6.7 UF family — the
     # single existing mint sees the new flows naturally (no new mint
     # channel). Healthy flow-density is a secondary EXCLUDE-only filter
-    # (< repo flowful median / _OVERSIZED_MEDIAN_MULT); chunk
+    # (below half the flowful median of the row's peers); chunk
     # eligibility is ratio-triggered (exports/paths prompt caps)
     # independent of the global oversized cut; locale-births die on the
     # existing MIN_EXPORTS gate. Reshapes flows[] /
@@ -3761,7 +3761,11 @@ ENV_OUTPUT_FLAGS = (
 #: that is another feature's slug is not taken as a name.
 #: KS117 (2026-11-12): ``developer_features`` is written as the ids of the
 #: developer rows of ``features`` instead of a second copy of them (D5).
-KEY_SCHEMA_VERSION = 117
+#: KS118 (2026-11-12): ``go-package`` also reads the Go layout from every
+#: ``go.mod`` below the repository root; the rows that exist only because of
+#: it form a module scope (own flow names, own "oversized" ruler, joined by
+#: name only inside it); every row a repository had before is unchanged.
+KEY_SCHEMA_VERSION = 118
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

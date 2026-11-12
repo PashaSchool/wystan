@@ -319,6 +319,9 @@ def _run_reconcile(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
         )
         deterministic_features = stage2.features
         unattributed = stage2.unattributed
+        # As in the live run: later stages of a replayed chain read the
+        # record of nested-module rows from the context.
+        ctx.module_scopes = stage2.module_scopes
         for f in deterministic_features:
             log2.emit(
                 f.name,
@@ -647,7 +650,12 @@ def _run_bipartite(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
 
     features = state["features"]
     with StageLogger(env.run_dir, 5, "bipartite") as log5_5:
-        bipartite = stage_5_5_bipartite(features, log=log5_5)
+        # Absent from runs recorded before flow names were scoped: they
+        # replay with the one repository-wide namespace they had.
+        bipartite = stage_5_5_bipartite(
+            features, log=log5_5,
+            module_scopes=state.get("module_scopes"),
+        )
         write_stage_artifact(
             Path(state.get("repo_path", ".")), stage_index=5,
             stage_name="bipartite",
@@ -1102,7 +1110,11 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
 
     features = state["features"]
     with StageLogger(env.run_dir, 8, "anchor_subdecompose") as log8_9:
-        subdecompose_result = subdecompose_workspace_anchors(features)
+        # Runs recorded before the stage took module scopes have none:
+        # they replay with the repo-wide ruler they were scanned with.
+        subdecompose_result = subdecompose_workspace_anchors(
+            features, module_scopes=state.get("module_scopes"),
+        )
         log8_9.info(
             f"anchor_subdecompose enabled={subdecompose_result.enabled}",
         )
@@ -1132,6 +1144,9 @@ def _run_llm_component_split(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
             model=state["model_id"],
             cache_backend=getattr(ctx, "cache_backend", None),
             repo_slug=getattr(ctx, "slug", None) or ctx.repo_path.name,
+            # Absent from runs recorded before the stage took module
+            # scopes: they replay with the repo-wide ruler they had.
+            module_scopes=state.get("module_scopes"),
         )
         log8_9_5.info(
             f"llm_component_split enabled={llm_split_result.enabled}",
