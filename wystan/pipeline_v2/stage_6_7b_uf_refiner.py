@@ -256,16 +256,31 @@ def _refine_cache_key(
 # ordinals became. Any other change of the question (a row, the order of the
 # rows, the domain's name) is another key, as it is another question.
 #
-# The key under the raw question is still read (``_recall``): it is where
-# every earlier build stored its answers.
+# The key of the question as sent is the only key of every earlier build, and
+# it is read FIRST (``_recall``): a scan that finds an answer there returns
+# exactly what such a build returns. The content key is read only when that
+# one misses, which is the case an earlier build answers with a model call.
+#
+# Rows the question cannot tell apart (equal in everything but the id) are
+# told apart by their place in it and by nothing else. With the ordinals in
+# place the two keys agree on that, as they are made of the same rows in the
+# same order. After a renumbering each row takes the remembered answer of
+# its place among its equals; the list order is whatever the stages before
+# hand over (``refine_user_flows`` groups it and does not sort), so equal
+# rows that also changed places exchange their answers, as they do under the
+# key as sent when they exchange ordinals.
 _LOCAL_ID_PREFIX = "u"
 # Marks a key made of the question with local ids, so that it can never be
 # the key of a question as sent (and so that the answers of the builds that
 # SENT local ids, which are answers to another question, are not read).
 _KEY_IDS_LOCAL = "local"
-# Why a domain degraded when its reply parsed but answered other ids than
-# the ones asked.
-DEGRADED_ANSWER_IDS_UNKNOWN = "answer_ids_unknown"
+# Telemetry counter of the domains whose answer names none of the journeys
+# asked about. Such a domain is refined with nothing in it, and its reply is
+# stored, exactly as earlier builds do: the counter is the only trace. The
+# key exists only when it is not zero, so the telemetry of every other scan
+# is unchanged; it lands in the stage's block of the run metadata
+# (``scan_meta``), which no gate and no map row reads.
+TELEMETRY_ANSWERS_NO_ASKED_ID = "domains_answer_no_asked_id"
 
 
 def _content_key(model: str, content_prompt: str, max_tokens: int) -> str:
@@ -340,51 +355,74 @@ def _to_scan_ids(
     return _renamed(rows, {local: scan for scan, local in local_ids.items()})
 
 
-def _remember(
-    cache: "CacheBackend | None",
-    key: str | None,
+def _carry(
+    cache: "CacheBackend", model: str, question: "_DomainQuestion",
     rows: dict[str, dict],
-    local_ids: dict[str, str],
-) -> None:
-    """Store an answer under the content key, by local id.
+) -> bool:
+    """Copy an answer to the content key, by local id, if none is there.
 
-    Nothing is stored when no row answers an asked journey: there is
-    nothing in such a reply that outlives the ordinals it was given under.
+    Written once and never replaced. A memory may hold one domain under
+    two numberings with different answers (two questions as sent, each
+    with its own): each numbering keeps reading its own under the key as
+    sent, and after a renumbering, when both of those miss, the domain
+    gets the answer that was copied first.
+
+    Returns ``False`` when no row answers an asked journey: nothing in
+    such a reply outlives the ordinals it was given under, and nothing is
+    copied.
     """
-    if cache is None or key is None:
-        return
-    stored = _to_local_ids(rows, local_ids)
-    if stored:
+    stored = _to_local_ids(rows, question.local_ids)
+    if not stored:
+        return False
+    key = question.content_key(model)
+    if _cache_get_parsed(cache, key) is None:
         _cache_put_parsed(cache, key, stored)
+    return True
+
+
+def _remember(
+    cache: "CacheBackend | None", model: str, question: "_DomainQuestion",
+    rows: dict[str, dict],
+) -> None:
+    """Store a reply of the model so that the next scan makes no call.
+
+    By content, where the next scan finds it whatever its ordinals. A reply
+    that names no asked journey has no content entry; it is stored as
+    earlier builds store every reply, as parsed under the key of the
+    question as sent: unstored, its domain would be asked again on every
+    scan, where such a build asks once.
+    """
+    if cache is None:
+        return
+    if not _carry(cache, model, question, rows):
+        _cache_put_parsed(cache, question.sent_key(model), dict(rows))
 
 
 def _recall(
     cache: "CacheBackend | None", model: str, question: "_DomainQuestion",
-) -> tuple[str | None, dict[str, dict] | None]:
-    """``(content key to store under, remembered rows by scan id or None)``.
+) -> dict[str, dict] | None:
+    """The remembered answer by scan id, or ``None``.
 
-    The content key is read first. Then the key of the question as sent,
-    which is, byte for byte, the only key earlier builds used: a hit there
-    returns the stored rows untouched, exactly what such a build read
-    (also when none of them answers an asked journey: that was a hit with
+    The key of the question as sent is read first. A hit returns the
+    stored rows untouched, exactly what an earlier build returns (also
+    when none of them answers an asked journey: that was a hit with
     nothing to apply, and stays one), and the answer is copied to the
-    content key so that the next scan no longer needs the ordinals to
-    stay put. Without this read the change of key alone would ask the
-    model again about every journey of every repository, and asked twice
-    it does not answer the same.
+    content key so that the next scan no longer needs the ordinals to stay
+    put. Only on a miss, where an earlier build asks the model, is the
+    content key read. Without the first read the change of key alone
+    would ask the model again about every journey of every repository,
+    and asked twice it does not answer the same.
     """
     if cache is None:
-        return None, None
-    key = question.content_key(model)
-    stored = _cache_get_parsed(cache, key)
-    if stored is not None:
-        rows = _to_scan_ids(stored, question.local_ids)
-        if rows:
-            return key, rows
+        return None
     as_sent = _cache_get_parsed(cache, question.sent_key(model))
     if as_sent is not None:
-        _remember(cache, key, as_sent, question.local_ids)
-    return key, as_sent
+        _carry(cache, model, question, as_sent)
+        return as_sent
+    stored = _cache_get_parsed(cache, question.content_key(model))
+    if stored is None:
+        return None
+    return _to_scan_ids(stored, question.local_ids) or None
 
 
 def _cache_get_parsed(
@@ -470,6 +508,9 @@ class _DomainResult:
     # NOT counted in llm_calls and cost $0 — mirrors Stage 3 / Stage 4.
     cache_hits: int = 0
     llm_calls: int = 0
+    # The answer names none of the journeys asked about (see
+    # ``TELEMETRY_ANSWERS_NO_ASKED_ID``).
+    answers_no_asked_id: bool = False
 
 
 _VALID_UI_TIERS = ("full-page", "panel", "settings", "admin", "no-ui")
@@ -981,12 +1022,11 @@ def _compute_domain(
         for uf in ufs
     ]
     question = _domain_question(domain, payloads)
-    local_ids = question.local_ids
     user_prompt = question.user_prompt
     max_tokens = question.max_tokens
 
     # ── Cache lookup for call #1 ──
-    key1, cached_call1 = _recall(cache, model, question)
+    cached_call1 = _recall(cache, model, question)
 
     if cached_call1 is not None:
         # HIT: no Haiku call, no tokens, $0. The parsed rows feed the SAME
@@ -1034,22 +1074,15 @@ def _compute_domain(
             result.degraded_reason = "json_parse_failed"
             return result
         parsed = parsed_or_none
-        if not any(scan_id in parsed for scan_id in local_ids):
-            # The reply names none of the journeys it was asked about. It
-            # is invalid like an unparsed one: nothing is applied or
-            # stored, and the domain is counted as degraded instead of as
-            # refined with nothing in it.
-            result.degraded_reason = DEGRADED_ANSWER_IDS_UNKNOWN
-            return result
         # MISS → persist the parsed rows for future runs. Degrades (cost cap /
         # parse failure / empty response) returned above are NEVER cached.
-        # Store a COPY: the retry path below mutates parsed[uf_id] in place,
-        # and a reference-storing backend (MemoryCacheBackend, buffered worker
-        # flush) would silently bake the retry's correction into the call-1
-        # artifact (audit IMPORTANT, 2026-07-02). Shallow suffices — the later
-        # mutation replaces top-level rows, never mutates a nested row dict.
-        # (``_remember`` builds a new mapping keyed by local ids.)
-        _remember(cache, key1, parsed, local_ids)
+        _remember(cache, model, question, parsed)
+
+    # A reply (asked now or remembered) that names none of the journeys is
+    # applied to nothing; it is counted, and changes nothing else.
+    result.answers_no_asked_id = not any(
+        scan_id in parsed for scan_id in question.local_ids
+    )
 
     # ── Anti-hallucination name validation (naming review №2) ──
     # Every content token of a refined name must be evidenced in the UF's
@@ -1086,7 +1119,7 @@ def _compute_domain(
                 "\n" + retry_prohibition(violations),
             )
             retry_user = retry_question.user_prompt
-            key2, cached_retry = _recall(cache, model, retry_question)
+            cached_retry = _recall(cache, model, retry_question)
             if cached_retry is not None:
                 result.cache_hits += 1
                 retry_parsed: dict[str, dict] = cached_retry
@@ -1103,7 +1136,8 @@ def _compute_domain(
                 result.retry_in_tok = r_in
                 result.retry_out_tok = r_out
                 retry_parsed = _parse_refinement(retry_text) or {}
-                _remember(cache, key2, retry_parsed, local_ids)
+                if retry_parsed:
+                    _remember(cache, model, retry_question, retry_parsed)
             for uf_id in failing_ids:
                 row2 = retry_parsed.get(uf_id)
                 nm2 = row2.get("name") if row2 else None
@@ -1409,6 +1443,10 @@ def refine_user_flows(
             telemetry["uf_names_dominant_rejected"] = (
                 telemetry.get("uf_names_dominant_rejected", 0)
                 + res.names_dominant_rejected)
+
+        if res.answers_no_asked_id:
+            telemetry[TELEMETRY_ANSWERS_NO_ASKED_ID] = (
+                telemetry.get(TELEMETRY_ANSWERS_NO_ASKED_ID, 0) + 1)
 
         parsed = res.parsed
         name_ok = res.name_ok
