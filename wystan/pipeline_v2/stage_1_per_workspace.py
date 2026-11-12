@@ -423,11 +423,7 @@ def _merge_anchors_across_workspaces(
         keyed by extractor name (``route`` / ``mvc`` / ...) with a
         list of ``AnchorCandidate``.
 
-    Coalescing rule per (source, slug, scope). ``scope`` is the nested
-    module root an extractor read the name from (``""`` for almost every
-    anchor): a slug is unique inside its module only, so equal slugs of
-    two modules are two anchors here and Stage 2 tells them apart
-    (``module_scope``). Per key:
+    Coalescing rule per (source, slug):
       - If only one workspace emitted it → keep as-is.
       - If multiple workspaces emitted it AND paths are pairwise
         disjoint AND every emission has ≥3 paths → keep all (rename
@@ -435,10 +431,8 @@ def _merge_anchors_across_workspaces(
       - Otherwise → merge into one candidate whose paths are the union
         of all contributing paths, summing confidence (capped at 0.95).
     """
-    # (source, slug, scope) -> list[(ws_name, candidate)]
-    grouped: dict[
-        tuple[str, str, str], list[tuple[str, AnchorCandidate]],
-    ] = defaultdict(list)
+    # (source, slug) -> list[(ws_name, candidate)]
+    grouped: dict[tuple[str, str], list[tuple[str, AnchorCandidate]]] = defaultdict(list)
     errors: dict[str, str] = {}
 
     for ws_name, stage1_out in per_ws_results:
@@ -450,7 +444,7 @@ def _merge_anchors_across_workspaces(
             if source == "_errors":
                 continue
             for cand in candidates:
-                grouped[(source, cand.name, cand.scope)].append((ws_name, cand))
+                grouped[(source, cand.name)].append((ws_name, cand))
 
     merged: dict[str, list[AnchorCandidate]] = defaultdict(list)
 
@@ -542,7 +536,7 @@ def _merge_anchors_across_workspaces(
                     out.append(r)
         return tuple(out)
 
-    for (source, slug, scope), items in grouped.items():
+    for (source, slug), items in grouped.items():
         if len(items) == 1:
             merged[source].append(items[0][1])
             continue
@@ -562,9 +556,7 @@ def _merge_anchors_across_workspaces(
         )
         all_chunky = all(len(p) >= 3 for p in paths_lists)
 
-        # One module seen from two workspace passes is still one unit:
-        # its pieces are joined, never renamed after the workspaces.
-        if all_pairwise_disjoint and all_chunky and not scope:
+        if all_pairwise_disjoint and all_chunky:
             for ws_name, cand in items:
                 renamed = AnchorCandidate(
                     name=f"{ws_name}-{cand.name}",
@@ -609,7 +601,6 @@ def _merge_anchors_across_workspaces(
                         _routes_union([c for _, c in items])
                         if preserve else ()
                     ),
-                    scope=scope,
                 ),
             )
 

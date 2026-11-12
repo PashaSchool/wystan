@@ -39,7 +39,6 @@ from wystan.pipeline_v2.stage_8_6_5_scaffold_filter import (
 from wystan.pipeline_v2.stage_8_6_7_di_attribution import (
     attribute_di_services,
 )
-from wystan.pipeline_v2.module_scope import nested_module_roots
 from wystan.pipeline_v2.stage_8_7_anchor_desink import (
     desink_workspace_anchors,
 )
@@ -571,16 +570,9 @@ def run_layer2_phase(
     # sub-features inherit the anchor's product_feature_id so product paths
     # are byte-stable. Deterministic, no LLM, scale-invariant (grain floor =
     # repo median feature size). Default ON; WYSTAN_STAGE_8_9_SUBDECOMPOSE=0.
-    # Rows of a nested module are measured among themselves, so the
-    # stage needs to know where the nested modules are.
-    module_roots = sorted(nested_module_roots(ctx.tracked_files or ()))
-    write_stage_input(run_dir, 8, "anchor_subdecompose", {
-        "features": features, "module_roots": module_roots,
-    })
+    write_stage_input(run_dir, 8, "anchor_subdecompose", {"features": features})
     with StageLogger(run_dir, 8, "anchor_subdecompose") as log8_9:
-        subdecompose_result = subdecompose_workspace_anchors(
-            features, module_roots=module_roots,
-        )
+        subdecompose_result = subdecompose_workspace_anchors(features)
         stage_8_9_telemetry = subdecompose_result.as_telemetry()
         log8_9.info(
             f"anchor_subdecompose enabled={subdecompose_result.enabled} "

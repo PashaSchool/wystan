@@ -65,14 +65,6 @@ class AnchorCandidate:
             discarded. Sorted, deduped, lowercase. Empty for stacks
             without route groups; additive — nothing downstream is
             required to read it.
-        scope: the directory the anchor's NAME is relative to, as a
-            repo-relative POSIX path. ``""`` (every extractor but the
-            ones that read nested module roots) means the repository
-            root. An extractor that reads a layout from a nested module
-            root sets it to that root (``"services/api"``): the bare
-            name is then unique inside that module only, and Stage 2
-            does not join it by name with an anchor that lives outside
-            the module (see ``module_scope``).
     """
 
     name: str
@@ -83,7 +75,6 @@ class AnchorCandidate:
     rationale: str = ""
     routes: tuple[tuple[str, str, str], ...] = ()
     route_groups: tuple[str, ...] = ()
-    scope: str = ""
 
 
 @runtime_checkable
