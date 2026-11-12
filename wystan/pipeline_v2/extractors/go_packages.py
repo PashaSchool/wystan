@@ -79,12 +79,15 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from wystan.pipeline_v2.extractors._module_roots import (
     REPOSITORY_ROOT,
     ModuleLocator,
+    first_free_name,
     manifest_dirs,
+    qualified_unit_names,
 )
 from wystan.pipeline_v2.extractors._util import is_any_stack, posix, slugify
 from wystan.pipeline_v2.extractors.base import AnchorCandidate
@@ -126,8 +129,8 @@ _MODULE_ROOT_RATIONALE = "go module root package"
 # single-module Go repository in the regression corpus.
 _OVERSPLIT_WARN_THRESHOLD = 60
 
-# First number tried when a qualified name is still taken ("x", "x-2").
-_FIRST_NAME_ORDINAL = 2
+# A file of a top-level package is exactly ``<dir>/<file>.go``.
+_TOP_LEVEL_PACKAGE_PARTS = 2
 
 # Path segments that mark a directory as noise — never a feature.
 _EXCLUDED_SEGMENTS = frozenset({
@@ -195,7 +198,7 @@ def _bucket_key(parts: tuple[str, ...]) -> tuple[str, str, str] | None:
 
     # Top-level repo-root package: own files only (non-recursive). Such a
     # file has exactly two parts: ("<dir>", "file.go").
-    if len(parts) == 2:
+    if len(parts) == _TOP_LEVEL_PACKAGE_PARTS:
         leaf = parts[0]
         return slugify(leaf), leaf, "go top-level package"
 
@@ -231,53 +234,28 @@ def _module_bucket(
 
 def _place(
     parts: tuple[str, ...], locator: ModuleLocator,
-) -> tuple[str, tuple[str, str, str]] | None:
-    """``(root, bucket)`` for a file: the outermost root that buckets it.
+) -> tuple[str, tuple[str, str, str], bool] | None:
+    """``(root, bucket, by_root_rule)``: the outermost root that buckets a file.
 
     The repository root is tried first whether or not it holds a
     manifest, so every file the repository-root rule claims is claimed
-    exactly as before nested modules were considered.
+    exactly as before nested modules were considered. ``by_root_rule``
+    says the repository-root rule placed the file.
     """
     key = _bucket_key(parts)
-    if key is not None:
-        return REPOSITORY_ROOT, key
     directory = "/".join(parts[:-1])
+    if key is not None:
+        # A top-level directory that is itself a nested module: the
+        # unit, its name and its files are the repository-root rule's,
+        # but the name belongs to that module, not to the repository.
+        if len(parts) == _TOP_LEVEL_PACKAGE_PARTS and locator.is_root(directory):
+            return directory, key, True
+        return REPOSITORY_ROOT, key, True
     for module_root in locator.enclosing(directory):
         key = _module_bucket(parts, module_root)
         if key is not None:
-            return module_root, key
+            return module_root, key, False
     return None
-
-
-def _qualified_names(module_root: str, slug: str) -> list[str]:
-    """Names for a nested unit whose bare slug is taken, best first."""
-    leaf = module_root.rsplit("/", 1)[-1]
-    if slug == slugify(leaf):
-        # The module's own root package: "ods-ods" says nothing more
-        # than "ods", so qualify with the path that leads to the module.
-        return [slugify(module_root)]
-    names = [slugify(f"{leaf}-{slug}"), slugify(f"{module_root}-{slug}")]
-    return list(dict.fromkeys(names))
-
-
-def _first_free(
-    candidates: list[str], taken: set[str], next_ordinal: dict[str, int],
-) -> str:
-    """First candidate not in ``taken``; else the last one, numbered.
-
-    ``next_ordinal`` remembers, per base name, the number to try next,
-    so many units contesting one name cost one step each instead of
-    recounting from the start (a hostile tree can hold thousands).
-    """
-    for name in candidates:
-        if name and name not in taken:
-            return name
-    base = candidates[-1] or "module"
-    ordinal = next_ordinal.get(base, _FIRST_NAME_ORDINAL)
-    while f"{base}-{ordinal}" in taken:
-        ordinal += 1
-    next_ordinal[base] = ordinal + 1
-    return f"{base}-{ordinal}"
 
 
 def _anchor_names(keys: list[_UnitKey]) -> dict[_UnitKey, str]:
@@ -301,10 +279,20 @@ def _anchor_names(keys: list[_UnitKey]) -> dict[_UnitKey, str]:
     taken = set(names.values())
     next_ordinal: dict[str, int] = {}
     for key in contested:
-        name = _first_free(_qualified_names(*key), taken, next_ordinal)
+        name = first_free_name(qualified_unit_names(*key), taken, next_ordinal)
         names[key] = name
         taken.add(name)
     return names
+
+
+def nested_module_roots(tracked_files: "Iterable[str]") -> frozenset[str]:
+    """Directories below the repository root that hold a Go module.
+
+    The same roots the extractor reads nested layouts from, for stages
+    that need to know which rows belong to which nested module.
+    """
+    roots = manifest_dirs(tracked_files, _MODULE_MANIFEST, _is_excluded_path)
+    return roots - {REPOSITORY_ROOT}
 
 
 # ── Extractor ───────────────────────────────────────────────────────────────
@@ -363,12 +351,15 @@ class GoPackageExtractor:
             placed = _place(parts, locator)
             if placed is None:
                 continue
-            root, (slug, _leaf, rationale) = placed
+            root, (slug, _leaf, rationale), by_root_rule = placed
             if not slug:
                 continue
             unit = units.setdefault(
                 (root, slug),
-                {"paths": set(), "rationale": rationale, "real": False},
+                {
+                    "paths": set(), "rationale": rationale, "real": False,
+                    "by_root_rule": by_root_rule,
+                },
             )
             unit["paths"].add(norm)
             unit["rationale"] = rationale
@@ -388,10 +379,11 @@ class GoPackageExtractor:
         """
         real = {key: unit for key, unit in units.items() if unit["real"]}
         names = _anchor_names(list(real))
-        # Repository-root units keep their historical (first-seen) order;
-        # nested-module units follow, sorted, so the list is stable.
-        ordered = [key for key in real if key[0] == REPOSITORY_ROOT]
-        ordered += sorted(key for key in real if key[0] != REPOSITORY_ROOT)
+        # Units of the repository-root rule keep their historical
+        # (first-seen) order; the others follow, sorted, so the list is
+        # stable.
+        ordered = [key for key in real if real[key]["by_root_rule"]]
+        ordered += sorted(key for key in real if not real[key]["by_root_rule"])
         out: list[AnchorCandidate] = []
         for key in ordered:
             unit = real[key]
@@ -402,9 +394,12 @@ class GoPackageExtractor:
                     source=self.name,
                     confidence_self=_STRUCTURAL_CONFIDENCE,
                     rationale=unit["rationale"],
+                    # The root the layout was read from: later stages
+                    # treat the name as unique inside it only.
+                    scope=key[0],
                 ),
             )
         return out
 
 
-__all__ = ["GoPackageExtractor"]
+__all__ = ["GoPackageExtractor", "nested_module_roots"]

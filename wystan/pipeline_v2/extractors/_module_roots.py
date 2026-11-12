@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-from wystan.pipeline_v2.extractors._util import posix
+from wystan.pipeline_v2.extractors._util import posix, slugify
 
 # The repository root as a directory path. Module roots are stored as
 # POSIX directory paths without a trailing slash, so the root is "".
@@ -33,6 +33,9 @@ REPOSITORY_ROOT = ""
 # only so a hostile tree with a manifest at every level of a very deep
 # path costs a constant per file instead of the path depth.
 MAX_ENCLOSING_MODULES = 8
+
+# First number tried when a qualified name is still taken ("x", "x-2").
+FIRST_NAME_ORDINAL = 2
 
 
 def _parent_dir(path: str) -> str:
@@ -85,6 +88,10 @@ class ModuleLocator:
     def _own(self, directory: str) -> tuple[str, ...]:
         return (directory,) if directory in self._roots else ()
 
+    def is_root(self, directory: str) -> bool:
+        """``True`` when ``directory`` itself holds a module manifest."""
+        return directory in self._roots
+
     def enclosing(self, directory: str) -> tuple[str, ...]:
         """Module roots at or above ``directory``, outermost first.
 
@@ -119,9 +126,43 @@ class ModuleLocator:
         return chain
 
 
+def qualified_unit_names(module_root: str, slug: str) -> list[str]:
+    """Names for a nested unit whose bare slug is taken, best first."""
+    leaf = module_root.rsplit("/", 1)[-1]
+    if slug == slugify(leaf):
+        # The module's own root package: "ods-ods" says nothing more
+        # than "ods", so qualify with the path that leads to the module.
+        return [slugify(module_root)]
+    names = [slugify(f"{leaf}-{slug}"), slugify(f"{module_root}-{slug}")]
+    return list(dict.fromkeys(names))
+
+
+def first_free_name(
+    candidates: list[str], taken: set[str], next_ordinal: dict[str, int],
+) -> str:
+    """First candidate not in ``taken``; else the last one, numbered.
+
+    ``next_ordinal`` remembers, per base name, the number to try next,
+    so many units contesting one name cost one step each instead of
+    recounting from the start (a hostile tree can hold thousands).
+    """
+    for name in candidates:
+        if name and name not in taken:
+            return name
+    base = candidates[-1] or "module"
+    ordinal = next_ordinal.get(base, FIRST_NAME_ORDINAL)
+    while f"{base}-{ordinal}" in taken:
+        ordinal += 1
+    next_ordinal[base] = ordinal + 1
+    return f"{base}-{ordinal}"
+
+
 __all__ = [
+    "FIRST_NAME_ORDINAL",
     "MAX_ENCLOSING_MODULES",
     "REPOSITORY_ROOT",
     "ModuleLocator",
+    "first_free_name",
     "manifest_dirs",
+    "qualified_unit_names",
 ]

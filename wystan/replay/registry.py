@@ -1102,7 +1102,11 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
 
     features = state["features"]
     with StageLogger(env.run_dir, 8, "anchor_subdecompose") as log8_9:
-        subdecompose_result = subdecompose_workspace_anchors(features)
+        # Runs recorded before the stage took module roots have none:
+        # they replay with the repo-wide ruler they were scanned with.
+        subdecompose_result = subdecompose_workspace_anchors(
+            features, module_roots=state.get("module_roots") or (),
+        )
         log8_9.info(
             f"anchor_subdecompose enabled={subdecompose_result.enabled}",
         )
