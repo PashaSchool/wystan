@@ -3761,7 +3761,10 @@ ENV_OUTPUT_FLAGS = (
 #: that is another feature's slug is not taken as a name.
 #: KS117 (2026-11-12): ``developer_features`` is written as the ids of the
 #: developer rows of ``features`` instead of a second copy of them (D5).
-KEY_SCHEMA_VERSION = 117
+#: KS122 (2026-11-12): the journey refiner asks and remembers a domain by
+#: its content (no scan ordinal in the prompt, the key or the row order) and
+#: the name writer's key leaves the item's id out; 118-121 are other branches'.
+KEY_SCHEMA_VERSION = 122
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

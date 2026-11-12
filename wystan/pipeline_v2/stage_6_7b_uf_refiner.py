@@ -233,31 +233,55 @@ def _refine_cache_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
-# ── Position-free prompt ids ────────────────────────────────────────────────
+# ── A domain is asked by its content ────────────────────────────────────────
 #
 # A journey's id (``UF-123``) is its ordinal in the scan. With that id in the
-# prompt, one new journey anywhere earlier in the list changed the prompt —
-# and so the cache key — of every later domain, the model was asked again
-# about journeys that had not changed, and they came back with other names
-# (measured on three repositories: 72 of 103 domains differed from the
-# previous scan in nothing but these ids). The prompt therefore names each
-# journey by its place inside its own domain batch, and the answer is mapped
-# back. Answers cached while the scan id was in the prompt are still read
-# (``_recall``), so this change by itself renames nothing.
+# prompt, one new journey anywhere earlier in the list changed the prompt, and
+# so the cache key, of every later domain: the model was asked again about
+# journeys that had not changed, and they came back with other names (measured
+# by adding one unrelated module to a repository of 52 domains: 51 were asked
+# again with nothing but their ids shifted, cache hits 74 -> 1, and the new
+# names moved journeys in every later stage).
+#
+# So nothing a domain is asked with comes from the scan's numbering:
+#   * a journey is named by its place in its own domain batch (``u1``...),
+#   * that place is taken from the journey's own prompt row, not from the
+#     scan's list order (which is the numbering again),
+# and the answer is mapped back to scan ids. A domain whose journeys did not
+# change therefore has the same prompt, the same key and the same remembered
+# answer whatever was added elsewhere. Answers cached while the scan id was in
+# the prompt are still read (``_recall``), so this change renames nothing.
 _LOCAL_ID_PREFIX = "u"
 
 
-def _local_ids(ufs: list["UserFlow"]) -> dict[str, str]:
-    """``{scan id: id used in the prompt}`` for one domain batch."""
+def _content_order_key(row: dict[str, Any]) -> str:
+    """What a prompt row says about its journey, without the scan id."""
+    return json.dumps(
+        {k: v for k, v in row.items() if k != "id"},
+        sort_keys=True, ensure_ascii=False,
+    )
+
+
+def _local_ids(payloads: list[dict[str, Any]]) -> dict[str, str]:
+    """``{scan id: id used in the prompt}`` for one domain batch.
+
+    Rows are numbered in the order of their own content. Two rows with the
+    same content keep their list order: they are the same question, so
+    either numbering gives the same prompt.
+    """
+    ordered = sorted(payloads, key=_content_order_key)
     return {
-        uf.id: f"{_LOCAL_ID_PREFIX}{n}" for n, uf in enumerate(ufs, start=1)
+        row["id"]: f"{_LOCAL_ID_PREFIX}{n}"
+        for n, row in enumerate(ordered, start=1)
     }
 
 
 def _with_local_ids(
     payloads: list[dict[str, Any]], local_ids: dict[str, str],
 ) -> list[dict[str, Any]]:
-    return [{**row, "id": local_ids[row["id"]]} for row in payloads]
+    """The rows as the model sees them: local ids, in content order."""
+    ordered = sorted(payloads, key=_content_order_key)
+    return [{**row, "id": local_ids[row["id"]]} for row in ordered]
 
 
 def _by_scan_id(
@@ -292,14 +316,16 @@ def _recall(
 ) -> tuple[str | None, dict[str, dict] | None]:
     """``(key to store under, cached rows by scan id or None)``.
 
-    ``prompts`` is ``(position-free prompt, the prompt with scan ids)``.
+    ``prompts`` is ``(content prompt, the prompt with scan ids)``.
     The second is never sent: it is only the key older answers sit under.
-    Such an answer is copied to the position-free key, so it survives the
-    next renumbering.
+    Such an answer is copied to the content key, so it survives the next
+    renumbering.
 
     Why the old key is still read: it is, byte for byte, the key every
-    build before position-free ids used as its only key (same
-    :func:`_refine_cache_key`, same prompt builder). It can hit only when
+    build before local ids used as its only key (same
+    :func:`_refine_cache_key`, same prompt builder, rows in list order;
+    checked on two recorded scans of such a build: 52 of 52 and 8 of 8
+    domains found under it). It can hit only when
     the whole batch, scan ids included, is the one that build would send,
     and then it returns what that build itself would have read. Without
     it, the change of key alone would ask the model again about every
@@ -682,6 +708,49 @@ def _build_user_prompt(domain: str | None, uf_payloads: list[dict]) -> str:
 # ── LLM call (mirrors stack_auditor._call_haiku) ────────────────────────────
 
 
+@dataclass(frozen=True)
+class _DomainQuestion:
+    """What one domain is asked, and how its answer maps back.
+
+    ``user_prompt`` is what the model sees and what the memory key is made
+    of: the domain's name and its journeys' own rows, nothing of the scan's
+    numbering and nothing of another domain. ``positional_prompt`` is never
+    sent: it is the prompt builds before local ids sent (scan ids, list
+    order), kept only to find the answers they stored.
+    """
+
+    user_prompt: str
+    positional_prompt: str
+    # {scan id: local id}; the answer arrives keyed by local id.
+    local_ids: dict[str, str]
+    max_tokens: int
+
+    def key(self, model: str) -> str:
+        return _refine_cache_key(model, self.user_prompt, self.max_tokens)
+
+    def positional_key(self, model: str) -> str:
+        return _refine_cache_key(
+            model, self.positional_prompt, self.max_tokens,
+        )
+
+
+def _domain_question(
+    domain: str | None, payloads: list[dict[str, Any]],
+) -> _DomainQuestion:
+    """The question for one domain, from its journeys' prompt rows."""
+    local_ids = _local_ids(payloads)
+    return _DomainQuestion(
+        user_prompt=_build_user_prompt(
+            domain, _with_local_ids(payloads, local_ids),
+        ),
+        positional_prompt=_build_user_prompt(domain, payloads),
+        local_ids=local_ids,
+        # One budget per domain (its whole batch shares one call); it
+        # depends on the domain's own journey count only.
+        max_tokens=_effective_max_tokens(len(payloads)),
+    )
+
+
 def _call_haiku(
     client: Any,
     *,
@@ -862,17 +931,11 @@ def _compute_domain(
         _uf_payload(uf, members_by_uf[uf.id], product_strings)
         for uf in ufs
     ]
-    # The prompt names each journey by its place in this batch, not by its
-    # scan id (see ``_local_ids``). ``positional_prompt`` is never sent: it
-    # is the key answers were cached under while the scan id was in it.
-    local_ids = _local_ids(ufs)
-    user_prompt = _build_user_prompt(
-        domain, _with_local_ids(payloads, local_ids),
-    )
-    positional_prompt = _build_user_prompt(domain, payloads)
-    # S2 Seg B' — one budget per domain (its whole batch shares one call). OFF/
-    # unset (or a small domain) -> DEFAULT_MAX_TOKENS -> key + request unchanged.
-    max_tokens = _effective_max_tokens(len(ufs))
+    question = _domain_question(domain, payloads)
+    local_ids = question.local_ids
+    user_prompt = question.user_prompt
+    positional_prompt = question.positional_prompt
+    max_tokens = question.max_tokens
 
     # ── Cache lookup for call #1 ──
     key1, cached_call1 = _recall(
