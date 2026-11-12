@@ -3759,7 +3759,9 @@ ENV_OUTPUT_FLAGS = (
 #: shared rule and the platform lane is brought up to date before output; a
 #: carved feature takes only files its donor is credited with; a URL word
 #: that is another feature's slug is not taken as a name.
-KEY_SCHEMA_VERSION = 116
+#: KS117 (2026-11-12): ``developer_features`` is written as the ids of the
+#: developer rows of ``features`` instead of a second copy of them (D5).
+KEY_SCHEMA_VERSION = 117
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

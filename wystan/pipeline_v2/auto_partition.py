@@ -112,6 +112,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
+from wystan.models.types import developer_layer
 from wystan.pipeline_v2.stage_6_6_monorepo_assembly import (
     DepEdgeExtractor,
     build_cross_project_graph,
@@ -132,6 +133,8 @@ logger = logging.getLogger(__name__)
 # view is always the trivial ``{"is_monorepo": False}`` — noise here.
 _PROJECT_FEATUREMAP_KEYS: tuple[str, ...] = (
     "schema_version",
+    # KS117: the rows are in ``features``; ``developer_features`` is their ids.
+    "features",
     "developer_features",
     "product_features",
     "user_flows",
@@ -223,7 +226,7 @@ def _project_summary(featuremap: dict[str, Any] | None) -> dict[str, Any]:
             "max_feature_share": 0.0,
             "file_count": 0,
         }
-    feats = featuremap.get("developer_features") or []
+    feats = developer_layer(featuremap)
     user_flows = featuremap.get("user_flows") or []
     flows = featuremap.get("flows") or []
 

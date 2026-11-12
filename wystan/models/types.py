@@ -1617,6 +1617,46 @@ class CoverageGap(BaseModel):
         return data
 
 
+#: The field a written map uses to reference a developer feature: the same
+#: one ``product_feature_id`` and ``flows[].primary_feature`` already use, so
+#: a reader resolves every reference with one index. Measured unique over
+#: the developer layer of sixteen corpus maps (D5 step 0, 2026-11-12).
+DEVELOPER_FEATURE_ID_FIELD = "name"
+
+
+def _is_id_list(value: Any) -> bool:
+    """True for the KS117 ``developer_features`` shape: a non-empty list of ids."""
+    return isinstance(value, list) and bool(value) and all(
+        isinstance(item, str) for item in value
+    )
+
+
+def developer_feature_ids(rows: list[dict[str, Any]]) -> list[str]:
+    """Ids of the developer-layer rows of dumped ``features``, in order."""
+    return [
+        str(row.get(DEVELOPER_FEATURE_ID_FIELD, ""))
+        for row in rows
+        if row.get("layer", "developer") == "developer"
+    ]
+
+
+def developer_layer(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Developer-feature rows of a map read as raw JSON, whatever its shape.
+
+    ``features`` is the source of truth (a row without ``layer`` is a
+    developer row: the tag was added after the first maps were written).
+    Only a document with no ``features`` key at all (a base scan or a
+    fixture built from the layered view alone) falls back to the dict rows
+    of ``developer_features``; ids there are references, never rows.
+    """
+    if "features" in data:
+        return [
+            row for row in data.get("features") or []
+            if isinstance(row, dict) and row.get("layer", "developer") == "developer"
+        ]
+    return [row for row in data.get("developer_features") or [] if isinstance(row, dict)]
+
+
 class FeatureMap(BaseModel):
     # On-disk schema version. Default 0 = "pre-versioning scan" so any
     # JSON produced before this field existed rehydrates as 0, which is
@@ -1639,7 +1679,11 @@ class FeatureMap(BaseModel):
     # FeatureMap with ``developer_features=`` / ``product_features=``
     # (the v2 pipeline does), the validator below folds them into
     # ``features`` so the on-disk shape stays stable.
-    developer_features: list[Feature] | None = None
+    # D5 (KS117): a written map carries ``developer_features`` as a list
+    # of feature ids (see ``DEVELOPER_FEATURE_ID_FIELD``), not a second
+    # copy of the developer rows. On input an id list is a reference,
+    # not data: ``features`` is the source of truth and is left alone.
+    developer_features: list[Feature] | list[str] | None = None
     product_features: list[Feature] | None = None
     last_scanned_sha: str = ""               # git HEAD at scan time — used for incremental refresh
     file_hashes: dict[str, str] = {}         # {rel_path: sha256_of_content} — skip re-parse when file unchanged
@@ -1764,9 +1808,12 @@ class FeatureMap(BaseModel):
         """
         dev = self.developer_features
         prod = self.product_features
-        if dev is None and prod is None:
-            # Legacy path — nothing to merge. Clear the input-side
-            # aliases so they don't get serialized.
+        if dev is None and prod is None or _is_id_list(dev):
+            # Legacy path (nothing to merge) or the KS117 shape: the id
+            # list only references rows of ``features``, whose ``layer``
+            # tags already hold both layers, so ``product_features`` is
+            # a view too and must not replace ``features``. Clear the
+            # input-side aliases so they don't get serialized.
             self.developer_features = None
             self.product_features = None
             return self
@@ -1792,21 +1839,21 @@ class FeatureMap(BaseModel):
         return [f for f in self.features if f.layer == "product"]
 
     def model_dump(self, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
-        """Override dump to emit ``developer_features`` and
-        ``product_features`` as top-level arrays in the JSON output
-        (in addition to ``features`` for back-compat) so v2 consumers
-        can read the layered shape directly.
+        """Override dump to emit the layered views beside ``features``.
+
+        ``product_features`` is the full product rows; ``developer_features``
+        is the list of developer-row ids, in ``features`` order (D5, KS117:
+        the rows themselves were an element-for-element copy of the
+        developer layer of ``features`` and made up a large share of every
+        written map). Both are re-derived from the dumped dicts so they
+        reflect any mutation to ``features`` post-construction.
         """
         data = super().model_dump(**kwargs)
         # Strip the input-side aliases (always None post-validation).
         data.pop("developer_features", None)
         data.pop("product_features", None)
-        # Re-derive the layered views on the dumped dicts so they
-        # reflect any mutation to ``features`` post-construction.
         features_dump = data.get("features", [])
-        data["developer_features"] = [
-            f for f in features_dump if f.get("layer", "developer") == "developer"
-        ]
+        data["developer_features"] = developer_feature_ids(features_dump)
         data["product_features"] = [
             f for f in features_dump if f.get("layer") == "product"
         ]
