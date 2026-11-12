@@ -31,7 +31,10 @@ module, a route inside a module, anything read from the repository
 root — stays with the repository even when every file it owns lies
 inside a module directory. That cannot be told from paths, so Stage 2,
 which has the anchors, records it (:func:`record_module_scopes`) and
-later stages read the record (:class:`ModuleScopes`). The consequence
+later stages read the record (:class:`ModuleScopes`). A row of the
+residual stage is made of files no anchor claimed, so it is a row the
+repository had too: the orchestrator adds its files to the record
+(:func:`with_older_rows`). The consequence
 is the guarantee the rules exist for: the rows a repository had before
 its nested module was read keep their ruler, their flow names and so
 their flow ids.
@@ -62,6 +65,11 @@ from wystan.pipeline_v2.extractors.base import AnchorCandidate
 def _is_under(path: str, directory: str) -> bool:
     """``True`` when ``path`` is ``directory`` or lies below it."""
     return path == directory or path.startswith(directory + "/")
+
+
+def _parent_dir(path: str) -> str:
+    """Directory part of a POSIX path (``""`` for a top-level entry)."""
+    return path.rpartition("/")[0]
 
 
 def _common_dir(paths: Sequence[str]) -> str | None:
@@ -194,9 +202,10 @@ class ModuleScopes:
     # Module root -> files owned, at the end of Stage 2, by the rows
     # built from that module's scoped anchors alone (the new rows).
     new_files: Mapping[str, frozenset[str]] = field(default_factory=dict)
-    # Files inside those module roots that a row read WITHOUT the
-    # nested rule owns at the end of Stage 2. A row holding one of them
-    # is an older row, whatever else it holds.
+    # Files inside those module roots owned by a row the nested rule
+    # did not create: a Stage 2 row read without it, or a row of the
+    # residual stage (:func:`with_older_rows`). A row holding one of
+    # them is an older row, whatever else it holds.
     old_files: frozenset[str] = frozenset()
 
     def __bool__(self) -> bool:
@@ -241,17 +250,63 @@ def record_module_scopes(
             new_files.setdefault(scope, set()).update(paths)
     if not new_files:
         return NO_MODULE_SCOPES
-    recorded = {path for files in new_files.values() for path in files}
-    old_files = {
-        path
-        for _name, paths in rows for path in paths
-        if path not in recorded
-        and any(_is_under(path, root) for root in new_files)
-    }
-    return ModuleScopes(
+    scopes = ModuleScopes(
         new_files={root: frozenset(new_files[root]) for root in sorted(new_files)},
-        old_files=frozenset(old_files),
     )
+    return _add_older_files(scopes, [paths for _name, paths in rows])
+
+
+def _files_inside_modules(
+    owned_paths: Iterable[Sequence[str]], module_scopes: ModuleScopes,
+) -> set[str]:
+    """The files of ``owned_paths`` that lie under a recorded module root
+    and are not a file of a new row.
+
+    Each file's directory is resolved through one :class:`ModuleLocator`
+    (an ancestor walk, remembered per directory), so the cost is linear
+    in the files and their distinct directories and does not grow with
+    the number of modules: a repository with thousands of manifests is
+    not files x modules.
+    """
+    locator = ModuleLocator(module_scopes.new_files)
+    recorded = {
+        path for files in module_scopes.new_files.values() for path in files
+    }
+    return {
+        path
+        for paths in owned_paths for path in paths
+        if path not in recorded and locator.enclosing(_parent_dir(path))
+    }
+
+
+def with_older_rows(
+    module_scopes: ModuleScopes | None,
+    owned_paths: Iterable[Sequence[str]],
+) -> ModuleScopes | None:
+    """The record, with the files of rows the nested rule did not create.
+
+    ``owned_paths`` are the files of such rows: every Stage 2 row when
+    the record is first written (the files of new rows are skipped),
+    and later the rows of the residual stage. A residual row is made of
+    files no anchor claimed, so the repository had it before nested
+    modules were read; without this, merged later with a new row, it
+    would pass for a row of the module (it holds a new file and no file
+    of an older Stage 2 row) and lose the repository's ruler and flow
+    names. An empty record, or rows with no file inside a module, give
+    the input back.
+    """
+    if not module_scopes:
+        return module_scopes
+    return _add_older_files(module_scopes, owned_paths)
+
+
+def _add_older_files(
+    module_scopes: ModuleScopes, owned_paths: Iterable[Sequence[str]],
+) -> ModuleScopes:
+    older = _files_inside_modules(owned_paths, module_scopes)
+    if older <= module_scopes.old_files:
+        return module_scopes
+    return replace(module_scopes, old_files=module_scopes.old_files | older)
 
 
 # ── Rule 3: size is judged among the rows of one module scope ───────────────
@@ -425,4 +480,5 @@ __all__ = [
     "qualify_shared_names",
     "record_module_scopes",
     "sparse_below",
+    "with_older_rows",
 ]

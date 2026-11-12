@@ -104,6 +104,7 @@ from wystan.pipeline_v2.scan_meta import (
     workspace_anchor_telemetry as _workspace_anchor_telemetry,
 )
 from wystan.pipeline_v2.llm_health import LlmHealth
+from wystan.pipeline_v2.module_scope import with_older_rows
 from wystan.pipeline_v2.stage_2_reconcile import stage_2_reconcile
 from wystan.pipeline_v2.stage_2_6_membership_closure import (
     run_membership_closure,
@@ -776,6 +777,12 @@ def run_pipeline_v2(
             llm_health=llm_health,
         )
         residual_features = stage4.residual_features
+        # A residual row is not a row of a nested module, also when a
+        # later stage merges it with one: its files are recorded as an
+        # older row's, so it keeps the repository's ruler and flow names.
+        ctx.module_scopes = with_older_rows(
+            ctx.module_scopes, [f.paths for f in residual_features],
+        )
         for f in residual_features:
             log4.emit(
                 f.name,

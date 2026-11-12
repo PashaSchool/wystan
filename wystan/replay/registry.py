@@ -504,6 +504,7 @@ def _run_flows(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_residual(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
+    from wystan.pipeline_v2.module_scope import with_older_rows
     from wystan.pipeline_v2.stage_4_residual import stage_4_residual
 
     ctx = prepare_ctx(state["ctx"], env)
@@ -515,6 +516,12 @@ def _run_residual(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
             llm_health=env.llm_health,
         )
         residual_features = stage4.residual_features
+        # As in the live run: residual rows are older rows for the
+        # stages that read the record of nested-module rows.
+        ctx.module_scopes = with_older_rows(
+            getattr(ctx, "module_scopes", None),
+            [f.paths for f in residual_features],
+        )
         for f in residual_features:
             log4.emit(f.name, f"residual cluster from {len(f.paths)} paths")
         for name in stage4.rejected_names:

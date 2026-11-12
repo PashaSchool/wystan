@@ -3765,7 +3765,9 @@ ENV_OUTPUT_FLAGS = (
 #: ``go.mod`` below the repository root; the rows that exist only because of
 #: it form a module scope (own flow names, own "oversized" ruler, joined by
 #: name only inside it); every row a repository had before is unchanged.
-KEY_SCHEMA_VERSION = 118
+#: KS120 (2026-11-12): the same rule as KS118, rebuilt; 118 and 119 are
+#: skipped because maps of two rejected builds were written under them.
+KEY_SCHEMA_VERSION = 120
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

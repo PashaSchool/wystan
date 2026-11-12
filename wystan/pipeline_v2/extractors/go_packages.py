@@ -74,7 +74,8 @@ Go-shaped repos only (same stack check as ``go_router``): a ``go.mod`` at
 the repository root is not a second way in, so a repository without a
 nested module gets exactly what it got before. The nested rule fires for
 every tracked ``go.mod`` below the repository root and outside the noise
-directories — that manifest is the proof that a Go module lives there,
+directories and the test and fixture trees (``validation.is_test_file``)
+— that manifest is the proof that a Go module lives there,
 whatever the repository's primary stack is. With neither, ``[]`` — never
 raises for the "doesn't apply" case.
 
@@ -88,6 +89,7 @@ from collections import Counter
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from wystan.analyzer.validation import is_test_file
 from wystan.pipeline_v2.extractors._module_roots import (
     REPOSITORY_ROOT,
     ModuleLocator,
@@ -214,6 +216,21 @@ def _bucket_key(parts: tuple[str, ...]) -> tuple[str, str, str] | None:
     return None
 
 
+def _is_product_file(path: str, leaf: str, *, is_nested: bool) -> bool:
+    """``True`` for a file that makes its unit a feature unit.
+
+    A unit holding only test or generated files is never emitted. For
+    the repository-root rule "test" stays what it was (``*_test.go``),
+    so that rule emits what it emitted. The nested rule is new and
+    takes the engine's one definition (``validation.is_test_file``),
+    which also knows test and fixture TREES: ``<module>/mocks/*.go``
+    is not a unit of the product.
+    """
+    if _is_generated_file(leaf):
+        return False
+    return not (is_test_file(path) if is_nested else _is_test_file(leaf))
+
+
 # ── Module-relative classification ──────────────────────────────────────────
 
 # A unit is identified by the root it was bucketed under and its slug, so
@@ -296,8 +313,23 @@ def nested_module_roots(tracked_files: "Iterable[str]") -> frozenset[str]:
     The roots the nested rule reads a layout from. The repository root
     is never one of them: a module there is read by the root rule.
     """
-    roots = manifest_dirs(tracked_files, _MODULE_MANIFEST, _is_excluded_path)
+    roots = manifest_dirs(tracked_files, _MODULE_MANIFEST, _is_not_a_module)
     return roots - {REPOSITORY_ROOT}
+
+
+def _is_not_a_module(manifest_parts: tuple[str, ...]) -> bool:
+    """``True`` for a manifest that does not open a module of the product.
+
+    A ``go.mod`` in a vendored, example or documentation tree
+    (:data:`_EXCLUDED_SEGMENTS`) or in a test or fixture tree is input
+    of a build or of a test, not a module the repository ships. "Test
+    tree" is the engine's one definition, ``validation.is_test_file``
+    (the one the ``route`` extractor filters Stage 1 with), not a list
+    kept here.
+    """
+    return _is_excluded_path(manifest_parts) or is_test_file(
+        "/".join(manifest_parts),
+    )
 
 
 # ── Extractor ───────────────────────────────────────────────────────────────
@@ -346,7 +378,8 @@ class GoPackageExtractor:
         """Group ``.go`` files into units keyed by ``(root, slug)``.
 
         ``real`` flips True once a unit holds a non-test, non-generated
-        file, so test-only / codegen-only directories are dropped later.
+        file (:func:`_is_product_file`), so test-only / codegen-only
+        directories are dropped later.
         """
         units: dict[_UnitKey, dict] = {}
         for rel_path in tracked_files:
@@ -368,8 +401,7 @@ class GoPackageExtractor:
             )
             unit["paths"].add(norm)
             unit["rationale"] = rationale
-            leaf_name = parts[-1]
-            if not _is_test_file(leaf_name) and not _is_generated_file(leaf_name):
+            if _is_product_file(norm, parts[-1], is_nested=bool(root)):
                 unit["real"] = True
         return units
 
