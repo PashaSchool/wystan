@@ -51,6 +51,11 @@ from typing import TYPE_CHECKING, Literal
 from wystan.llm.cost import response_text
 from wystan.pipeline_v2.extractors.base import AnchorCandidate
 from wystan.pipeline_v2.llm_health import LlmHealth
+from wystan.pipeline_v2.module_scope import (
+    ScopeGuard,
+    drop_units_inside_declared_packages,
+    qualify_shared_names,
+)
 
 if TYPE_CHECKING:
     from wystan.models.types import MemberFile
@@ -166,6 +171,16 @@ _SOURCE_PRIORITY: dict[str, int] = {
 """
 
 _LOW_PRIORITY_DEFAULT = 0  # Unknown sources fall below all known ones.
+
+# Sources that read a package from its manifest: the top priority tier.
+# The authors declared the boundary themselves, so a layout unit that
+# lies wholly inside such a package is its interior, not a feature
+# beside it (``module_scope`` rule 2).
+_DECLARED_PACKAGE_PRIORITY = max(_SOURCE_PRIORITY.values())
+_DECLARED_PACKAGE_SOURCES: frozenset[str] = frozenset(
+    source for source, priority in _SOURCE_PRIORITY.items()
+    if priority == _DECLARED_PACKAGE_PRIORITY
+)
 
 
 def _priority(source: str) -> int:
@@ -576,15 +591,19 @@ def _build_merge_groups(
     """
     n = len(candidates)
     uf = _UnionFind(n)
+    # A name joins two candidates only inside one module scope; shared
+    # files (the last rule below) are evidence wherever they are.
+    guard = ScopeGuard(candidates)
     for i in range(n):
         for j in range(i + 1, n):
-            if _should_merge(
+            by_name = not (guard.is_active and guard.are_apart(i, j))
+            if by_name and _should_merge(
                 candidates[i].name,
                 candidates[j].name,
                 threshold=jaccard_threshold,
             ):
                 uf.union(i, j)
-            elif rails_merge and _rails_should_merge(
+            elif by_name and rails_merge and _rails_should_merge(
                 candidates[i].name, candidates[j].name,
             ):
                 uf.union(i, j)
@@ -981,6 +1000,20 @@ def stage_2_reconcile(
             f"{baredir_tele['sample'][:5]}",
         )
 
+    # A nested-module unit that a declared package claims whole is not
+    # a second feature over the same files (``module_scope`` rule 2).
+    # Dropped before the merge so the package's row is exactly the row
+    # it would be had the nested layout not been read.
+    flat, inside_declared = drop_units_inside_declared_packages(
+        flat, _DECLARED_PACKAGE_SOURCES,
+    )
+    if inside_declared:
+        notes_pre.append(
+            f"module-scope: {len(inside_declared)} nested-module unit(s) lie "
+            f"wholly inside a declared package and are not emitted: "
+            f"{inside_declared[:10]}",
+        )
+
     if not flat:
         return Stage2Result(
             features=[],
@@ -1002,6 +1035,7 @@ def stage_2_reconcile(
     # 2) Per group: choose canonical name + assemble DeveloperFeature.
     features: list[DeveloperFeature] = []
     notes: list[str] = list(notes_pre)
+    named_groups: list[tuple[list[AnchorCandidate], str, str | None]] = []
     for group_indices in groups:
         group = [flat[i] for i in group_indices]
         canonical, llm_note = _pick_canonical_name(
@@ -1011,7 +1045,24 @@ def stage_2_reconcile(
         )
         if llm_note:
             notes.append(llm_note)
-        features.append(_build_feature_from_group(group, canonical, llm_note))
+        named_groups.append((group, canonical, llm_note))
+
+    # 2.5) Groups kept apart by module scope can share a name; feature
+    #      names must be unique, so nested-module groups take their
+    #      module's name in front. A no-op without nested modules.
+    unique_names = qualify_shared_names(
+        [group for group, _name, _note in named_groups],
+        [name for _group, name, _note in named_groups],
+    )
+    for (group, canonical, llm_note), unique in zip(named_groups, unique_names):
+        if unique != canonical:
+            # Rename the units themselves, so the bare name is not
+            # reported as a second slug merged into the feature.
+            group = [
+                replace(c, name=unique) if c.name == canonical else c
+                for c in group
+            ]
+        features.append(_build_feature_from_group(group, unique, llm_note))
 
     # 2.8) Schema-only phantom suppression. A merged feature whose ONLY
     #      contributing sources are schema-declaration sources is a bare

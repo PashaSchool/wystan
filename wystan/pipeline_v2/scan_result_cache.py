@@ -3764,7 +3764,11 @@ ENV_OUTPUT_FLAGS = (
 #: KS118 (2026-11-12): ``go-package`` reads the Go layout from every module
 #: root (a tracked ``go.mod``), not only from the repository root, and a
 #: tracked ``go.mod`` activates it; a module in a subdirectory gets anchors.
-KEY_SCHEMA_VERSION = 118
+#: KS119 (2026-11-12): a nested module is a scope: its units join another
+#: anchor by name only inside it, a unit a declared package claims whole is
+#: not emitted, "oversized" is measured per module (Stage 3 chunks, Stage
+#: 8.9), and the name memory key leaves the journey's ordinal out.
+KEY_SCHEMA_VERSION = 119
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
