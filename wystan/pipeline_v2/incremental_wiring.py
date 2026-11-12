@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from wystan.models.types import developer_layer
 from wystan.pipeline_v2.run_logger import StageLogger
 from wystan.pipeline_v2.stage_7_output import write_stage_artifact
 
@@ -299,11 +300,8 @@ def apply_incremental_bookkeeping(
         # Carry forward Stage 6 metrics for untouched features.
         # We mutate the Feature pydantic models via model_dump round-trip
         # so the carry-forward helper can operate on plain dicts.
-        base_feats = (
-            base_scan.get("developer_features")
-            or base_scan.get("features")
-            or []
-        )
+        # KS117: ``developer_features`` holds ids; ``features`` holds the rows.
+        base_feats = developer_layer(base_scan)
         # Mutate features in-place — easier than rebuilding pydantic models.
         feat_payload = [f.model_dump() for f in features]
         carried_count = _carry_forward_metrics(
