@@ -17,6 +17,11 @@ later one; with the id in the key all of them were asked again and many came
 back renamed. The key therefore leaves the id out. Answers stored before that
 change sit under the old key (id included) and are still read, so the change
 itself renames nothing.
+
+Two items with equal evidence are one question with two answers. They do not
+share one key (the second answer would overwrite the first, and the next scan
+would give both items the same name): each has the key of its place among its
+equals, see :mod:`wystan.pipeline_v2.scan_id_order`.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from typing import Any, Callable
 from wystan.cache.backend import CacheKind
 
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
+from wystan.pipeline_v2.scan_id_order import places_among_equals
 
 __all__ = ["NameWriter", "build_name_writer"]
 
@@ -73,20 +79,27 @@ def _batches(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
 _POSITION_FIELD = "id"
 
 
-def _key_of(model_id: str, item: dict[str, Any]) -> str:
+def _key_of(model_id: str, item: dict[str, Any], place: int = 0) -> str:
     payload = {
         "v": _ITEM_CACHE_VERSION, "role": _ITEM_ROLE, "model": model_id,
         "system": _SYSTEM, "item": item,
     }
+    if place:
+        # Only an item that has an equal before it carries its place, so
+        # every other item keeps the key it always had.
+        payload["place_among_equals"] = place
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
 
 
-def _item_key(model_id: str, item: dict[str, Any]) -> str:
-    """Memory key of one item's answer: its evidence, without its position."""
+def _item_key(model_id: str, item: dict[str, Any], place: int = 0) -> str:
+    """Memory key of one item's answer: its evidence, without its position.
+
+    ``place`` tells apart items whose evidence is equal (0 for the first).
+    """
     evidence = {k: v for k, v in item.items() if k != _POSITION_FIELD}
-    return _key_of(model_id, evidence)
+    return _key_of(model_id, evidence, place)
 
 
 def _positional_key(model_id: str, item: dict[str, Any]) -> str:
@@ -94,7 +107,20 @@ def _positional_key(model_id: str, item: dict[str, Any]) -> str:
     return _key_of(model_id, item)
 
 
-def _recall(cache: Any, model_id: str, item: dict[str, Any]) -> tuple[bool, str | None]:
+def _item_keys(model_id: str, items: list[dict[str, Any]]) -> dict[str, str]:
+    """``{item id: memory key}``, one key per item also when evidence is equal."""
+    by_id = {item["id"]: item for item in items}
+    evidence = {item_id: _item_key(model_id, item) for item_id, item in by_id.items()}
+    places = places_among_equals(by_id, evidence.__getitem__)
+    return {
+        item_id: _item_key(model_id, item, places[item_id])
+        for item_id, item in by_id.items()
+    }
+
+
+def _recall(
+    cache: Any, key: str, positional_key: str,
+) -> tuple[bool, str | None]:
     """(known, name) for an item, from either key.
 
     An answer found only under the positional key is copied to the item's
@@ -105,12 +131,12 @@ def _recall(cache: Any, model_id: str, item: dict[str, Any]) -> tuple[bool, str 
     row. Neither key holds an engine version: answers of a build that was
     later rejected stay readable on the machine that ran it.
     """
-    known, name = _remembered(cache, _item_key(model_id, item))
+    known, name = _remembered(cache, key)
     if known:
         return True, name
-    known, name = _remembered(cache, _positional_key(model_id, item))
+    known, name = _remembered(cache, positional_key)
     if known:
-        _remember(cache, _item_key(model_id, item), name)
+        _remember(cache, key, name)
     return known, name
 
 
@@ -152,10 +178,12 @@ def build_name_writer(
 
     def write(items: list[dict[str, Any]]) -> dict[str, str]:
         names: dict[str, str] = {}
-        keys = {item["id"]: _item_key(model_id, item) for item in items}
+        keys = _item_keys(model_id, items)
         unanswered: list[dict[str, Any]] = []
         for item in items:
-            known, name = _recall(cache, model_id, item)
+            known, name = _recall(
+                cache, keys[item["id"]], _positional_key(model_id, item),
+            )
             if not known:
                 unanswered.append(item)
             elif name:

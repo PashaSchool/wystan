@@ -69,6 +69,7 @@ from wystan.pipeline_v2.naming_validator import (
     retry_prohibition,
     validate_name,
 )
+from wystan.pipeline_v2.scan_id_order import scan_id_order
 
 if TYPE_CHECKING:
     from wystan.cache.backend import CacheBackend
@@ -252,6 +253,9 @@ def _refine_cache_key(
 # answer whatever was added elsewhere. Answers cached while the scan id was in
 # the prompt are still read (``_recall``), so this change renames nothing.
 _LOCAL_ID_PREFIX = "u"
+# Why a domain degraded when its reply parsed but answered other ids than
+# the ones asked.
+DEGRADED_ANSWER_IDS_UNKNOWN = "answer_ids_unknown"
 
 
 def _content_order_key(row: dict[str, Any]) -> str:
@@ -262,17 +266,25 @@ def _content_order_key(row: dict[str, Any]) -> str:
     )
 
 
-def _local_ids(payloads: list[dict[str, Any]]) -> dict[str, str]:
-    """``{scan id: id used in the prompt}`` for one domain batch.
+def _in_content_order(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The rows in the order of their own content.
 
-    Rows are numbered in the order of their own content. Two rows with the
-    same content keep their list order: they are the same question, so
-    either numbering gives the same prompt.
+    Rows with the same content are one question with as many answers as
+    rows; they follow each other in the order of their scan ids, never in
+    list order, so each journey gets the same answer on the next scan
+    (see :mod:`wystan.pipeline_v2.scan_id_order`).
     """
-    ordered = sorted(payloads, key=_content_order_key)
+    return sorted(
+        payloads,
+        key=lambda row: (_content_order_key(row), scan_id_order(row["id"])),
+    )
+
+
+def _local_ids(payloads: list[dict[str, Any]]) -> dict[str, str]:
+    """``{scan id: id used in the prompt}`` for one domain batch."""
     return {
         row["id"]: f"{_LOCAL_ID_PREFIX}{n}"
-        for n, row in enumerate(ordered, start=1)
+        for n, row in enumerate(_in_content_order(payloads), start=1)
     }
 
 
@@ -280,8 +292,10 @@ def _with_local_ids(
     payloads: list[dict[str, Any]], local_ids: dict[str, str],
 ) -> list[dict[str, Any]]:
     """The rows as the model sees them: local ids, in content order."""
-    ordered = sorted(payloads, key=_content_order_key)
-    return [{**row, "id": local_ids[row["id"]]} for row in ordered]
+    return [
+        {**row, "id": local_ids[row["id"]]}
+        for row in _in_content_order(payloads)
+    ]
 
 
 def _by_scan_id(
@@ -988,6 +1002,13 @@ def _compute_domain(
             result.degraded_reason = "json_parse_failed"
             return result
         parsed = _by_scan_id(parsed_or_none, local_ids)
+        if not parsed:
+            # The reply names none of the journeys it was asked about. It
+            # is invalid like an unparsed one: nothing is applied or
+            # stored, and the domain is counted as degraded instead of as
+            # refined with nothing in it.
+            result.degraded_reason = DEGRADED_ANSWER_IDS_UNKNOWN
+            return result
         # MISS → persist the parsed rows for future runs. Degrades (cost cap /
         # parse failure / empty response) returned above are NEVER cached.
         # Store a COPY: the retry path below mutates parsed[uf_id] in place,
@@ -995,7 +1016,7 @@ def _compute_domain(
         # flush) would silently bake the retry's correction into the call-1
         # artifact (audit IMPORTANT, 2026-07-02). Shallow suffices — the later
         # mutation replaces top-level rows, never mutates a nested row dict.
-        if key1 is not None and cache is not None and parsed:
+        if key1 is not None and cache is not None:
             _cache_put_parsed(cache, key1, _by_local_id(parsed, local_ids))
 
     # ── Anti-hallucination name validation (naming review №2) ──
