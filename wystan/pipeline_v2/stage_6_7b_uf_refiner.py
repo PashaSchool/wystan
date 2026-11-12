@@ -244,57 +244,59 @@ def _refine_cache_key(
 # again with nothing but their ids shifted, cache hits 74 -> 1, and the new
 # names moved journeys in every later stage).
 #
-# So nothing a domain is asked with comes from the scan's numbering:
+# So no ordinal reaches the prompt or the key:
 #   * a journey is named by its place in its own domain batch (``u1``...),
-#   * that place is taken from the journey's own prompt row, not from the
-#     scan's list order (which is the numbering again),
-# and the answer is mapped back to scan ids. A domain whose journeys did not
-# change therefore has the same prompt, the same key and the same remembered
-# answer whatever was added elsewhere. Answers cached while the scan id was in
-# the prompt are still read (``_recall``), so this change renames nothing.
+#   * the rows keep the order every earlier build sent them in: the order
+#     of their scan ids, read as numbers (never the list order of the call),
+# and the answer is mapped back to scan ids. Only the ORDER of a domain's own
+# ids is read, and that does not move when journeys are added elsewhere: ids
+# are dealt in the order of (domain, resource, intent), so between two
+# journeys of one domain only that domain's own journeys decide who is first.
+# A domain whose journeys did not change therefore has the same prompt, the
+# same key and the same remembered answer whatever was added elsewhere. A
+# journey added INTO a domain changes that domain's question, as any change
+# of its journeys does, and the domain is asked again.
+#
+# Why the rows are not put in an order of their own (by content): the model
+# answers a reordered batch differently. Measured on two repositories asked
+# with an empty memory, 119 rows in 28 reordered domains came back with 57
+# other names, against 4 of 33 where only the id tokens differed, and the
+# other names cost journeys in later stages. The question is therefore the
+# earlier builds' question with nothing but the id tokens replaced. Answers
+# cached while the scan id was in the prompt are still read (``_recall``), so
+# this change renames nothing.
 _LOCAL_ID_PREFIX = "u"
 # Why a domain degraded when its reply parsed but answered other ids than
 # the ones asked.
 DEGRADED_ANSWER_IDS_UNKNOWN = "answer_ids_unknown"
 
 
-def _content_order_key(row: dict[str, Any]) -> str:
-    """What a prompt row says about its journey, without the scan id."""
-    return json.dumps(
-        {k: v for k, v in row.items() if k != "id"},
-        sort_keys=True, ensure_ascii=False,
-    )
+def _in_scan_order(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The rows in the order of their scan ids, whatever order they came in.
 
-
-def _in_content_order(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The rows in the order of their own content.
-
-    Rows with the same content are one question with as many answers as
-    rows; they follow each other in the order of their scan ids, never in
-    list order, so each journey gets the same answer on the next scan
-    (see :mod:`wystan.pipeline_v2.scan_id_order`).
+    This is the order builds before local ids sent them in (the scan lists
+    its journeys by ordinal). The ids are compared, never written: two
+    scans that number a domain's journeys differently but in the same
+    order give the same rows in the same places.
     """
-    return sorted(
-        payloads,
-        key=lambda row: (_content_order_key(row), scan_id_order(row["id"])),
-    )
+    return sorted(payloads, key=lambda row: scan_id_order(row["id"]))
 
 
 def _local_ids(payloads: list[dict[str, Any]]) -> dict[str, str]:
     """``{scan id: id used in the prompt}`` for one domain batch."""
     return {
         row["id"]: f"{_LOCAL_ID_PREFIX}{n}"
-        for n, row in enumerate(_in_content_order(payloads), start=1)
+        for n, row in enumerate(_in_scan_order(payloads), start=1)
     }
 
 
 def _with_local_ids(
     payloads: list[dict[str, Any]], local_ids: dict[str, str],
 ) -> list[dict[str, Any]]:
-    """The rows as the model sees them: local ids, in content order."""
+    """The rows as the model sees them: local ids, in scan order."""
     return [
         {**row, "id": local_ids[row["id"]]}
-        for row in _in_content_order(payloads)
+        for row in _in_scan_order(payloads)
     ]
 
 
