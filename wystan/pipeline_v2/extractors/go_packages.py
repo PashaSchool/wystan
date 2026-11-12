@@ -33,14 +33,50 @@ Path-ownership rule (documented choice):
     bounds the anchor count and keeps each anchor a single coherent
     package.
 
+Module roots (why the layout is not read from the repository root only):
+  * The conventions above are written relative to the root of a Go
+    MODULE, the directory holding ``go.mod``. A repository whose Go code
+    is one module in a subdirectory (``<dir>/go.mod`` beside a front
+    end), or that holds several modules, has no file whose
+    repository-relative path starts with ``cmd``/``internal``/…; read
+    from the repository root alone, such a module gets no anchor at all.
+  * So there are two rules. The REPOSITORY-ROOT rule is the historical
+    one, untouched: same gate, same buckets, same names, same order, and
+    its anchors carry ``scope == ""``. The NESTED rule is the addition:
+    a file the root rule did not bucket is offered to every directory
+    below the repository root that holds a tracked ``go.mod`` and
+    encloses it, outermost first; the first whose layout gives it a
+    bucket owns it, and the anchor carries that directory as ``scope``.
+    ``scope != ""`` therefore means exactly "a unit this extractor did
+    not emit before nested modules were read", which is what later
+    stages need to leave every older row as it was (``module_scope``).
+  * A top-level directory that holds a ``go.mod`` and Go files is the
+    root rule's "top-level package" on a Go repository, as before, and
+    shares its unit with ``cmd/<same name>`` as before.
+  * A nested module's own root package (``<module>/main.go``), where the
+    root rule does not apply, anchors under the module directory's name.
+  * Names. A unit of the root rule keeps its bare slug. A unit of the
+    nested rule keeps its bare slug too when no other unit of this
+    extractor has it; when two units share a slug (two modules each
+    with ``internal/auth``), every nested one is qualified with its
+    module: ``<module dir name>-<unit>``, then ``<module path>-<unit>``,
+    then a number — the first that is free. Units of different modules
+    are never merged into one anchor.
+  * Discovery reads only the tracked-file list (see ``_module_roots``).
+
 Noise exclusion: ``vendor/``, ``testdata/``, ``examples/`` / ``example/``,
 ``docs/``, ``.git/``, ``third_party/``, ``node_modules/`` are dropped, as
 are directories whose ONLY ``.go`` files are ``*_test.go`` (test-only) or
 generated (``*.pb.go`` / ``*_gen.go``).
 
-Activation gate: only fires on Go-shaped repos (same check as
-``go_router``). Returns ``[]`` on everything else — never raises for the
-"doesn't apply" case.
+Activation gate, one per rule. The repository-root rule fires on
+Go-shaped repos only (same stack check as ``go_router``): a ``go.mod`` at
+the repository root is not a second way in, so a repository without a
+nested module gets exactly what it got before. The nested rule fires for
+every tracked ``go.mod`` below the repository root and outside the noise
+directories — that manifest is the proof that a Go module lives there,
+whatever the repository's primary stack is. With neither, ``[]`` — never
+raises for the "doesn't apply" case.
 
 No LLM. No network. Pure file-system index walk + path arithmetic.
 """
@@ -48,9 +84,17 @@ No LLM. No network. Pure file-system index walk + path arithmetic.
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+from collections import Counter
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from wystan.pipeline_v2.extractors._module_roots import (
+    REPOSITORY_ROOT,
+    ModuleLocator,
+    first_free_name,
+    manifest_dirs,
+    qualified_unit_names,
+)
 from wystan.pipeline_v2.extractors._util import is_any_stack, posix, slugify
 from wystan.pipeline_v2.extractors.base import AnchorCandidate
 
@@ -78,6 +122,21 @@ _CONVENTION_PREFIXES: tuple[tuple[str, str], ...] = (
     ("modules", "go module group"),
     ("apps", "go app group"),
 )
+
+# The manifest that marks the root of a Go module. Its directory, not
+# the repository root, is what the layout conventions are relative to.
+_MODULE_MANIFEST = "go.mod"
+
+# Rationale of the anchor for a nested module's own root package.
+_MODULE_ROOT_RATIONALE = "go module root package"
+
+# Above this many anchors the extractor is probably over-splitting; it
+# only warns. 60 is roughly twice the unit count of the largest
+# single-module Go repository in the regression corpus.
+_OVERSPLIT_WARN_THRESHOLD = 60
+
+# A file of a top-level package is exactly ``<dir>/<file>.go``.
+_TOP_LEVEL_PACKAGE_PARTS = 2
 
 # Path segments that mark a directory as noise — never a feature.
 _EXCLUDED_SEGMENTS = frozenset({
@@ -145,7 +204,7 @@ def _bucket_key(parts: tuple[str, ...]) -> tuple[str, str, str] | None:
 
     # Top-level repo-root package: own files only (non-recursive). Such a
     # file has exactly two parts: ("<dir>", "file.go").
-    if len(parts) == 2:
+    if len(parts) == _TOP_LEVEL_PACKAGE_PARTS:
         leaf = parts[0]
         return slugify(leaf), leaf, "go top-level package"
 
@@ -153,6 +212,92 @@ def _bucket_key(parts: tuple[str, ...]) -> tuple[str, str, str] | None:
     # nested package, which surfaces (if at all) via its own top-level
     # entry. We intentionally do NOT claim it to keep anchors coherent.
     return None
+
+
+# ── Module-relative classification ──────────────────────────────────────────
+
+# A unit is identified by the root it was bucketed under and its slug, so
+# equal slugs in different modules stay different units.
+_UnitKey = tuple[str, str]
+
+
+def _module_bucket(
+    parts: tuple[str, ...], module_root: str,
+) -> tuple[str, str, str] | None:
+    """Classify a file relative to the nested module root that encloses it.
+
+    The same layout rule as :func:`_bucket_key`, applied to the path
+    below ``module_root``. A file directly in the module directory is
+    the module's root package: it anchors under the directory's name.
+    """
+    root_parts = tuple(module_root.split("/"))
+    below = parts[len(root_parts):]
+    if len(below) == 1:
+        leaf = root_parts[-1]
+        return slugify(leaf), leaf, _MODULE_ROOT_RATIONALE
+    return _bucket_key(below)
+
+
+def _place(
+    parts: tuple[str, ...], locator: ModuleLocator, root_rule_active: bool,
+) -> tuple[str, tuple[str, str, str]] | None:
+    """``(root, bucket)``: the rule and root that bucket a file.
+
+    The repository-root rule is tried first and its answer is final, so
+    every file it claims is claimed exactly as before nested modules
+    were read (``root`` is then :data:`REPOSITORY_ROOT`, also for a
+    top-level directory that holds a ``go.mod``: that unit existed
+    before, under that name, and may share it with ``cmd/<name>``).
+    Only a file the root rule leaves — or every file, when the root rule
+    is off because the repository is not Go-shaped — goes to the nested
+    modules that enclose it, outermost first.
+    """
+    if root_rule_active:
+        key = _bucket_key(parts)
+        if key is not None:
+            return REPOSITORY_ROOT, key
+    for module_root in locator.enclosing("/".join(parts[:-1])):
+        key = _module_bucket(parts, module_root)
+        if key is not None:
+            return module_root, key
+    return None
+
+
+def _anchor_names(keys: list[_UnitKey]) -> dict[_UnitKey, str]:
+    """Anchor name per unit; equal slugs of different modules stay apart.
+
+    Repository-root units always keep their bare slug (that is what the
+    extractor emitted before modules were considered). A nested unit
+    keeps its bare slug when it is the only unit with it; otherwise it
+    is qualified with its module. ``keys`` is processed in sorted order
+    so the outcome does not depend on the order files were listed in.
+    """
+    shared = Counter(slug for _root, slug in keys)
+    names: dict[_UnitKey, str] = {}
+    contested: list[_UnitKey] = []
+    for key in sorted(keys):
+        root, slug = key
+        if root == REPOSITORY_ROOT or shared[slug] == 1:
+            names[key] = slug
+        else:
+            contested.append(key)
+    taken = set(names.values())
+    next_ordinal: dict[str, int] = {}
+    for key in contested:
+        name = first_free_name(qualified_unit_names(*key), taken, next_ordinal)
+        names[key] = name
+        taken.add(name)
+    return names
+
+
+def nested_module_roots(tracked_files: "Iterable[str]") -> frozenset[str]:
+    """Directories below the repository root that hold a Go module.
+
+    The roots the nested rule reads a layout from. The repository root
+    is never one of them: a module there is read by the root rule.
+    """
+    roots = manifest_dirs(tracked_files, _MODULE_MANIFEST, _is_excluded_path)
+    return roots - {REPOSITORY_ROOT}
 
 
 # ── Extractor ───────────────────────────────────────────────────────────────
@@ -163,69 +308,103 @@ class GoPackageExtractor:
 
     Implements the :class:`AnchorExtractor` Protocol. Emits structural
     anchors for ``cmd/``, ``internal/``, ``pkg/``, ``modules/``,
-    ``apps/`` first-level dirs plus top-level repo-root packages. Pure
+    ``apps/`` first-level dirs plus top-level packages, read from the
+    repository root and from every enclosing Go module root. Pure
     structure — no file contents are read, no LLM, no network.
     """
 
     name = "go-package"
 
     def extract(self, ctx: "ScanContext") -> list[AnchorCandidate]:
-        if not _is_go_repo(ctx):
+        # Two gates, one per rule (see the module docstring). A manifest
+        # at the repository root opens neither: the root rule keeps its
+        # historical stack gate, the nested rule needs a module below
+        # the root.
+        root_rule_active = _is_go_repo(ctx)
+        nested_roots = nested_module_roots(ctx.tracked_files)
+        if not root_rule_active and not nested_roots:
             return []
 
-        # slug → {"paths": set, "leaf": str, "rationale": str, "real": bool}
-        # ``real`` flips True once we see a non-test, non-generated file so
-        # test-only / codegen-only dirs are dropped at the end.
-        buckets: dict[str, dict] = defaultdict(
-            lambda: {"paths": set(), "leaf": "", "rationale": "", "real": False},
+        units = self._collect_units(
+            ctx.tracked_files, ModuleLocator(nested_roots), root_rule_active,
         )
+        out = self._build_anchors(units)
 
-        for rel_path in ctx.tracked_files:
+        if len(out) > _OVERSPLIT_WARN_THRESHOLD:
+            logger.warning(
+                "go-package emitted %d anchors (>%d) — possible over-split",
+                len(out),
+                _OVERSPLIT_WARN_THRESHOLD,
+            )
+        return out
+
+    @staticmethod
+    def _collect_units(
+        tracked_files: list[str], locator: ModuleLocator,
+        root_rule_active: bool,
+    ) -> dict[_UnitKey, dict]:
+        """Group ``.go`` files into units keyed by ``(root, slug)``.
+
+        ``real`` flips True once a unit holds a non-test, non-generated
+        file, so test-only / codegen-only directories are dropped later.
+        """
+        units: dict[_UnitKey, dict] = {}
+        for rel_path in tracked_files:
             if not rel_path.endswith(".go"):
                 continue
             norm = posix(rel_path)
             parts = tuple(norm.split("/"))
             if _is_excluded_path(parts):
                 continue
-
-            key = _bucket_key(parts)
-            if key is None:
+            placed = _place(parts, locator, root_rule_active)
+            if placed is None:
                 continue
-            slug, leaf, rationale = key
+            root, (slug, _leaf, rationale) = placed
             if not slug:
                 continue
-
-            bucket = buckets[slug]
-            bucket["paths"].add(norm)
-            bucket["leaf"] = leaf
-            bucket["rationale"] = rationale
+            unit = units.setdefault(
+                (root, slug),
+                {"paths": set(), "rationale": rationale, "real": False},
+            )
+            unit["paths"].add(norm)
+            unit["rationale"] = rationale
             leaf_name = parts[-1]
             if not _is_test_file(leaf_name) and not _is_generated_file(leaf_name):
-                bucket["real"] = True
+                unit["real"] = True
+        return units
 
+    def _build_anchors(
+        self, units: dict[_UnitKey, dict],
+    ) -> list[AnchorCandidate]:
+        """One anchor per real unit; repository-root units come first.
+
+        A unit whose only ``.go`` files are tests or generated is never
+        a feature, and is left out before names are decided so it cannot
+        force a real unit to be qualified.
+        """
+        real = {key: unit for key, unit in units.items() if unit["real"]}
+        names = _anchor_names(list(real))
+        # Units of the repository-root rule keep their historical
+        # (first-seen) order; the others follow, sorted, so the list is
+        # stable.
+        ordered = [key for key in real if key[0] == REPOSITORY_ROOT]
+        ordered += sorted(key for key in real if key[0] != REPOSITORY_ROOT)
         out: list[AnchorCandidate] = []
-        for slug, data in buckets.items():
-            if not data["real"]:
-                # Directory whose only .go files are tests or generated —
-                # never a feature.
-                continue
-            paths = tuple(sorted(data["paths"]))
+        for key in ordered:
+            unit = real[key]
             out.append(
                 AnchorCandidate(
-                    name=slug,
-                    paths=paths,
+                    name=names[key],
+                    paths=tuple(sorted(unit["paths"])),
                     source=self.name,
                     confidence_self=_STRUCTURAL_CONFIDENCE,
-                    rationale=data["rationale"],
+                    rationale=unit["rationale"],
+                    # The root the layout was read from: later stages
+                    # treat the name as unique inside it only.
+                    scope=key[0],
                 ),
-            )
-
-        if len(out) > 60:
-            logger.warning(
-                "go-package emitted %d anchors (>60) — possible over-split",
-                len(out),
             )
         return out
 
 
-__all__ = ["GoPackageExtractor"]
+__all__ = ["GoPackageExtractor", "nested_module_roots"]
