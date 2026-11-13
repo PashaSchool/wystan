@@ -17,13 +17,18 @@ a same-stem models file joins it: same membership, same rungs, same
 refusals. Only that one group: other segments whose routes resolved to the
 same file add nothing. No route anchor for the group, or no born row: the
 anchors are returned as they are, the same list object.
+
+The grown anchors are seen only where a born row is concerned: when a born
+row is classified, and when the mint bar is judged for an anchor a born row
+was classified to. Every other row decides as without the split
+(:class:`BornScopedMintable`).
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping
 
 if TYPE_CHECKING:
     from wystan.pipeline_v2.spine_anchors import SpineAnchor
@@ -74,4 +79,54 @@ def _group_anchor(
                                      a.canonical_id))
 
 
-__all__ = ["with_born_row_files"]
+def born_view_of(
+    winner: "SpineAnchor | None", originals: Mapping[str, "SpineAnchor"],
+) -> "SpineAnchor | None":
+    """The anchor as every other rung knows it, for a winner a born row was
+    classified to through a grown copy (same id, the engine's own files)."""
+    if winner is None:
+        return None
+    return originals.get(winner.canonical_id, winner)
+
+
+class BornScopedMintable(set):
+    """The minting anchors, as each row of the fold ladder may see them.
+
+    An anchor that mints only because born rows were classified to it (its
+    winners are all born rows, or a born row's rung minted it on demand) is
+    a capability of those rows: a row the split did not bear decides as if
+    it were not there, so its candidates and tie-breaks stay what they are
+    without the split (``for_row``). Everything else is an ordinary set:
+    membership, iteration and size follow the row being decided; ``add``
+    records who made an anchor mintable. ``for_row(None)`` ends the ladder:
+    every anchor is seen again."""
+
+    def __init__(self, cids: Iterable[str], born_only: Iterable[str]) -> None:
+        super().__init__(cids)
+        self.born_only = set(born_only)
+        self._row_is_born: bool | None = None
+
+    def for_row(self, is_born: bool | None) -> None:
+        self._row_is_born = is_born
+
+    def _hidden(self, cid: str) -> bool:
+        return self._row_is_born is False and cid in self.born_only
+
+    def __contains__(self, cid: object) -> bool:
+        return super().__contains__(cid) and not self._hidden(cid)  # type: ignore[arg-type]
+
+    def __iter__(self) -> Iterator[str]:
+        return (cid for cid in list(super().__iter__()) if not self._hidden(cid))
+
+    def __len__(self) -> int:
+        return sum(1 for _cid in self)
+
+    def add(self, cid: str) -> None:
+        if self._row_is_born and not super().__contains__(cid):
+            self.born_only.add(cid)  # a born row's own on-demand mint
+        elif self._row_is_born is False:
+            self.born_only.discard(cid)  # minted on another row's evidence
+        super().add(cid)
+
+
+__all__ = ["BornScopedMintable", "born_view_of", "with_born_row_files"]
