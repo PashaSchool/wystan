@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from wystan.pipeline_v2.route_group_split import (
     SKIP_DANGLING_REFERENCE,
+    SKIP_UNDO_INCOMPLETE,
     FlowMove,
     MoveCycle,
     MoveKey,
@@ -66,11 +67,14 @@ class _RouteSplit:
 class RouteSplitLedger:
     """The stage's route-group splits and the flow moves they made."""
 
-    def __init__(self) -> None:
+    def __init__(self, features: list["Feature"]) -> None:
         self._splits: list[_RouteSplit] = []
         self._moves: dict[MoveKey, FlowMove] = {}
         self._children: dict[int, list["Feature"]] = {}
         self._added: dict[int, _Added] = {}
+        # Where each stage-start row stood, so an undone parent that a later
+        # step removed goes back to its place.
+        self._order = {id(f): i for i, f in enumerate(features)}
 
     # ── during the stage ────────────────────────────────────────────────
 
@@ -119,6 +123,14 @@ class RouteSplitLedger:
         self._splits.append(split)
         return split
 
+    def is_held_parent(self, row: "Feature") -> bool:
+        """*row* is the parent of a route-group split and still holds a file
+        (owned or not) or a flow: husk cleanup must not drop it."""
+        if not any(s.source is row for s in self._splits):
+            return False
+        return bool(getattr(row, "paths", None) or getattr(row, "member_files", None)
+                    or getattr(row, "flows", None))
+
     def record_moves(self, split: _RouteSplit, moves: list[FlowMove]) -> None:
         split.moves.extend(moves)
         for move in moves:
@@ -127,7 +139,7 @@ class RouteSplitLedger:
     # ── at the end of the stage ─────────────────────────────────────────
 
     def settle(
-        self, features: list["Feature"], result: Any,
+        self, features: list["Feature"], result: Any, used_names: set[str],
     ) -> dict[MoveKey, FlowMove]:
         """The stage's moves, closed, once no reference can dangle.
 
@@ -141,7 +153,7 @@ class RouteSplitLedger:
             broken = self._first_dangling(closed, features)
             if broken is None:
                 return closed
-            self._undo(broken, features, result)
+            self._undo(broken, features, _UndoContext(result, used_names))
 
     def _first_dangling(
         self, closed: dict[MoveKey, FlowMove], features: list["Feature"],
@@ -161,15 +173,21 @@ class RouteSplitLedger:
         return None
 
     def _undo(
-        self, split: _RouteSplit, features: list["Feature"], result: Any,
+        self, split: _RouteSplit, features: list["Feature"], ctx: "_UndoContext",
     ) -> None:
-        """Put *split* back with every split made under it."""
+        """Put *split* back with every split made under it: the parent as
+        it was, in the feature list, and every name the splits reserved
+        free again."""
+        result = ctx.result
         under = self._rows_under(split)
         undone = [s for s in self._splits
                   if s is split or id(s.source) in under]
         for later in reversed(undone):
             self._restore(later)
+        ctx.used_names.difference_update(
+            row.name for s in undone for row in s.born)
         features[:] = [f for f in features if id(f) not in under]
+        self._put_back(split.source, features)
         # Without the split the parent is still an oversized row the stage
         # evaluated; every other count it and the rows under it added goes.
         self._take_back(id(split.source), result, keep=_STILL_EVALUATED)
@@ -184,6 +202,19 @@ class RouteSplitLedger:
             "files": split.files,
             "route_sites": split.route_sites,
         })
+        missing = _missing_after_undo(split)
+        if missing:
+            result.route_group_skipped.append({
+                "row": split.source.name, "reason": SKIP_UNDO_INCOMPLETE,
+                **missing})
+
+    def _put_back(self, parent: "Feature", features: list["Feature"]) -> None:
+        """Insert *parent* where it stood when a later step removed it."""
+        if any(f is parent for f in features):
+            return
+        place = self._order.get(id(parent), len(features))
+        at = sum(1 for f in features if self._order.get(id(f), place + 1) < place)
+        features.insert(at, parent)
 
     def _rows_under(self, split: _RouteSplit) -> set[int]:
         """Ids of every row born by *split* or by a split under it."""
@@ -220,6 +251,28 @@ class RouteSplitLedger:
             setattr(result, name, kept)
         for floor_key in added.floors:
             result.floor_by_feature.pop(floor_key, None)
+
+
+@dataclass(frozen=True)
+class _UndoContext:
+    result: Any
+    used_names: set[str]
+
+
+def _missing_after_undo(split: _RouteSplit) -> dict[str, int]:
+    """Counts of what the restored parent lacks against itself before the
+    split (files listed, members, flow ids); empty when it is whole."""
+    now, then = split.source, split.before
+    flow_ids = [flow_id for _flow, flow_id, _primary in split.flow_states]
+    missing = {
+        "files_missing": len(set(then.paths or []) - set(now.paths or [])),
+        "members_missing": len(
+            {m.path for m in then.member_files or []}
+            - {m.path for m in now.member_files or []}),
+        "flows_missing": len(
+            set(flow_ids) - {getattr(f, "id", None) for f in now.flows or []}),
+    }
+    return missing if any(missing.values()) else {}
 
 
 def _key(move: FlowMove) -> MoveKey:

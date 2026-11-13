@@ -195,6 +195,7 @@ from typing import TYPE_CHECKING, Any
 from wystan.pipeline_v2.route_group_ledger import RouteSplitLedger
 from wystan.pipeline_v2.route_group_split import (
     ROUTE_GROUP_DOMAIN_PREFIX,
+    SKIP_DANGLING_REFERENCE,
     SKIP_MOVE_CYCLE,
     FlowMove,
     MoveKey,
@@ -567,6 +568,17 @@ def _is_enabled() -> bool:
 
 
 # ── Owned-file model (mirrors eval/cold_eval._owned_file_set) ────────────────
+
+
+def _member_owned_paths(feature: "Feature") -> list[str]:
+    """The files *feature* owns by its members (``primary`` or an owning
+    role), without :func:`_owned_paths`' fallback to ``paths``."""
+    return [
+        m.path for m in (getattr(feature, "member_files", None) or [])
+        if isinstance(getattr(m, "path", None), str)
+        and (getattr(m, "primary", False)
+             or getattr(m, "role", None) in ("anchor", "owner"))
+    ]
 
 
 def _owned_paths(feature: "Feature") -> list[str]:
@@ -1478,9 +1490,12 @@ def _split_one_feature(
     # Route-group rows arrive already named (the URL segment); a directory
     # domain is named from its leaf by ``_slug`` below.
     is_route_plan = False
-    if not domains and route_split is not None:
+    # The route-group plan sees only the files the row owns by its members,
+    # never the ``paths`` fallback: a row owning none is no source of it.
+    route_owned = _member_owned_paths(source)
+    if not domains and route_split is not None and len(route_owned) > cut:
         plan = plan_route_group_split(
-            owned, route_split, parent_name=source.name,
+            route_owned, route_split, parent_name=source.name,
             used_names=used_names,
             other_rows=_other_rows(source, rows_owned or {}),
             max_domains=max_domains,
@@ -1589,10 +1604,11 @@ def _mint_route_group_rows(
     domains, result = plan.domains, ctx.result
     planned, unmoved = _planned_flow_moves(source, domains)
     route_sites = len(ctx.route_split.route_sites or ())
-    if ctx.ledger.would_cycle([move for _flow, move in planned]):
+    refusal = _refusal(source, planned, ctx.ledger)
+    if refusal:
         ctx.used_names.difference_update(domains)  # reserved, never minted
         result.route_group_skipped.append({
-            "row": source.name, "reason": SKIP_MOVE_CYCLE,
+            "row": source.name, "reason": refusal,
             "files": len(_owned_paths(source)), "route_sites": route_sites,
         })
         return None
@@ -1631,6 +1647,28 @@ def _mint_route_group_rows(
             sample["flows_unmoved"] = unmoved
         result.split_sample.append(sample)
     return minted
+
+
+def _refusal(
+    source: "Feature", planned: list[tuple[Any, FlowMove]],
+    ledger: RouteSplitLedger,
+) -> str | None:
+    """Why the split must not be made, decided before anything is minted:
+    its moves would lead back to an id they started from, or an id that
+    flows sharing it would leave for two rows, with none staying, so its
+    edges could follow neither (the end-of-stage invariant would undo the
+    split, after later rows were named around it)."""
+    if ledger.would_cycle([move for _flow, move in planned]):
+        return SKIP_MOVE_CYCLE
+    moving = {id(flow) for flow, _move in planned}
+    staying = {getattr(f, "id", None) for f in getattr(source, "flows", None) or []
+               if id(f) not in moving}
+    ends: dict[str, set[str]] = defaultdict(set)
+    for _flow, move in planned:
+        ends[move.old_id].add(move.new_id)
+    if any(len(end) > 1 and old_id not in staying for old_id, end in ends.items()):
+        return SKIP_DANGLING_REFERENCE
+    return None
 
 
 def _release_moved_files(source: "Feature", moved: set[str]) -> None:
@@ -1812,7 +1850,7 @@ def subdecompose_oversized_features(
     split_sources: list["Feature"] = []
     split_source_ids: set[int] = set()
     # Route-group splits and their flow moves, settled at the end.
-    ledger = RouteSplitLedger()
+    ledger = RouteSplitLedger(features)
     # Seed the worklist with eligible (non-prior-output) developer features.
     worklist: list["Feature"] = [f for f in devs if not _is_prior_subdomain(f)]
 
@@ -1856,11 +1894,15 @@ def subdecompose_oversized_features(
     # ACTING on the split sources. Conserves every file. Must run after
     # ``features.extend(all_new)`` so the conservation/claim test sees the full
     # post-stage feature set.
-    _cleanup_husks(features, split_sources, cut=cut, result=result)
+    # A route-group parent keeps the files no group took and its flows: it
+    # is never a husk to drop while it holds any (an undo must find it).
+    _cleanup_husks(
+        features, [s for s in split_sources if not ledger.is_held_parent(s)],
+        cut=cut, result=result)
     # The flow moves, closed (a born row that split again moved its flows
     # twice) and checked: every final id is held by a flow, or the split
     # that broke it is undone whole. Only then do the edges follow them.
-    result.flow_moves = ledger.settle(features, result)
+    result.flow_moves = ledger.settle(features, result, used_names)
     return result
 
 

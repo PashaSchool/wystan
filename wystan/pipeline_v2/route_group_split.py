@@ -117,6 +117,9 @@ SKIP_MOVE_CYCLE = "move_cycle"
 #: at the end of the stage a moved flow's final id is held by no flow, so an
 #: edge or copy rewritten to it would name nothing; the split is put back
 SKIP_DANGLING_REFERENCE = "dangling_reference"
+#: an undone split's parent lacks, after the undo, a file, member or flow it
+#: had before the split (recorded beside ``dangling_reference``, with counts)
+SKIP_UNDO_INCOMPLETE = "undo_incomplete"
 
 # Marks the domain key of a route-group row, so a reader can tell it from a
 # directory domain (the key is not a path that exists).
@@ -1014,6 +1017,7 @@ __all__ = [
     "SKIP_MOVE_CYCLE",
     "SKIP_OVER_BUDGET",
     "SKIP_TRUNCATED_DEFINITION",
+    "SKIP_UNDO_INCOMPLETE",
     "apply_flow_moves",
     "close_flow_moves",
     "collect_route_sites",
