@@ -35,6 +35,9 @@ from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 from wystan.analyzer.safe_read import path_within_repo
+from wystan.pipeline_v2.journey_lattice import (
+    _CRUD_LEAF_SEGS as GENERIC_ROUTE_SEGMENTS,
+)
 from wystan.pipeline_v2.spine_anchors import (
     _pattern_key_chain,
     _split_tokens,
@@ -124,6 +127,11 @@ _DEFINITION_RES: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(?:async[ \t]+)?fn[ \t]+([A-Za-z_]\w*)"),
 )
+# Generic URL segments are the engine's own list, not a new one:
+# ``journey_lattice._CRUD_LEAF_SEGS`` (``new``, ``edit``, ``index``, ``list``,
+# ``detail``...), the segments it never takes for an object, imported above
+# as ``GENERIC_ROUTE_SEGMENTS``. Matched against the segment as written, so
+# ``lists`` (an object) is a name where ``list`` (an action) is not.
 # A segment that is a number, a date or a version says nothing a row could be
 # called (``2024``, ``2024-01``, ``v1``, ``v2beta``).
 _UNNAMEABLE_SEGMENT_RE = re.compile(r"^(?:[\d._-]+|v\d+[a-z0-9]*)$")
@@ -665,15 +673,33 @@ def _slug(segment: str) -> str:
 
 def _lawful_name(base: str, parent: str, taken: set[str]) -> str | None:
     """The row name for a group whose URL segment slugs to *base*, or
-    ``None`` when it has none: a number, a date or a version is not a name;
-    the parent's own name stays with the parent (never ``orders-orders``); a
-    name another row has is qualified by the parent, once, never numbered."""
-    if not base or base == parent or _UNNAMEABLE_SEGMENT_RE.match(base):
+    ``None`` when it has none: a number, a date or a version is not a name,
+    nor is a segment the engine already treats as naming no object
+    (``new``, ``index``); the parent's own name stays with the parent (never
+    ``orders-orders``); a name another row has is qualified by the parent,
+    once, never numbered, and not when the parent already says it
+    (``orders-api-orders``)."""
+    if (not base or base == parent or _UNNAMEABLE_SEGMENT_RE.match(base)
+            or base in GENERIC_ROUTE_SEGMENTS):
         return None
-    name = base if base not in taken else f"{parent}-{base}"
+    if base not in taken:
+        name = base
+    elif _repeats(parent, base):
+        return None
+    else:
+        name = f"{parent}-{base}"
     if name in taken or len(name) > MAX_NAME_CHARS:
         return None
     return name
+
+
+def _repeats(parent: str, base: str) -> bool:
+    """Every word of *base* is already a word of *parent* (singular or
+    plural alike), so ``parent-base`` would say one word twice."""
+    def words(slug: str) -> set[str]:
+        return {normalize_anchor_key(word) for word in slug.split("-") if word}
+
+    return words(base) <= words(parent)
 
 
 def _name_groups(
