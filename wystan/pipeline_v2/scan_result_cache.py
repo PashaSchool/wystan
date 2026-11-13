@@ -3776,7 +3776,8 @@ ENV_OUTPUT_FLAGS = (
 #: names.
 #: KS128 (2026-11-13): born-row record and anchor rule changed the map.
 #: KS129 (2026-11-13): a split's residual parent seeds no lattice journey.
-KEY_SCHEMA_VERSION = 129
+#: KS130 (2026-11-13): the KS129 rule is withdrawn; maps of 129 are not this engine's.
+KEY_SCHEMA_VERSION = 130
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
