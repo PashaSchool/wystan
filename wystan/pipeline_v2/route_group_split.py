@@ -328,7 +328,8 @@ def _resolve_handlers(
         lines = reader.lines(file_path)
         for number, pattern, group in sorted(by_registration[file_path]):
             line = lines[number - 1] if 0 < number <= len(lines) else ""
-            handler_file = _handler_file(line, pattern, definers)
+            handler_file = _handler_file(
+                _line_references(line, pattern), definers)
             if handler_file:
                 out.append(_Resolved(handler_file, *group))
     return out
@@ -346,27 +347,38 @@ def _group_of_pattern(pattern: str) -> tuple[str, str] | None:
     return (key, chain[0]) if key else None
 
 
-def _handler_file(
-    line: str, pattern: str, definers: dict[str, set[str]],
-) -> str | None:
-    """The row file that defines the handler named on a registration line.
+def _line_references(line: str, pattern: str) -> list[str]:
+    """The functions a registration line passes after its route literal.
 
-    Only the handler POSITION counts: each argument after the route literal,
-    unwrapped through the calls around its first argument
-    (``guard(h.List, "perm")`` -> ``List``). A row function that is merely
-    passed along (a second argument of a wrapper) is not a handler. When two
-    arguments name functions of two row files the handler cannot be told
-    from the middleware, and the route resolves to nothing."""
+    Each top-level argument is unwrapped through the calls around its first
+    argument (``guard(h.List, "perm")`` -> ``List``). A literal (string,
+    number) or an inline function is no reference and is left out. A row
+    function passed deeper (a later argument of a wrapper) is not a handler
+    position and is not read."""
     at = line.find(pattern) if pattern else -1
     if at < 0:
-        return None
+        return []
     masked = _STRING_LITERAL_RE.sub(lambda m: " " * len(m.group()), line)
     arguments = _split_arguments(masked[at:])[1:]  # [0] is the route literal
+    return [name for name in map(_handler_name, arguments) if name]
+
+
+def _handler_file(
+    references: list[str], definers: dict[str, set[str]],
+) -> str | None:
+    """The row file that handles a route, or ``None``.
+
+    The line cannot say which of its references is the handler and which is
+    middleware, so it resolves only when ALL of them point at one row file.
+    A reference defined outside the row, or in two row files, may be the
+    handler: then the route resolves to nothing rather than to the file of
+    whatever row function stands beside it."""
     files: set[str] = set()
-    for argument in arguments:
-        name = _handler_name(argument)
-        if name and len(definers.get(name, ())) == 1:
-            files |= definers[name]
+    for name in references:
+        owners = definers.get(name, set())
+        if len(owners) != 1:
+            return None
+        files |= owners
     return next(iter(files)) if len(files) == 1 else None
 
 
