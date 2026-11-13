@@ -3775,7 +3775,8 @@ ENV_OUTPUT_FLAGS = (
 #: compose, qualified references keep their qualifier, access tiers are not
 #: names.
 #: KS128 (2026-11-13): born-row record and anchor rule changed the map.
-KEY_SCHEMA_VERSION = 128
+#: KS129 (2026-11-13): a split's residual parent seeds no lattice journey.
+KEY_SCHEMA_VERSION = 129
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
