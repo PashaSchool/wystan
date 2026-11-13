@@ -71,6 +71,7 @@ from wystan.llm.cost import CostTracker, deterministic_params, estimate_call_cos
 from wystan.llm.model_gateway import resolve_model as gateway_model
 from wystan.pipeline_v2.llm_health import LlmHealth
 from wystan.pipeline_v2.nav_taxonomy import aggregate_product_feature
+from wystan.pipeline_v2.route_group_split import ROUTE_GROUP_DOMAIN_PREFIX
 from wystan.pipeline_v2.stage_6_7c_uf_splitter import (
     residual_citability_enabled as _residual_citability_enabled,
 )
@@ -621,6 +622,8 @@ _SPLIT_MARKER = "sub-domain"
 # at mint time getattr(source, "uuid", None) yields nothing (measured on
 # supabase wave-9: 67/67 subs split_from=None, description parseable 67/67).
 _SPLIT_PARENT_RE = re.compile(r"of feature '([^']+)'\s*$")
+# ``sub-domain 'route-group/<name>' of feature ...`` (route_group_split).
+_ROUTE_GROUP_MARKER = f"{_SPLIT_MARKER} '{ROUTE_GROUP_DOMAIN_PREFIX}"
 
 
 def _split_parent_name(f: "Feature") -> str | None:
@@ -628,6 +631,10 @@ def _split_parent_name(f: "Feature") -> str | None:
     or ``None`` when *f* is not a split subfeature."""
     desc = getattr(f, "description", None) or ""
     if _SPLIT_MARKER not in desc.lower():
+        return None
+    # A route-group row that holds flows is a capability with behaviour of
+    # its own, not a grain choice inside a container: it is not folded back.
+    if _ROUTE_GROUP_MARKER in desc and getattr(f, "flows", None):
         return None
     m = _SPLIT_PARENT_RE.search(desc)
     return m.group(1) if m else None

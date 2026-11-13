@@ -496,6 +496,10 @@ class SubdecomposeResult:
     husk_files_conserved: int = 0    # distinct sole-held files kept (never dropped)
     # Rows split by route group because they had no directory to split along.
     route_group_splits: int = 0
+    # ``{flow id: row name}`` of flows that followed their entry file onto a
+    # route-group row. Not telemetry: the orchestrator reads it to point the
+    # flows' primary edges at their new rows.
+    flow_moves: dict[str, str] = field(default_factory=dict)
 
     # Back-compat aliases (older telemetry consumers / tests expect these).
     @property
@@ -1408,6 +1412,7 @@ def _split_one_feature(
     used_names: set[str],
     result: SubdecomposeResult,
     route_split: RouteSplitInput | None = None,
+    route_floor: int = 1,
 ) -> list["Feature"] | None:
     """Decompose ONE oversized feature into per-domain sub-features.
 
@@ -1427,7 +1432,8 @@ def _split_one_feature(
     *route_split* (route sites + repository root) arms the second planner: a
     row with NO directory plan whose files sit in one directory is grouped by
     the route group its files handle (:mod:`route_group_split`). ``None``
-    leaves the directory planner alone.
+    leaves the directory planner alone. *route_floor* is the fewest files a
+    route-group row may own (see :func:`subdecompose_oversized_features`).
     """
     owned = _owned_paths(source)
     if len(owned) <= cut:
@@ -1449,7 +1455,8 @@ def _split_one_feature(
     if not domains and route_split is not None:
         domains, residual = plan_route_group_split(
             owned, route_split, parent_name=source.name,
-            used_names=used_names, max_domains=max_domains,
+            used_names=used_names, min_files=route_floor,
+            max_domains=max_domains,
         )
         is_route_plan = bool(domains)
     if not domains:
@@ -1467,13 +1474,13 @@ def _split_one_feature(
         if len(domains) < 1:
             return None
 
+    if is_route_plan:
+        return _mint_route_group_rows(source, domains, result)
+
     minted: list["Feature"] = []
     moved_files: set[str] = set()
     for domain_key, files in domains.items():
-        if is_route_plan:
-            name, domain_key = domain_key, ROUTE_GROUP_DOMAIN_PREFIX + domain_key
-        else:
-            name = _slug(domain_key, used_names)
+        name = _slug(domain_key, used_names)
         sub = _make_subfeature(source, domain_key, files, name)
         minted.append(sub)
         moved_files.update(files)
@@ -1484,20 +1491,89 @@ def _split_one_feature(
     result.features_split += 1
     result.subfeatures_created += len(domains)
     result.paths_moved += len(moved_files)
-    result.route_group_splits += int(is_route_plan)
     if len(result.split_sample) < 20:
-        sample = {
+        result.split_sample.append({
             "feature": source.name,
             "domains": len(domains),
             "moved": len(moved_files),
             "residual": len(residual_set),
             "names": sorted({_strip_route_group(k.rsplit("/", 1)[-1])
                              for k in domains})[:25],
-        }
-        if is_route_plan:
-            sample["plan"] = "route-group"
-        result.split_sample.append(sample)
+        })
     return minted
+
+
+def _mint_route_group_rows(
+    source: "Feature", domains: dict[str, list[str]], result: SubdecomposeResult,
+) -> list["Feature"]:
+    """Mint one row per route group of *source* and leave the rest with it.
+
+    Unlike a directory split, the source is NOT de-owned: it keeps its name,
+    its identity and every file no group took, as their owner. A flat row has
+    no scaffold to disown; what stays is real code (helpers, the entry point,
+    handlers of a single route) and must keep a primary row. Each flow follows
+    the file its entry point lives in, with its id, uuid and name unchanged,
+    so a born row is homed by its own flows and not by the parent's."""
+    minted: list["Feature"] = []
+    moved_files: set[str] = set()
+    for name, files in domains.items():
+        minted.append(_make_subfeature(
+            source, ROUTE_GROUP_DOMAIN_PREFIX + name, files, name))
+        moved_files.update(files)
+    _release_moved_files(source, moved_files)
+    flow_moves = _move_flows_to_entry_rows(source, minted)
+    result.flow_moves.update(flow_moves)
+    result.features_split += 1
+    result.subfeatures_created += len(minted)
+    result.paths_moved += len(moved_files)
+    result.route_group_splits += 1
+    if len(result.split_sample) < 20:
+        result.split_sample.append({
+            "feature": source.name,
+            "domains": len(minted),
+            "moved": len(moved_files),
+            "residual": len(_owned_paths(source)),
+            "names": sorted(domains)[:25],
+            "plan": "route-group",
+            "flows_moved": len(flow_moves),
+        })
+    return minted
+
+
+def _release_moved_files(source: "Feature", moved: set[str]) -> None:
+    """Take *moved* out of the source's ledgers; everything else it had stays
+    exactly as it was (same role, same primary mark)."""
+    source.member_files = [
+        m for m in (getattr(source, "member_files", None) or [])
+        if getattr(m, "path", None) not in moved
+    ]
+    source.paths = [p for p in (getattr(source, "paths", None) or []) if p not in moved]
+    for attr, file_field in _FILE_KEYED_SURFACES:
+        items = getattr(source, attr, None)
+        if items:
+            setattr(source, attr, [
+                it for it in items if getattr(it, file_field, None) not in moved])
+
+
+def _move_flows_to_entry_rows(
+    source: "Feature", minted: list["Feature"],
+) -> dict[str, str]:
+    """Move each flow of *source* whose entry file a born row now owns onto
+    that row. Returns ``{flow id: row name}``; the caller's orchestrator
+    points the flows' primary edges at the new rows."""
+    row_of_file = {p: sub for sub in minted for p in sub.paths}
+    kept: list[Any] = []
+    moves: dict[str, str] = {}
+    for flow in getattr(source, "flows", None) or []:
+        row = row_of_file.get(str(getattr(flow, "entry_point_file", "") or ""))
+        if row is None:
+            kept.append(flow)
+            continue
+        row.flows.append(flow)
+        flow.primary_feature = row.name
+        moves[str(getattr(flow, "id", "") or "")] = row.name
+    source.flows = kept
+    return moves
 
 
 def subdecompose_oversized_features(
@@ -1581,6 +1657,11 @@ def subdecompose_oversized_features(
     if not sizes:
         return result
     median = max(2, int(statistics.median(sizes)))
+    # Grain floor of a route-group row: the repository's median row size
+    # itself. The directory floor above clamps it to 2 because a directory
+    # with one file is no domain; a file that handles a whole route group is
+    # one, where one-file rows are the repository's grain (median 1).
+    route_floor = max(1, int(statistics.median(sizes)))
     total_owned = len({p for v in owned_by_feature.values() for p in v})
     floor = median
     cut = max(
@@ -1621,7 +1702,7 @@ def subdecompose_oversized_features(
                 source,
                 floor=floor, cut=cut, max_domains=max_domains,
                 used_names=used_names, result=result,
-                route_split=route_split,
+                route_split=route_split, route_floor=route_floor,
             )
             if minted:
                 all_new.extend(minted)

@@ -13,7 +13,7 @@ artifact filenames, same telemetry keys.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +94,8 @@ class Layer2Result:
     stage_8_9_5_telemetry: dict[str, Any]
     stage_8_9_6_telemetry: dict[str, Any]
     stage_8_9_7_telemetry: dict[str, Any]
+    #: ``{flow id: row}`` of flows Stage 8.9 moved onto a route-group row.
+    stage_8_9_flow_moves: dict[str, str] = field(default_factory=dict)
 
 
 def run_layer2_phase(
@@ -574,18 +576,21 @@ def run_layer2_phase(
     # repo median feature size). Default ON; WYSTAN_STAGE_8_9_SUBDECOMPOSE=0.
     # A flat oversized row has no directory to split along; the route sites
     # let 8.9 group its files by the route group they handle instead.
+    # The capture carries them only where an extractor declared route sites,
+    # so every other repository's capture is what it was.
     route_sites = list(route_sites or [])
-    write_stage_input(run_dir, 8, "anchor_subdecompose", {
-        "features": features,
-        "route_sites": route_sites,
-        "repo_path": str(ctx.repo_path),
-    })
+    stage_8_9_input: dict[str, Any] = {"features": features}
+    if route_sites:
+        stage_8_9_input["route_sites"] = route_sites
+        stage_8_9_input["repo_path"] = str(ctx.repo_path)
+    write_stage_input(run_dir, 8, "anchor_subdecompose", stage_8_9_input)
     with StageLogger(run_dir, 8, "anchor_subdecompose") as log8_9:
         subdecompose_result = subdecompose_workspace_anchors(
             features,
             route_split=RouteSplitInput(route_sites, Path(ctx.repo_path)),
         )
         stage_8_9_telemetry = subdecompose_result.as_telemetry()
+        stage_8_9_flow_moves = dict(subdecompose_result.flow_moves)
         log8_9.info(
             f"anchor_subdecompose enabled={subdecompose_result.enabled} "
             f"anchors={subdecompose_result.anchors_total} "
@@ -816,6 +821,7 @@ def run_layer2_phase(
         stage_8_9_5_telemetry=stage_8_9_5_telemetry,
         stage_8_9_6_telemetry=stage_8_9_6_telemetry,
         stage_8_9_7_telemetry=stage_8_9_7_telemetry,
+        stage_8_9_flow_moves=stage_8_9_flow_moves,
     )
 
 

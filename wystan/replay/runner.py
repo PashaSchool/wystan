@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from wystan.pipeline_v2.route_group_split import apply_flow_moves
 from wystan.replay.capture import (
     MissingStageInputError,
     load_stage_input,
@@ -270,6 +271,12 @@ def replay(
                 if k in state:
                     state[k] = v
             _prepare_state(state, env)
+            # Flows Stage 8.9 moved in this replay: the recorded flow store
+            # and edges of a later stage still name the old row.
+            apply_flow_moves(
+                state.get("bipartite_flows"), state.get("bipartite_edges"),
+                overrides.get("flow_moves") or {},
+            )
             state["_replayed_from"] = source_run_dir.name
             # Chain side-channel (read-only; see module docstring).
             state["_chain"] = overrides

@@ -1136,7 +1136,12 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
             payload=subdecompose_result.as_telemetry(),
             run_dir=env.run_dir,
         )
-    return {"features": features}
+    # ``flow_moves`` is in no capture: the runner applies it to the flow
+    # store and edges of every later stage's recorded input.
+    return {
+        "features": features,
+        "flow_moves": dict(subdecompose_result.flow_moves),
+    }
 
 
 def _run_llm_component_split(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
