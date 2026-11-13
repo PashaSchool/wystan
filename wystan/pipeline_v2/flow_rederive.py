@@ -97,6 +97,7 @@ from wystan.analyzer.validation import is_test_file
 from wystan.cache.backend import CacheKind
 from wystan.llm.cost import CostTracker
 from wystan.pipeline_v2.llm_health import LlmHealth
+from wystan.pipeline_v2.route_group_split import is_route_group_row
 from wystan.pipeline_v2.stage_3_flows import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_WORKERS,
@@ -184,6 +185,8 @@ class CohortSelection:
     excluded_healthy_density: int = 0
     excluded_flow_gate: int = 0
     excluded_at_cap: int = 0
+    # route-group rows that hold flows moved onto them at Stage 8.9
+    excluded_born_with_flows: int = 0
     excluded_flow_gate_names: list[str] = field(default_factory=list)
     flowful_median_density: float = 0.0
     blob_units: list[str] = field(default_factory=list)
@@ -342,6 +345,13 @@ def select_rederive_cohort(
         else:
             kind = "birth"
             sel.births += 1
+
+        # A route-group row born at Stage 8.9 that received its flows by the
+        # move is not starved: its flows were derived on the files it owns.
+        # Asking again could give it a second flow at the same entry.
+        if is_route_group_row(f) and getattr(f, "flows", None):
+            sel.excluded_born_with_flows += 1
+            continue
 
         # Blob-origin majority (the disease is BLOB-grain starvation):
         # at least θ=0.5 of the candidate's surface must come from an
@@ -748,6 +758,10 @@ def run_flow_rederive(
         "timed_out": 0,
         "no_client": False,
     }
+    # Present only when a route-group row was left out, so every other
+    # scan's artifact is byte-identical.
+    if sel.excluded_born_with_flows:
+        telemetry["excluded_born_with_flows"] = sel.excluded_born_with_flows
 
     if not sel.candidates:
         return telemetry  # causal class present, all excluded — honest

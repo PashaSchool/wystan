@@ -101,6 +101,9 @@ SKIP_TRUNCATED_DEFINITION = "truncated_definition"
 # Marks the domain key of a route-group row, so a reader can tell it from a
 # directory domain (the key is not a path that exists).
 ROUTE_GROUP_DOMAIN_PREFIX = "route-group/"
+# How Stage 8.9 writes that key into a born row's description
+# (``sub-domain 'route-group/<name>' of feature '<parent>'``).
+_ROUTE_GROUP_ROW_MARKER = f"sub-domain '{ROUTE_GROUP_DOMAIN_PREFIX}"
 
 # String literals are blanked (same length, so offsets hold) before a
 # registration line is parsed: a permission string such as
@@ -266,6 +269,12 @@ def _site_of(entry: Any, kind: str) -> tuple[str, str, str, int, str] | None:
 def _is_repo_relative(path: str) -> bool:
     parts = path.split("/")
     return bool(path) and not path.startswith("/") and ".." not in parts
+
+
+def is_route_group_row(feature: Any) -> bool:
+    """A row Stage 8.9 minted from a route group (later stages read this to
+    tell a born capability from a directory split)."""
+    return _ROUTE_GROUP_ROW_MARKER in (getattr(feature, "description", None) or "")
 
 
 def is_flat(owned: list[str]) -> bool:
@@ -805,5 +814,6 @@ __all__ = [
     "flows_with_product_copies",
     "has_flow_identity",
     "is_flat",
+    "is_route_group_row",
     "plan_route_group_split",
 ]

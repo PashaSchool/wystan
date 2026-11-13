@@ -71,7 +71,7 @@ from wystan.llm.cost import CostTracker, deterministic_params, estimate_call_cos
 from wystan.llm.model_gateway import resolve_model as gateway_model
 from wystan.pipeline_v2.llm_health import LlmHealth
 from wystan.pipeline_v2.nav_taxonomy import aggregate_product_feature
-from wystan.pipeline_v2.route_group_split import ROUTE_GROUP_DOMAIN_PREFIX
+from wystan.pipeline_v2.route_group_split import is_route_group_row
 from wystan.pipeline_v2.stage_6_7c_uf_splitter import (
     residual_citability_enabled as _residual_citability_enabled,
 )
@@ -622,8 +622,6 @@ _SPLIT_MARKER = "sub-domain"
 # at mint time getattr(source, "uuid", None) yields nothing (measured on
 # supabase wave-9: 67/67 subs split_from=None, description parseable 67/67).
 _SPLIT_PARENT_RE = re.compile(r"of feature '([^']+)'\s*$")
-# ``sub-domain 'route-group/<name>' of feature ...`` (route_group_split).
-_ROUTE_GROUP_MARKER = f"{_SPLIT_MARKER} '{ROUTE_GROUP_DOMAIN_PREFIX}"
 
 
 def _split_parent_name(f: "Feature") -> str | None:
@@ -634,7 +632,7 @@ def _split_parent_name(f: "Feature") -> str | None:
         return None
     # A route-group row that holds flows is a capability with behaviour of
     # its own, not a grain choice inside a container: it is not folded back.
-    if _ROUTE_GROUP_MARKER in desc and getattr(f, "flows", None):
+    if is_route_group_row(f) and getattr(f, "flows", None):
         return None
     m = _SPLIT_PARENT_RE.search(desc)
     return m.group(1) if m else None
@@ -830,6 +828,37 @@ def _hygienic_page_route(r: dict[str, Any]) -> bool:
     return True
 
 
+def _digest_dev_order(developer_features: list[Any]) -> list[Any]:
+    """The digest's row order; the first ``MAX_DEV_FEATURES_DIGEST`` are
+    the rows the model sees."""
+    # Secondary key (name) breaks commit-count ties deterministically — else
+    # equal-commit modules keep input order (nondeterministic) and the digest
+    # JSON varies run-to-run, defeating the content-hash cache (byte-identical
+    # re-scan). Same reason for the UF + re-attribution sorts below.
+    return sorted(
+        developer_features, key=lambda f: (-(f.total_commits or 0), f.name or ""))
+
+
+def _digest_truncation(
+    dev_view: list[Any], developer_features: list[Any],
+) -> dict[str, int] | None:
+    """How many rows the digest cap leaves out, and how many of those are
+    route-group rows born at Stage 8.9 (they stand alone in the view when
+    they hold flows, so they can crowd the cap). ``None`` when nothing is
+    left out, or when the scan has no route-group row: the cap is not
+    changed, and a scan the route-group rule did not touch keeps its
+    telemetry byte for byte."""
+    dropped = _digest_dev_order(dev_view)[MAX_DEV_FEATURES_DIGEST:]
+    if not dropped or not any(map(is_route_group_row, developer_features)):
+        return None
+    return {
+        "rows": len(dev_view),
+        "kept": MAX_DEV_FEATURES_DIGEST,
+        "dropped": len(dropped),
+        "dropped_born": sum(1 for f in dropped if is_route_group_row(f)),
+    }
+
+
 def _build_digest(
     developer_features: list["Feature"],
     product_features: list["Feature"],
@@ -839,11 +868,7 @@ def _build_digest(
     stratified: bool = False,
     page_anchored: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    # Secondary key (name) breaks commit-count ties deterministically — else
-    # equal-commit modules keep input order (nondeterministic) and the digest
-    # JSON varies run-to-run, defeating the content-hash cache (byte-identical
-    # re-scan). Same reason for the UF + re-attribution sorts below.
-    devf = sorted(developer_features, key=lambda f: (-(f.total_commits or 0), f.name or ""))
+    devf = _digest_dev_order(developer_features)
     dev_lines = [
         {"name": f.display_name or f.name, "where": _top_dirs(_paths_of(f)),
          "what": _short(f.description, 90)}
@@ -3928,6 +3953,9 @@ def run_journey_abstraction(
         dev_view, product_features, user_flows, routes_index,
         stratified=_strat, page_anchored=_strat_page_ids,
     )
+    truncation = _digest_truncation(dev_view, non_facet_devs)
+    if truncation:
+        tele["digest_dev_truncated"] = truncation
     if _strat:
         # telemetry key only on fire (openstatus inertness law).
         tele["digest_stratification"] = {
