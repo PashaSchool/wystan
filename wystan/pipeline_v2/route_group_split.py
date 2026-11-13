@@ -16,12 +16,19 @@ GROUP whose handlers they define:
   their route site locates (``route_site`` on the extractor class, see
   :data:`ROUTE_SITE_REGISTRATION` / :data:`ROUTE_SITE_HANDLER`); a site of
   any other extractor is not read;
+* a registration resolves to a row file only when every function reference
+  on its line names that one file (handler and middleware cannot be told
+  apart on the line);
 * a file joins the group its own name states when it handles a route of it,
-  else the group holding more than half of the routes it handles, else none.
+  else the group holding more than half of the routes it handles, else none;
+* a group is a row when it has two routes and at least the median lines of
+  the repository's other rows, and two such groups exist.
 
 Files that handle no route, or routes of several groups with no majority,
-stay on the parent row and stay its own. Nothing is read and nothing changes
-unless the row is flat. Deterministic, no model call.
+stay on the parent row and stay its own. Per row the plan is all or nothing:
+a bound reached or a needed line not read stops it, and says why. Nothing is
+read and nothing changes unless the row is flat. Deterministic, no model
+call.
 """
 
 from __future__ import annotations
