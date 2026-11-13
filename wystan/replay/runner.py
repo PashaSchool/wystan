@@ -273,16 +273,17 @@ def replay(
             for k, v in overrides.items():
                 if k in state:
                     state[k] = v
-            _prepare_state(state, env)
             # Flows Stage 8.9 moved in this replay: the recorded flow store,
             # the product features' copies and the edges of a later stage
-            # still name the old row and the old id.
+            # still name the old row and the old id. Applied before
+            # ``_prepare_state``, which re-shares store and row flows by id.
             apply_flow_moves(
                 flows_with_product_copies(
                     state.get("bipartite_flows"), state.get("product_features")),
                 state.get("bipartite_edges"),
                 overrides.get("flow_moves") or {},
             )
+            _prepare_state(state, env)
             state["_replayed_from"] = source_run_dir.name
             # Chain side-channel (read-only; see module docstring).
             state["_chain"] = overrides
