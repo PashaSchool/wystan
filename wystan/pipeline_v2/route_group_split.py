@@ -18,7 +18,10 @@ GROUP whose handlers they define:
   any other extractor is not read;
 * a registration resolves to a row file only when every function reference
   on its line names that one file (handler and middleware cannot be told
-  apart on the line);
+  apart on the line); a qualified reference is read with its qualifier,
+  from the registering file's imports and declarations
+  (:mod:`route_group_scope`), and an inline function is a handler of the
+  registering file;
 * a file joins the group its own name states when it handles a route of it,
   else the group holding more than half of the routes it handles, else none;
 * a group is a row when it has two routes and at least the median lines of
@@ -42,6 +45,7 @@ from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 from wystan.analyzer.safe_read import path_within_repo
+from wystan.pipeline_v2.route_group_scope import ROW, FileScope, file_scope
 from wystan.pipeline_v2.journey_lattice import (
     _CRUD_LEAF_SEGS as GENERIC_ROUTE_SEGMENTS,
 )
@@ -123,6 +127,12 @@ _ROUTE_GROUP_ROW_MARKER = f"sub-domain '{ROUTE_GROUP_DOMAIN_PREFIX}"
 # ``"subscribers:get"`` must not read as code.
 _STRING_LITERAL_RE = re.compile(r'"[^"\n]*"|\'[^\'\n]*\'|`[^`\n]*`')
 _DOTTED_NAME_RE = re.compile(r"[&*]?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)")
+# An inline function as an argument: Go ``func(``, JS ``function`` /
+# ``async`` / arrow, Python ``lambda``, Rust ``|x|``. Matched from the
+# argument's start; each alternative is linear.
+_INLINE_FUNCTION_RE = re.compile(
+    r"func[ \t]*\(|function\b|async\b|lambda\b|\|[^|]*\||"
+    r"\([^()]*\)[ \t]*=>|[A-Za-z_$][\w$]*[ \t]*=>")
 # Top-level function definitions, language-blind. Each is matched against ONE
 # line of at most MAX_LINE_CHARS, from the line start, and no two adjacent
 # parts of a pattern can match the same character, so matching is linear. A
@@ -471,17 +481,49 @@ def _resolve_handlers(
         return out
     reader = _Reader(split_input)
     definers, row_has_unread = _definers(owned, reader)
+    row_dir = os.path.dirname(owned[0]) if owned else ""
     for file_path in sorted(by_registration):
         view = reader.view(file_path)
+        scope = file_scope(file_path, view.lines, row_dir)
         for number, pattern, group, method in sorted(by_registration[file_path]):
-            references = _references_read(view.line(number), pattern)
-            if row_has_unread and any(not definers.get(n) for n in references):
-                # the reference may be defined in a row line not read
-                raise _TruncatedDefinition
-            handler_file = _handler_file(references, definers)
-            if handler_file:
+            line = _Line(number, _references_read(view.line(number), pattern))
+            _stop_on_unread(line, _ReadState(definers, scope, view, row_has_unread))
+            handler_file = _handler_file(line, definers, scope)
+            if handler_file in owned_set:
                 out.append(_Resolved(handler_file, *group, (method, pattern)))
     return out
+
+
+class _Line(NamedTuple):
+    """A registration line: its number and the references after its route."""
+
+    number: int
+    references: list[_Reference]
+
+
+class _ReadState(NamedTuple):
+    """What was read for one registration file and the row."""
+
+    definers: dict[str, set[str]]
+    scope: FileScope
+    view: _FileView
+    row_has_unread: bool
+
+
+def _stop_on_unread(line: _Line, state: _ReadState) -> None:
+    """Stop the row when a line not read could decide a reference: a row
+    function's definition (the row has unread lines) or the declaration of
+    a qualifier (the registering file has unread lines above the route)."""
+    unread_above = any(ln is None for ln in state.view.lines[:line.number - 1])
+    for ref in line.references:
+        if ref.is_inline:
+            continue
+        kind = (state.scope.classify(ref.qualifier, line.number)
+                if ref.qualifier else ROW)
+        if kind is None and unread_above:
+            raise _TruncatedDefinition
+        if kind == ROW and state.row_has_unread and not state.definers.get(ref.name):
+            raise _TruncatedDefinition
 
 
 def _references_read(line: str | None, pattern: str) -> list[str]:
@@ -503,39 +545,52 @@ def _group_of_pattern(pattern: str) -> tuple[str, str] | None:
     return (key, chain[0]) if key else None
 
 
-def _line_references(line: str, pattern: str) -> list[str]:
+def _line_references(line: str, pattern: str) -> list[_Reference]:
     """The functions a registration line passes after its route literal.
 
     Each top-level argument is unwrapped through the calls around its first
-    argument (``guard(h.List, "perm")`` -> ``List``). A literal (string,
-    number) or an inline function is no reference and is left out. A row
-    function passed deeper (a later argument of a wrapper) is not a handler
-    position and is not read."""
+    argument (``guard(h.List, "perm")`` -> ``h.List``). A literal (string,
+    number) is no reference and is left out; an inline function is one, to
+    the file that registers it. A row function passed deeper (a later
+    argument of a wrapper) is not a handler position and is not read."""
     at = line.find(pattern) if pattern else -1
     if at < 0:
         return []
     masked = _STRING_LITERAL_RE.sub(lambda m: " " * len(m.group()), line)
     arguments = _split_arguments(masked[at:])[1:]  # [0] is the route literal
-    return [name for name in map(_handler_name, arguments) if name]
+    return [ref for ref in map(_reference, arguments) if ref]
 
 
 def _handler_file(
-    references: list[str], definers: dict[str, set[str]],
+    line: _Line, definers: dict[str, set[str]], scope: FileScope,
 ) -> str | None:
-    """The row file that handles a route, or ``None``.
+    """The file that handles a route, or ``None``.
 
     The line cannot say which of its references is the handler and which is
-    middleware, so it resolves only when ALL of them point at one row file.
-    A reference defined outside the row, or in two row files, may be the
-    handler: then the route resolves to nothing rather than to the file of
-    whatever row function stands beside it."""
+    middleware, so it resolves only when ALL of them point at one file. A
+    reference whose qualifier is another package, or that the registering
+    file does not explain, or a name defined outside the row or in two row
+    files, may be the handler: then the route resolves to nothing rather
+    than to the file of whatever row function stands beside it. An inline
+    function is a handler defined in the registering file."""
     files: set[str] = set()
-    for name in references:
-        owners = definers.get(name, set())
+    for ref in line.references:
+        owners = _owners(ref, definers, scope, line.number)
         if len(owners) != 1:
             return None
         files |= owners
     return next(iter(files)) if len(files) == 1 else None
+
+
+def _owners(
+    ref: _Reference, definers: dict[str, set[str]], scope: FileScope, number: int,
+) -> set[str]:
+    """The files that may define what *ref* stands for."""
+    if ref.is_inline:
+        return {scope.path}
+    if ref.qualifier and scope.classify(ref.qualifier, number) != ROW:
+        return set()  # another package's, or not known: no row file
+    return definers.get(ref.name, set())
 
 
 def _split_arguments(text: str) -> list[str]:
@@ -557,26 +612,45 @@ def _split_arguments(text: str) -> list[str]:
     return pieces
 
 
-def _handler_name(argument: str) -> str | None:
-    """The function an argument stands for: itself when it is a name, the
-    first argument (recursively) when it is a call with arguments, the callee
-    when the call has none (a factory)."""
+class _Reference(NamedTuple):
+    """A function a registration line passes: ``qualifier.name`` as written
+    (``qualifier`` empty for a bare name), or an inline function."""
+
+    qualifier: str
+    name: str
+    is_inline: bool = False
+
+
+# An inline function written in the registration call.
+_INLINE = _Reference("", "", is_inline=True)
+
+
+def _reference(argument: str) -> _Reference | None:
+    """The function an argument stands for: itself when it is a name or an
+    inline function, the first argument (recursively) when it is a call with
+    arguments, the callee when the call has none (a factory)."""
     for _ in range(MAX_CALL_DEPTH):
         argument = argument.strip()
+        if _INLINE_FUNCTION_RE.match(argument):
+            return _INLINE
         match = _DOTTED_NAME_RE.match(argument)
         if not match:
             return None
-        name = match.group(1).rsplit(".", 1)[-1]
         rest = argument[match.end():].lstrip()
         if not rest:
-            return name
+            return _as_reference(match.group(1))
         if not rest.startswith("("):
             return None
         first = _split_arguments(rest[1:])[0].strip()
         if not first:
-            return name
+            return _as_reference(match.group(1))
         argument = first
     return None
+
+
+def _as_reference(dotted: str) -> _Reference:
+    qualifier, _dot, name = dotted.rpartition(".")
+    return _Reference(qualifier, name)
 
 
 # ── Grouping and naming ─────────────────────────────────────────────────────
