@@ -122,8 +122,14 @@ SKIP_DANGLING_REFERENCE = "dangling_reference"
 # directory domain (the key is not a path that exists).
 ROUTE_GROUP_DOMAIN_PREFIX = "route-group/"
 # How Stage 8.9 writes that key into a born row's description
-# (``sub-domain 'route-group/<name>' of feature '<parent>'``).
+# (``sub-domain 'route-group/<group key>' of feature '<parent>'``). The
+# description is the row's lineage from this stage (Stage 8.9 reads its own
+# ``sub-domain`` marker there to know its prior output): it carries the
+# route group the row was cut along, as a directory row's carries its
+# directory, so a later stage can find the group's route anchor.
 _ROUTE_GROUP_ROW_MARKER = f"sub-domain '{ROUTE_GROUP_DOMAIN_PREFIX}"
+_ROUTE_GROUP_OF_ROW_RE = re.compile(
+    re.escape(_ROUTE_GROUP_ROW_MARKER) + r"([^'/]+)'")
 
 # String literals are blanked (same length, so offsets hold) before a
 # registration line is parsed: a permission string such as
@@ -217,6 +223,9 @@ class RoutePlan(NamedTuple):
     residual: list[str]            # files that stay with the parent
     groups_capped: int = 0         # groups left in the residual by the cap
     skip_reason: str | None = None  # SKIP_* when a bound stopped the plan
+    # row name -> the route group key it was promoted for (``user`` for the
+    # row ``users``, ``auth`` for ``cmd-auth``); ``None`` when no split
+    groups: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -309,6 +318,14 @@ def is_route_group_row(feature: Any) -> bool:
     return _ROUTE_GROUP_ROW_MARKER in (getattr(feature, "description", None) or "")
 
 
+def route_group_of(feature: Any) -> str | None:
+    """The route group key a born row was cut along (``user``), or
+    ``None`` for any row the route-group split did not make."""
+    match = _ROUTE_GROUP_OF_ROW_RE.search(
+        getattr(feature, "description", None) or "")
+    return match.group(1) if match else None
+
+
 def is_flat(owned: list[str]) -> bool:
     """All files sit directly in one directory."""
     return len({os.path.dirname(p) for p in owned}) == 1
@@ -350,12 +367,13 @@ def plan_route_group_split(
     if len(groups) < MIN_GROUPS:
         return nothing
     ranked, capped = _rank_and_cap(groups, max_domains)
-    named = _name_groups(ranked, resolved, parent_name, used_names)
+    named, group_of_name = _name_groups(ranked, resolved, parent_name, used_names)
     if len(named) < MIN_GROUPS:
         return nothing
     used_names.update(named)
     moved = {f for files in named.values() for f in files}
-    return RoutePlan(named, [p for p in owned if p not in moved], capped)
+    return RoutePlan(named, [p for p in owned if p not in moved], capped,
+                     groups=group_of_name)
 
 
 def _rank_and_cap(
@@ -812,9 +830,10 @@ def _name_groups(
     resolved: list[_Resolved],
     parent_name: str,
     used_names: set[str],
-) -> dict[str, list[str]]:
+) -> tuple[dict[str, list[str]], dict[str, str]]:
     """Row name per group: the URL segment as its routes write it. A group
-    that cannot get a lawful name is not promoted (its files stay)."""
+    that cannot get a lawful name is not promoted (its files stay). Also
+    returns each name's group key."""
     group_of_file = {f: key for key, group in ranked for f in group.files}
     written: dict[str, Counter] = defaultdict(Counter)
     for r in resolved:
@@ -822,6 +841,7 @@ def _name_groups(
             written[r.group][_slug(r.segment)] += 1
     taken = set(used_names)
     named: dict[str, list[str]] = {}
+    group_of_name: dict[str, str] = {}
     for group, members in ranked:
         files = members.files
         base = min(written[group].items(), key=lambda kv: (-kv[1], kv[0]))[0]
@@ -830,7 +850,8 @@ def _name_groups(
             continue
         taken.add(name)
         named[name] = files
-    return named
+        group_of_name[name] = group
+    return named, group_of_name
 
 
 # ── Flows follow their entry files ──────────────────────────────────────────
@@ -1003,4 +1024,5 @@ __all__ = [
     "is_route_group_row",
     "move_key",
     "plan_route_group_split",
+    "route_group_of",
 ]

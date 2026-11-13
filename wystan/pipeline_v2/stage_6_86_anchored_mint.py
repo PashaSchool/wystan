@@ -84,6 +84,7 @@ from wystan.pipeline_v2.cli_commands import (  # noqa: F401 — re-export
     detect_cli_clusters_cached,
     supplied_tile_admits,
 )
+from wystan.pipeline_v2.route_group_anchor import with_born_row_files
 from wystan.pipeline_v2.spine_anchors import (
     SOURCE_RANK,
     SpineAnchor,
@@ -1878,6 +1879,13 @@ def run_anchored_mint(
     anchors = build_spine_anchors(
         in_scope, routes_index, ctx, extractor_signals, nav_keys)
     tele["anchors_total"] = len(anchors)
+    # A row born by the Stage 8.9 route-group split joins its group's route
+    # anchor, as a same-stem models file would (route_group_anchor). No born
+    # row, or no route anchor for its group: the anchors are unchanged.
+    anchors, born_rows_anchored = with_born_row_files(
+        anchors, in_scope, owned_paths_of)
+    if born_rows_anchored:
+        tele["born_rows_route_anchored"] = born_rows_anchored
 
     # ── B65-v3 iter-2 — SPA-mint containment fence ────────────────────────
     # A client-side SPA page row (routes_index kind="spa-page") gives its

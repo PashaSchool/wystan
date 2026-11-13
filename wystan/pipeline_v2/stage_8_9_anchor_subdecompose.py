@@ -1602,8 +1602,11 @@ def _mint_route_group_rows(
     minted: list["Feature"] = []
     moved_files: set[str] = set()
     for name, files in domains.items():
+        # the domain key is the route group, as a directory row's is its
+        # directory: Stage 6.86 reads it to find the group's route anchor
+        group = (plan.groups or {}).get(name, name)
         minted.append(_make_subfeature(
-            source, ROUTE_GROUP_DOMAIN_PREFIX + name, files, name))
+            source, ROUTE_GROUP_DOMAIN_PREFIX + group, files, name))
         moved_files.update(files)
     split.born.extend(minted)
     _release_moved_files(source, moved_files)
