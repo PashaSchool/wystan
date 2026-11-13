@@ -45,7 +45,12 @@ from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 from wystan.analyzer.safe_read import path_within_repo
-from wystan.pipeline_v2.route_group_scope import ROW, FileScope, file_scope
+from wystan.pipeline_v2.route_group_scope import (
+    ROW,
+    FileScope,
+    file_scope,
+    package_clause,
+)
 from wystan.pipeline_v2.journey_lattice import (
     _CRUD_LEAF_SEGS as GENERIC_ROUTE_SEGMENTS,
 )
@@ -463,17 +468,25 @@ class _Reader:
             raise _OverBudget
 
 
-def _definers(
-    owned: list[str], reader: _Reader,
-) -> tuple[dict[str, set[str]], bool]:
-    """``identifier -> row files that define a function of that name``, and
+class _RowDefinitions(NamedTuple):
+    """What the row's files define, as read."""
+
+    names: dict[str, set[str]]  # identifier -> row files defining it
+    has_unread: bool            # a row file holds lines that were not read
+    packages: frozenset[str | None]  # the row files' package clauses
+
+
+def _definers(owned: list[str], reader: _Reader) -> _RowDefinitions:
+    """``identifier -> row files that define a function of that name``,
     whether any row file holds lines that were not read (a definition may
-    stand there)."""
+    stand there), and the package clauses of the row's files."""
     out: dict[str, set[str]] = defaultdict(set)
     has_unread = False
+    packages: set[str | None] = set()
     for path in owned:
         view = reader.view(path)
         has_unread = has_unread or view.has_unread
+        packages.add(package_clause(path, view.lines))
         for line in view.lines:
             if not line:
                 continue
@@ -481,7 +494,7 @@ def _definers(
                 match = definition_re.match(line)
                 if match:
                     out[match.group(1)].add(path)
-    return out, has_unread
+    return _RowDefinitions(out, has_unread, frozenset(packages))
 
 
 # ── Handler resolution ──────────────────────────────────────────────────────
@@ -510,11 +523,11 @@ def _resolve_handlers(
     if not by_registration:
         return out
     reader = _Reader(split_input)
-    definers, row_has_unread = _definers(owned, reader)
+    definers, row_has_unread, row_packages = _definers(owned, reader)
     row_dir = os.path.dirname(owned[0]) if owned else ""
     for file_path in sorted(by_registration):
         view = reader.view(file_path)
-        scope = file_scope(file_path, view.lines, row_dir)
+        scope = file_scope(file_path, view.lines, (row_dir, row_packages))
         for number, pattern, group, method in sorted(by_registration[file_path]):
             line = _Line(number, _references_read(view.line(number), pattern))
             _stop_on_unread(line, _ReadState(definers, scope, view, row_has_unread))
@@ -549,7 +562,7 @@ def _stop_on_unread(line: _Line, state: _ReadState) -> None:
         if ref.is_inline:
             continue
         kind = (state.scope.classify(ref.qualifier, line.number)
-                if ref.qualifier else ROW)
+                if ref.qualifier else state.scope.bare_kind())
         if kind is None and unread_above:
             raise _TruncatedDefinition
         if kind == ROW and state.row_has_unread and not state.definers.get(ref.name):
@@ -618,7 +631,9 @@ def _owners(
     """The files that may define what *ref* stands for."""
     if ref.is_inline:
         return {scope.path}
-    if ref.qualifier and scope.classify(ref.qualifier, number) != ROW:
+    kind = (scope.classify(ref.qualifier, number) if ref.qualifier
+            else scope.bare_kind())
+    if kind != ROW:
         return set()  # another package's, or not known: no row file
     return definers.get(ref.name, set())
 

@@ -15,6 +15,10 @@ registering file's own imports and declarations:
   another file, a declaration this reader does not parse): ``None``, and the
   route is unresolved.
 
+A bare name refers to the registering file's own package (:meth:`FileScope.
+bare_kind`): the row's only when that file shares the row's directory and
+package clause, or dot-imports the row's package.
+
 Read for Go, the only language whose extractor declares registration sites
 (``go_router.route_site``); in a file of any other language every qualifier
 is ``None``. Lines are matched one at a time, each bounded by the planner's
@@ -35,6 +39,8 @@ ROW = "row"
 OUTSIDE = "outside"
 
 _GO_SUFFIX = ".go"
+# ``package name``: the package a Go file belongs to (with its directory).
+_GO_PACKAGE_RE = re.compile(r"[ \t]*package[ \t]+([A-Za-z_]\w*)")
 # ``import "p"`` / ``import alias "p"``, and a spec line inside ``import (``.
 _GO_IMPORT_RE = re.compile(r'[ \t]*import[ \t]+(?:([A-Za-z_.]\w*)[ \t]+)?"([^"]+)"')
 _GO_IMPORT_BLOCK_RE = re.compile(r"[ \t]*import[ \t]*\([ \t]*$")
@@ -76,6 +82,20 @@ class FileScope:
     path: str
     is_in_row: bool
     imports: dict[str, bool] = field(default_factory=dict)  # name -> is the row
+    package: str | None = None              # this file's package clause
+    row_packages: frozenset[str | None] = frozenset()  # the row files' clauses
+    dot_imports_row: bool = False           # ``import . "<row package>"``
+
+    def bare_kind(self) -> str:
+        """What a bare name on a registration line refers to: this file's
+        own package, which is the row's only when this file sits in the
+        row's directory with the row's package clause, or when it
+        dot-imports the row's package."""
+        if self.dot_imports_row:
+            return ROW
+        if self.is_in_row and self.package in self.row_packages:
+            return ROW
+        return OUTSIDE
     declarations: dict[str, list[tuple[int, _Head]]] = field(
         default_factory=lambda: defaultdict(list))
 
@@ -112,11 +132,28 @@ class FileScope:
         return ROW if self.is_in_row else OUTSIDE
 
 
-def file_scope(path: str, lines: Iterable[str | None], row_dir: str) -> FileScope:
+def package_clause(path: str, lines: Iterable[str | None]) -> str | None:
+    """The package clause of a Go file (``None`` for any other language,
+    or when it is not among the lines read)."""
+    if not path.endswith(_GO_SUFFIX):
+        return None
+    for line in lines:
+        match = _GO_PACKAGE_RE.match(line or "")
+        if match:
+            return match.group(1)
+    return None
+
+
+def file_scope(
+    path: str, lines: list[str | None], row: tuple[str, frozenset[str | None]],
+) -> FileScope:
     """Read the imports and declarations of the registering file *path*
-    (its lines as read; ``None`` for a line not read) in a repository whose
-    row being split is the directory *row_dir*."""
-    scope = FileScope(path, os.path.dirname(path) == row_dir)
+    (its lines as read; ``None`` for a line not read). *row* is the row's
+    directory and its files' package clauses."""
+    row_dir, row_packages = row
+    scope = FileScope(path, os.path.dirname(path) == row_dir,
+                      package=package_clause(path, lines),
+                      row_packages=row_packages)
     if not path.endswith(_GO_SUFFIX):
         return scope
     in_import_block = False
@@ -142,8 +179,12 @@ def _note_go_import(
     if match is None:
         return
     alias, import_path = match.group(1), match.group(2)
-    if alias in ("_", "."):
-        return  # bound to no name a qualifier could use
+    if alias == ".":
+        # its names are bare names of this file
+        scope.dot_imports_row |= _is_row_package(import_path, row_dir)
+        return
+    if alias == "_":
+        return  # bound to no name
     name = alias or _go_package_name(import_path)
     if name:
         scope.imports[name] = _is_row_package(import_path, row_dir)
@@ -233,4 +274,4 @@ def _head_of(dotted: str, *, is_call: bool) -> _Head:
     return _Head(qualifier, name, is_call)
 
 
-__all__ = ["OUTSIDE", "ROW", "FileScope", "file_scope"]
+__all__ = ["OUTSIDE", "ROW", "FileScope", "file_scope", "package_clause"]
