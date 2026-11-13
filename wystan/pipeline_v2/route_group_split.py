@@ -104,6 +104,12 @@ SKIP_OVER_BUDGET = "over_budget"
 #: a route needs a line the planner did not read (past a file's head, or a
 #: line over ``MAX_LINE_CHARS``), so the route's file cannot be known
 SKIP_TRUNCATED_DEFINITION = "truncated_definition"
+#: the row's flow moves would chain back onto an id they started from, so
+#: no final id exists for them
+SKIP_MOVE_CYCLE = "move_cycle"
+#: at the end of the stage a moved flow's final id is held by no flow, so an
+#: edge or copy rewritten to it would name nothing; the split is put back
+SKIP_DANGLING_REFERENCE = "dangling_reference"
 
 # Marks the domain key of a route-group row, so a reader can tell it from a
 # directory domain (the key is not a path that exists).
@@ -761,6 +767,37 @@ class FlowMove:
     new_id: str
 
 
+class MoveCycle(ValueError):
+    """Flow moves that lead back to an id they started from."""
+
+
+def close_flow_moves(flow_moves: dict[str, FlowMove]) -> dict[str, FlowMove]:
+    """Every move followed to where the flow ends.
+
+    A row born in this stage can split again, so one flow can move twice
+    (``srv::f -> orders::f -> refunds::f``). An edge or a copy recorded
+    before the stage names the first id, and a rewrite that follows one hop
+    would leave it on ``orders::f``, which no flow holds. Closed, every key
+    maps to the last row and id: a reference is rewritten once, from the id
+    it names to the final one. A move onto its own id ends there. Raises
+    :class:`MoveCycle` when the moves lead back to an id already passed."""
+    return {
+        old_id: _final_move(old_id, flow_moves)
+        for old_id in flow_moves
+    }
+
+
+def _final_move(old_id: str, flow_moves: dict[str, FlowMove]) -> FlowMove:
+    move = flow_moves[old_id]
+    passed = {old_id}
+    while move.new_id != move.old_id and move.new_id in flow_moves:
+        if move.new_id in passed:
+            raise MoveCycle(old_id)
+        passed.add(move.new_id)
+        move = flow_moves[move.new_id]
+    return FlowMove(move.row, old_id, move.new_id)
+
+
 def has_flow_identity(flow: Any) -> bool:
     """A flow can be moved only when it has an id: the move and its edges
     are found by it, and an empty id would match every other flow that
@@ -775,8 +812,9 @@ def apply_flow_moves(
 
     A copy of a moved flow (still carrying the old id) takes the row and the
     id the move derived; an edge naming the old id names the new one, and a
-    primary edge names the new row. An empty id matches nothing. Applying
-    twice is the same as once."""
+    primary edge names the new row. One hop is followed, so *flow_moves* must
+    be closed (:func:`close_flow_moves`; Stage 8.9 hands it over closed). An
+    empty id matches nothing. Applying twice is the same as once."""
     if not flow_moves:
         return
     for flow in flows or ():
@@ -813,6 +851,7 @@ def flows_with_product_copies(
 __all__ = [
     "FlowMove",
     "MIN_GROUPS",
+    "MoveCycle",
     "MIN_GROUP_ROUTES",
     "ROUTE_GROUP_DOMAIN_PREFIX",
     "ROUTE_SITE_HANDLER",
@@ -820,9 +859,12 @@ __all__ = [
     "ReadBudget",
     "RoutePlan",
     "RouteSplitInput",
+    "SKIP_DANGLING_REFERENCE",
+    "SKIP_MOVE_CYCLE",
     "SKIP_OVER_BUDGET",
     "SKIP_TRUNCATED_DEFINITION",
     "apply_flow_moves",
+    "close_flow_moves",
     "collect_route_sites",
     "declared_route_site_kinds",
     "flows_with_product_copies",
