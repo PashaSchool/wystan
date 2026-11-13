@@ -99,17 +99,18 @@ def _move_to_ink(row: Any, lines: int) -> int:
     return taken
 
 
-def _own_listed_lines(row: Any, ledger: dict[str, Any]) -> int:
-    """Non-code lines a product feature with no developer rows holds
-    through the files it lists itself. Such a feature's ``loc`` was summed
-    from its own member files (a feature minted from a container's files,
-    or one the line count expanded from its paths), not from developer
-    rows, so no developer row's debit reaches it."""
-    non_code = ledger.get("non_code") or {}
-    file_loc = ledger.get("file_loc") or {}
+def _own_listed_lines(row: Any, settled: dict[str, int]) -> int:
+    """Settled lines a product feature with no developer rows holds through
+    the files it lists itself. Such a feature's ``loc`` was summed from its
+    own member files (a feature minted from a container's files, or one the
+    line count expanded from its paths), not from developer rows, so no
+    developer row's debit reaches it. Only files this step settles count: a
+    listed non-code file that no row holds is left where it is, as it is when
+    nothing settles, so the feature cannot change because another file
+    settled elsewhere."""
     listed = {str(p) for p in getattr(row, "paths", None) or ()}
     listed |= {str(getattr(m, "path", "") or "") for m in getattr(row, "member_files", None) or ()}
-    return sum(int(file_loc.get(path, 0)) for path in sorted(listed) if path in non_code)
+    return sum(settled[path] for path in sorted(listed) if path in settled)
 
 
 def _report(held: dict[str, dict[str, int]], classes: dict[str, str], names: dict[str, str]) -> dict[str, Any]:
@@ -146,7 +147,7 @@ def _settle_developer_rows(features: list[Any], held: dict[str, dict[str, int]])
 
 
 def _settle_product_rows(
-    features: list[Any], product_features: list[Any], ledger: dict[str, Any], taken_by_row: dict[str, int],
+    features: list[Any], product_features: list[Any], settled: dict[str, int], taken_by_row: dict[str, int],
 ) -> int:
     """Move on each product row the lines its developer rows moved (or, for
     a row with none, its own listed non-code lines); returns what product
@@ -165,7 +166,7 @@ def _settle_product_rows(
             continue
         seen.add(id(row))
         name = str(getattr(row, "name", "") or "")
-        lines = taken_by_product.get(name, 0) if name in homes else _own_listed_lines(row, ledger)
+        lines = taken_by_product.get(name, 0) if name in homes else _own_listed_lines(row, settled)
         taken = _move_to_ink(row, lines)
         if any(row is pf for pf in product_features):
             taken_product += taken
@@ -215,7 +216,8 @@ def settle_code_lines(
     if not held:
         return None
     taken_by_row = _settle_developer_rows(features, held)
-    taken_product = _settle_product_rows(features, product_features, ledger or {}, taken_by_row)
+    settled = {path: lines for paths in held.values() for path, lines in paths.items()}
+    taken_product = _settle_product_rows(features, product_features, settled, taken_by_row)
     _settle_lane_rows(lane_rows, features, taken_by_row)
     if loc_accounting is not None and isinstance(loc_accounting.get("sum_pf_owned"), int):
         loc_accounting["sum_pf_owned"] -= taken_product
