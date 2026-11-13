@@ -840,21 +840,39 @@ def _name_groups(
 class FlowMove:
     """Where one flow went. ``id`` is derived from the row that holds the
     flow, so it changes with the row and every reference to ``old_id`` must
-    follow. The move map is keyed by ``old_id``: the flow's ``uuid`` (its
-    lasting identity, the journeys' join key) is stamped only at Stage 6.8,
-    after this stage, so at the move it is empty for every flow; it is
-    minted later from the name and is untouched by the move."""
+    follow.
+
+    A move is keyed by ``(old_id, entry_file)`` (:func:`move_key`). Stage
+    8.9 runs before any flow has a ``uuid`` (Stage 6.8 stamps it later, from
+    the name, and the move does not touch it), so the old id and the entry
+    file are what tell one flow from another here: the entry file is what
+    the move is decided on, so two flows sharing both always go to the same
+    place, and a flow that only shares the old id is never taken for the
+    one that moved."""
 
     row: str
     old_id: str
     new_id: str
+    entry_file: str = ""
+
+
+#: ``(old id, entry file)``: the key of a move and of a flow it applies to.
+MoveKey = tuple[str, str]
+
+
+def move_key(flow: Any) -> MoveKey:
+    """The key a move of *flow* is stored under."""
+    return (str(getattr(flow, "id", "") or ""),
+            str(getattr(flow, "entry_point_file", "") or ""))
 
 
 class MoveCycle(ValueError):
     """Flow moves that lead back to an id they started from."""
 
 
-def close_flow_moves(flow_moves: dict[str, FlowMove]) -> dict[str, FlowMove]:
+def close_flow_moves(
+    flow_moves: dict[MoveKey, FlowMove],
+) -> dict[MoveKey, FlowMove]:
     """Every move followed to where the flow ends.
 
     A row born in this stage can split again, so one flow can move twice
@@ -864,21 +882,21 @@ def close_flow_moves(flow_moves: dict[str, FlowMove]) -> dict[str, FlowMove]:
     maps to the last row and id: a reference is rewritten once, from the id
     it names to the final one. A move onto its own id ends there. Raises
     :class:`MoveCycle` when the moves lead back to an id already passed."""
-    return {
-        old_id: _final_move(old_id, flow_moves)
-        for old_id in flow_moves
-    }
+    return {key: _final_move(key, flow_moves) for key in flow_moves}
 
 
-def _final_move(old_id: str, flow_moves: dict[str, FlowMove]) -> FlowMove:
-    move = flow_moves[old_id]
-    passed = {old_id}
-    while move.new_id != move.old_id and move.new_id in flow_moves:
-        if move.new_id in passed:
-            raise MoveCycle(old_id)
-        passed.add(move.new_id)
-        move = flow_moves[move.new_id]
-    return FlowMove(move.row, old_id, move.new_id)
+def _final_move(key: MoveKey, flow_moves: dict[MoveKey, FlowMove]) -> FlowMove:
+    move = flow_moves[key]
+    passed = {key}
+    while move.new_id != move.old_id:
+        following = (move.new_id, move.entry_file)
+        if following not in flow_moves:
+            break
+        if following in passed:
+            raise MoveCycle(key)
+        passed.add(following)
+        move = flow_moves[following]
+    return FlowMove(move.row, key[0], move.new_id, key[1])
 
 
 def has_flow_identity(flow: Any) -> bool:
@@ -889,24 +907,31 @@ def has_flow_identity(flow: Any) -> bool:
 
 
 def apply_flow_moves(
-    flows: Iterable[Any], edges: Iterable[Any], flow_moves: dict[str, FlowMove],
+    flows: Iterable[Any], edges: Iterable[Any],
+    flow_moves: dict[MoveKey, FlowMove],
 ) -> None:
     """Make a flow store agree with the rows after Stage 8.9 moved flows.
 
-    A copy of a moved flow (still carrying the old id) takes the row and the
-    id the move derived; an edge naming the old id names the new one, and a
-    primary edge names the new row. One hop is followed, so *flow_moves* must
-    be closed (:func:`close_flow_moves`; Stage 8.9 hands it over closed). An
+    A copy of a moved flow (same old id AND same entry file) takes the row
+    and the id the move derived; a flow that only shares the old id keeps
+    both. An edge carries only the id, so it follows a move only when the id
+    stands for that one move: no flow given here still holds the id unmoved,
+    and every move of that id ends at the same row and id. A primary edge
+    then names the new row. One hop is followed, so *flow_moves* must be
+    closed (:func:`close_flow_moves`; Stage 8.9 hands it over closed). An
     empty id matches nothing. Applying twice is the same as once."""
     if not flow_moves:
         return
-    for flow in flows or ():
-        move = _move_of(getattr(flow, "id", ""), flow_moves)
+    flows = list(flows or ())
+    edge_moves = _edge_moves(flow_moves, _held_unmoved(flows, flow_moves))
+    for flow in flows:
+        key = move_key(flow)
+        move = flow_moves.get(key) if key[0] else None
         if move is not None:
             flow.primary_feature = move.row
             flow.id = move.new_id
     for edge in edges or ():
-        move = _move_of(getattr(edge, "flow_id", ""), flow_moves)
+        move = edge_moves.get(str(getattr(edge, "flow_id", "") or ""))
         if move is None:
             continue
         edge.flow_id = move.new_id
@@ -914,9 +939,30 @@ def apply_flow_moves(
             edge.feature = move.row
 
 
-def _move_of(flow_id: Any, flow_moves: dict[str, FlowMove]) -> FlowMove | None:
-    key = str(flow_id or "")
-    return flow_moves.get(key) if key else None
+def _held_unmoved(
+    flows: list[Any], flow_moves: dict[MoveKey, FlowMove],
+) -> set[str]:
+    """Ids held by a flow no move applies to: an edge naming one is that
+    flow's edge as much as any moved flow's. A flow that already carries
+    where its move took it (the live pipeline shares the row's object) is
+    not such a flow."""
+    arrived = {(m.new_id, m.entry_file) for m in flow_moves.values()}
+    return {key[0] for key in map(move_key, flows)
+            if key[0] and key not in flow_moves and key not in arrived}
+
+
+def _edge_moves(
+    flow_moves: dict[MoveKey, FlowMove], held: set[str],
+) -> dict[str, FlowMove]:
+    """``old id -> move`` for the old ids an edge can follow."""
+    ends: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    first: dict[str, FlowMove] = {}
+    for (old_id, _entry), move in flow_moves.items():
+        if old_id:
+            ends[old_id].add((move.row, move.new_id))
+            first.setdefault(old_id, move)
+    return {old_id: first[old_id] for old_id, end in ends.items()
+            if len(end) == 1 and old_id not in held}
 
 
 def flows_with_product_copies(
@@ -935,6 +981,7 @@ __all__ = [
     "FlowMove",
     "MIN_GROUPS",
     "MoveCycle",
+    "MoveKey",
     "MIN_GROUP_ROUTES",
     "ROUTE_GROUP_DOMAIN_PREFIX",
     "ROUTE_SITE_HANDLER",
@@ -954,5 +1001,6 @@ __all__ = [
     "has_flow_identity",
     "is_flat",
     "is_route_group_row",
+    "move_key",
     "plan_route_group_split",
 ]

@@ -188,7 +188,7 @@ import os
 import re
 import statistics
 import uuid as _uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -197,9 +197,11 @@ from wystan.pipeline_v2.route_group_split import (
     ROUTE_GROUP_DOMAIN_PREFIX,
     SKIP_MOVE_CYCLE,
     FlowMove,
+    MoveKey,
     RoutePlan,
     RouteSplitInput,
     has_flow_identity,
+    move_key,
     plan_route_group_split,
 )
 from wystan.pipeline_v2.stage_5_5_bipartite import _flow_id
@@ -504,14 +506,17 @@ class SubdecomposeResult:
     route_group_splits: int = 0
     # Route groups the anti-shatter cap left in their parent's residual.
     route_group_capped: int = 0
+    # Flows that entered a born row's file but stayed with the parent: another
+    # flow of the row shares both their id and their entry file.
+    route_group_flows_unmoved: int = 0
     # Rows the route-group planner was consulted for and stopped on a bound:
     # ``{"row", "reason", "files", "route_sites"}`` (names and counts only).
     route_group_skipped: list[dict[str, Any]] = field(default_factory=list)
-    # ``{old flow id: FlowMove}`` of flows that followed their entry file onto
-    # a route-group row, closed: each old id maps to the row and id the flow
+    # ``{(old flow id, entry file): FlowMove}`` of flows that followed their
+    # entry file onto a route-group row, closed: each old id maps to the row and id the flow
     # holds at the end of the stage. Not telemetry: the orchestrator reads it
     # to rewrite the edges and copies that still name a moved flow's old id.
-    flow_moves: dict[str, FlowMove] = field(default_factory=dict)
+    flow_moves: dict[MoveKey, FlowMove] = field(default_factory=dict)
 
     # Back-compat aliases (older telemetry consumers / tests expect these).
     @property
@@ -530,6 +535,8 @@ class SubdecomposeResult:
             telemetry["route_group_splits"] = self.route_group_splits
         if self.route_group_capped:
             telemetry["route_group_capped"] = self.route_group_capped
+        if self.route_group_flows_unmoved:
+            telemetry["route_group_flows_unmoved"] = self.route_group_flows_unmoved
         if self.route_group_skipped:
             telemetry["route_group_skipped"] = list(self.route_group_skipped)
         return telemetry
@@ -1575,12 +1582,12 @@ def _mint_route_group_rows(
     its identity and every file no group took, as their owner. A flat row has
     no scaffold to disown; what stays is real code (helpers, the entry point,
     handlers of a single route) and must keep a primary row. Each flow follows
-    the file its entry point lives in, with its uuid and name unchanged and
-    its id derived from its new row, so a born row is homed by its own flows
+    the file its entry point lives in, with its name unchanged and its id
+    derived from its new row, so a born row is homed by its own flows
     and not by the parent's. ``None`` (the row stays whole, recorded) when
     the moves would lead back to an id they started from."""
     domains, result = plan.domains, ctx.result
-    planned = _planned_flow_moves(source, domains)
+    planned, unmoved = _planned_flow_moves(source, domains)
     route_sites = len(ctx.route_split.route_sites or ())
     if ctx.ledger.would_cycle([move for _flow, move in planned]):
         ctx.used_names.difference_update(domains)  # reserved, never minted
@@ -1606,8 +1613,9 @@ def _mint_route_group_rows(
     result.subfeatures_created += len(minted)
     result.paths_moved += len(moved_files)
     result.route_group_splits += 1
+    result.route_group_flows_unmoved += unmoved
     if len(result.split_sample) < 20:
-        result.split_sample.append({
+        sample = {
             "feature": source.name,
             "domains": len(minted),
             "moved": len(moved_files),
@@ -1615,7 +1623,10 @@ def _mint_route_group_rows(
             "names": sorted(domains)[:25],
             "plan": "route-group",
             "flows_moved": len(flow_moves),
-        })
+        }
+        if unmoved:
+            sample["flows_unmoved"] = unmoved
+        result.split_sample.append(sample)
     return minted
 
 
@@ -1636,18 +1647,29 @@ def _release_moved_files(source: "Feature", moved: set[str]) -> None:
 
 def _planned_flow_moves(
     source: "Feature", domains: dict[str, list[str]],
-) -> list[tuple[Any, FlowMove]]:
+) -> tuple[list[tuple[Any, FlowMove]], int]:
     """The flows of *source* whose entry file a group takes, each with the
-    move it would make. Nothing changes here: the moves are checked for a
-    cycle before any row is minted."""
+    move it would make, and how many such flows stay because another flow of
+    the row shares both their id and their entry file (the two cannot be
+    told apart, so neither is moved). Nothing changes here: the moves are
+    checked for a cycle before any row is minted."""
     row_of_file = {p: name for name, files in domains.items() for p in files}
+    twins = Counter(
+        move_key(flow) for flow in getattr(source, "flows", None) or []
+        if has_flow_identity(flow))
     planned: list[tuple[Any, FlowMove]] = []
+    unmoved = 0
     for flow in getattr(source, "flows", None) or []:
-        row = row_of_file.get(str(getattr(flow, "entry_point_file", "") or ""))
+        old_id, entry = move_key(flow)
+        row = row_of_file.get(entry)
         if row is None or not has_flow_identity(flow):
             continue
-        planned.append((flow, FlowMove(row, flow.id, _flow_id(row, flow.name))))
-    return planned
+        if twins[(old_id, entry)] > 1:
+            unmoved += 1
+            continue
+        planned.append(
+            (flow, FlowMove(row, old_id, _flow_id(row, flow.name), entry)))
+    return planned, unmoved
 
 
 def _move_flows_to_entry_rows(
@@ -1661,9 +1683,9 @@ def _move_flows_to_entry_rows(
     ``id`` and ``primary_feature`` are derived from the holding row, so both
     are re-derived here, in the step that moves the flow: a later
     reprojection (twin merge) re-stamps ids from the holding row and must
-    find nothing to change. ``uuid`` and ``name`` are not touched (the uuid
-    is stamped after this stage, from the name). A flow without an id stays
-    where it is."""
+    find nothing to change. ``name`` is not touched, and no flow has a
+    ``uuid`` yet (Stage 6.8 stamps it after this stage, from the name). A
+    flow without an id stays where it is."""
     row_by_name = {row.name: row for row in minted}
     moving = {id(flow) for flow, _move in planned}
     for flow, move in planned:

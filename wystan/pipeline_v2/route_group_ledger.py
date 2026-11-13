@@ -21,6 +21,7 @@ from wystan.pipeline_v2.route_group_split import (
     SKIP_DANGLING_REFERENCE,
     FlowMove,
     MoveCycle,
+    MoveKey,
     close_flow_moves,
 )
 
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 _COUNTERS = (
     "oversized_total", "features_split", "subfeatures_created", "paths_moved",
     "members_deowned", "route_group_splits", "route_group_capped",
+    "route_group_flows_unmoved",
 )
 _LISTS = ("split_sample", "route_group_skipped")
 # What a row the planner split adds whether or not the split stands.
@@ -66,7 +68,7 @@ class RouteSplitLedger:
 
     def __init__(self) -> None:
         self._splits: list[_RouteSplit] = []
-        self._moves: dict[str, FlowMove] = {}
+        self._moves: dict[MoveKey, FlowMove] = {}
         self._children: dict[int, list["Feature"]] = {}
         self._added: dict[int, _Added] = {}
 
@@ -92,7 +94,7 @@ class RouteSplitLedger:
     def would_cycle(self, moves: list[FlowMove]) -> bool:
         """The stage's moves with *moves* added lead back to an id passed."""
         try:
-            close_flow_moves({**self._moves, **{m.old_id: m for m in moves}})
+            close_flow_moves({**self._moves, **{_key(m): m for m in moves}})
         except MoveCycle:
             return True
         return False
@@ -120,16 +122,20 @@ class RouteSplitLedger:
     def record_moves(self, split: _RouteSplit, moves: list[FlowMove]) -> None:
         split.moves.extend(moves)
         for move in moves:
-            self._moves[move.old_id] = move
+            self._moves[_key(move)] = move
 
     # ── at the end of the stage ─────────────────────────────────────────
 
-    def settle(self, features: list["Feature"], result: Any) -> dict[str, FlowMove]:
-        """The stage's moves, closed, once no final id dangles.
+    def settle(
+        self, features: list["Feature"], result: Any,
+    ) -> dict[MoveKey, FlowMove]:
+        """The stage's moves, closed, once no reference can dangle.
 
         The invariant: every id an edge or copy will be rewritten to is the
-        id of a flow some row holds. While a split breaks it, that split is
-        undone as a whole and recorded."""
+        id of a flow some row holds, and an old id an edge cannot follow
+        (flows sharing it went to different rows) is still held by a flow.
+        While a split breaks it, that split is undone as a whole and
+        recorded."""
         while True:
             closed = close_flow_moves(self._moves)
             broken = self._first_dangling(closed, features)
@@ -138,14 +144,19 @@ class RouteSplitLedger:
             self._undo(broken, features, result)
 
     def _first_dangling(
-        self, closed: dict[str, FlowMove], features: list["Feature"],
+        self, closed: dict[MoveKey, FlowMove], features: list["Feature"],
     ) -> _RouteSplit | None:
         held = {
             getattr(flow, "id", None)
             for row in features for flow in getattr(row, "flows", None) or []
         }
+        ends: dict[str, set[str]] = {}
+        for (old_id, _entry), move in closed.items():
+            ends.setdefault(old_id, set()).add(move.new_id)
         for split in self._splits:
-            if any(closed[m.old_id].new_id not in held for m in split.moves):
+            if any(closed[_key(m)].new_id not in held
+                   or (len(ends[m.old_id]) > 1 and m.old_id not in held)
+                   for m in split.moves):
                 return split
         return None
 
@@ -165,7 +176,7 @@ class RouteSplitLedger:
         for key in under:
             self._take_back(key, result)
         self._splits = [s for s in self._splits if s not in undone]
-        dropped = {m.old_id for s in undone for m in s.moves}
+        dropped = {_key(m) for s in undone for m in s.moves}
         self._moves = {k: m for k, m in self._moves.items() if k not in dropped}
         result.route_group_skipped.append({
             "row": split.source.name,
@@ -209,6 +220,10 @@ class RouteSplitLedger:
             setattr(result, name, kept)
         for floor_key in added.floors:
             result.floor_by_feature.pop(floor_key, None)
+
+
+def _key(move: FlowMove) -> MoveKey:
+    return (move.old_id, move.entry_file)
 
 
 __all__ = ["RouteSplitLedger"]
