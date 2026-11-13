@@ -3765,7 +3765,10 @@ ENV_OUTPUT_FLAGS = (
 #: answer under a key without the scan ordinals (the question sent to the
 #: model is unchanged; the refiner's answer is stored by local id and mapped
 #: back); 118-121 are other branches'.
-KEY_SCHEMA_VERSION = 122
+#: KS125 (2026-11-13): Stage 8.9 splits a flat oversized row by the route
+#: group its files handle when it has no directory to split along; 123 and
+#: 124 are other branches'.
+KEY_SCHEMA_VERSION = 125
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

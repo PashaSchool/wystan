@@ -39,6 +39,7 @@ from wystan.pipeline_v2.stage_8_6_5_scaffold_filter import (
 from wystan.pipeline_v2.stage_8_6_7_di_attribution import (
     attribute_di_services,
 )
+from wystan.pipeline_v2.route_group_split import RouteSplitInput
 from wystan.pipeline_v2.stage_8_7_anchor_desink import (
     desink_workspace_anchors,
 )
@@ -109,6 +110,7 @@ def run_layer2_phase(
     incremental_layer2_noop: bool,
     incremental_base_scan: dict[str, Any] | None,
     llm_health: LlmHealth | None = None,
+    route_sites: list[dict[str, Any]] | None = None,
 ) -> Layer2Result:
     """Run Stage 8 → rollup → 8.5 → 8.6 over the enriched feature set.
 
@@ -570,9 +572,19 @@ def run_layer2_phase(
     # sub-features inherit the anchor's product_feature_id so product paths
     # are byte-stable. Deterministic, no LLM, scale-invariant (grain floor =
     # repo median feature size). Default ON; WYSTAN_STAGE_8_9_SUBDECOMPOSE=0.
-    write_stage_input(run_dir, 8, "anchor_subdecompose", {"features": features})
+    # A flat oversized row has no directory to split along; the route sites
+    # let 8.9 group its files by the route group they handle instead.
+    route_sites = list(route_sites or [])
+    write_stage_input(run_dir, 8, "anchor_subdecompose", {
+        "features": features,
+        "route_sites": route_sites,
+        "repo_path": str(ctx.repo_path),
+    })
     with StageLogger(run_dir, 8, "anchor_subdecompose") as log8_9:
-        subdecompose_result = subdecompose_workspace_anchors(features)
+        subdecompose_result = subdecompose_workspace_anchors(
+            features,
+            route_split=RouteSplitInput(route_sites, Path(ctx.repo_path)),
+        )
         stage_8_9_telemetry = subdecompose_result.as_telemetry()
         log8_9.info(
             f"anchor_subdecompose enabled={subdecompose_result.enabled} "

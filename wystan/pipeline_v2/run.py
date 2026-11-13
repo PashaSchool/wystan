@@ -90,6 +90,7 @@ from wystan.pipeline_v2.phase_finalize import run_finalize_phase
 from wystan.pipeline_v2.phase_intake import run_intake_phase
 from wystan.pipeline_v2.phase_layer2 import run_layer2_phase
 from wystan.pipeline_v2.phase_postprocess import run_postprocess_phase
+from wystan.pipeline_v2.route_group_split import collect_route_sites
 from wystan.pipeline_v2 import scan_result_cache as _scan_cache
 from wystan.pipeline_v2.run_dir import update_latest_symlink
 from wystan.pipeline_v2.run_logger import StageLogger
@@ -887,6 +888,7 @@ def run_pipeline_v2(
         incremental_layer2_noop=incremental_layer2_noop,
         incremental_base_scan=incremental_base_scan,
         llm_health=llm_health,
+        route_sites=collect_route_sites(stage1_out),
     )
     features = layer2.features
     product_features = layer2.product_features

@@ -1095,6 +1095,28 @@ def _run_shared_members(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]
     return {"features": features}
 
 
+def _route_split_input(env: ReplayEnv, state: dict[str, Any]) -> Any:
+    """Route sites + repository root for Stage 8.9's route-group planner.
+
+    A capture written before the planner existed carries neither: the sites
+    are then rebuilt from the SOURCE run's recorded Stage 1 output and the
+    root read from its intake, so an older run replays with the current rule.
+    ``None`` (directory planner only) when either is unrecoverable."""
+    from wystan.pipeline_v2.route_group_split import (
+        RouteSplitInput,
+        collect_route_sites,
+    )
+
+    route_sites = state.get("route_sites")
+    if route_sites is None:
+        sibling = _sibling_input(env, state, 2, "reconcile") or {}
+        route_sites = collect_route_sites(sibling.get("stage1_out"))
+    repo_path = state.get("repo_path") or _replayed_repo_root(env, state)
+    if not repo_path:
+        return None
+    return RouteSplitInput(list(route_sites), Path(repo_path))
+
+
 def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
     from wystan.pipeline_v2.stage_8_9_anchor_subdecompose import (
         subdecompose_workspace_anchors,
@@ -1102,7 +1124,9 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
 
     features = state["features"]
     with StageLogger(env.run_dir, 8, "anchor_subdecompose") as log8_9:
-        subdecompose_result = subdecompose_workspace_anchors(features)
+        subdecompose_result = subdecompose_workspace_anchors(
+            features, route_split=_route_split_input(env, state),
+        )
         log8_9.info(
             f"anchor_subdecompose enabled={subdecompose_result.enabled}",
         )

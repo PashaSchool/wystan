@@ -192,6 +192,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from wystan.pipeline_v2.route_group_split import (
+    ROUTE_GROUP_DOMAIN_PREFIX,
+    RouteSplitInput,
+    plan_route_group_split,
+)
 from wystan.pipeline_v2.stage_8_7_anchor_desink import _FILE_KEYED_SURFACES
 
 if TYPE_CHECKING:
@@ -489,6 +494,8 @@ class SubdecomposeResult:
     husks_kept_residual: int = 0     # husks kept as de-duped 0-owned shared bucket
     husk_members_deduped: int = 0    # double-count shared members removed from husks
     husk_files_conserved: int = 0    # distinct sole-held files kept (never dropped)
+    # Rows split by route group because they had no directory to split along.
+    route_group_splits: int = 0
 
     # Back-compat aliases (older telemetry consumers / tests expect these).
     @property
@@ -500,6 +507,14 @@ class SubdecomposeResult:
         return self.features_split
 
     def as_telemetry(self) -> dict[str, Any]:
+        telemetry = self._base_telemetry()
+        # Present only when the route-group planner fired, so the artifact of
+        # every other scan is byte-identical to the one before the planner.
+        if self.route_group_splits:
+            telemetry["route_group_splits"] = self.route_group_splits
+        return telemetry
+
+    def _base_telemetry(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "features_total": self.features_total,
@@ -1392,6 +1407,7 @@ def _split_one_feature(
     max_domains: int,
     used_names: set[str],
     result: SubdecomposeResult,
+    route_split: RouteSplitInput | None = None,
 ) -> list["Feature"] | None:
     """Decompose ONE oversized feature into per-domain sub-features.
 
@@ -1407,6 +1423,11 @@ def _split_one_feature(
     ``cut`` is judged oversized by the SAME standard as a top-level feature.
     This is what makes the fixed point scale-invariant: every level is measured
     against one stable repo-grain ruler, not a per-level drifting one.
+
+    *route_split* (route sites + repository root) arms the second planner: a
+    row with NO directory plan whose files sit in one directory is grouped by
+    the route group its files handle (:mod:`route_group_split`). ``None``
+    leaves the directory planner alone.
     """
     owned = _owned_paths(source)
     if len(owned) <= cut:
@@ -1422,6 +1443,15 @@ def _split_one_feature(
     path_only = [p for p in (getattr(source, "paths", None) or []) if p not in owned]
 
     domains, residual = _plan_split(owned, floor, max_domains=max_domains)
+    # Route-group rows arrive already named (the URL segment); a directory
+    # domain is named from its leaf by ``_slug`` below.
+    is_route_plan = False
+    if not domains and route_split is not None:
+        domains, residual = plan_route_group_split(
+            owned, route_split, parent_name=source.name,
+            used_names=used_names, max_domains=max_domains,
+        )
+        is_route_plan = bool(domains)
     if not domains:
         return None  # no decomposable domain structure → fixed point
 
@@ -1432,13 +1462,18 @@ def _split_one_feature(
     if not residual:
         smallest = min(domains, key=lambda k: len(domains[k]))
         residual = domains.pop(smallest)
+        if is_route_plan:
+            used_names.discard(smallest)  # the name was reserved, not minted
         if len(domains) < 1:
             return None
 
     minted: list["Feature"] = []
     moved_files: set[str] = set()
     for domain_key, files in domains.items():
-        name = _slug(domain_key, used_names)
+        if is_route_plan:
+            name, domain_key = domain_key, ROUTE_GROUP_DOMAIN_PREFIX + domain_key
+        else:
+            name = _slug(domain_key, used_names)
         sub = _make_subfeature(source, domain_key, files, name)
         minted.append(sub)
         moved_files.update(files)
@@ -1449,20 +1484,26 @@ def _split_one_feature(
     result.features_split += 1
     result.subfeatures_created += len(domains)
     result.paths_moved += len(moved_files)
+    result.route_group_splits += int(is_route_plan)
     if len(result.split_sample) < 20:
-        result.split_sample.append({
+        sample = {
             "feature": source.name,
             "domains": len(domains),
             "moved": len(moved_files),
             "residual": len(residual_set),
             "names": sorted({_strip_route_group(k.rsplit("/", 1)[-1])
                              for k in domains})[:25],
-        })
+        }
+        if is_route_plan:
+            sample["plan"] = "route-group"
+        result.split_sample.append(sample)
     return minted
 
 
 def subdecompose_oversized_features(
     features: list["Feature"],
+    *,
+    route_split: RouteSplitInput | None = None,
 ) -> SubdecomposeResult:
     """Split OVERSIZED developer features into per-domain sub-features along
     the repo's own directory tree — RECURSIVELY, to a fixed point.
@@ -1580,6 +1621,7 @@ def subdecompose_oversized_features(
                 source,
                 floor=floor, cut=cut, max_domains=max_domains,
                 used_names=used_names, result=result,
+                route_split=route_split,
             )
             if minted:
                 all_new.extend(minted)
@@ -1614,6 +1656,8 @@ def subdecompose_oversized_features(
 # Back-compat alias — phase_layer2 + older callers import this name.
 def subdecompose_workspace_anchors(
     features: list["Feature"],
+    *,
+    route_split: RouteSplitInput | None = None,
 ) -> SubdecomposeResult:
     """Deprecated name retained for the pipeline wiring + existing imports.
 
@@ -1622,7 +1666,7 @@ def subdecompose_workspace_anchors(
     workspace anchors); it now decomposes ANY oversized feature. See
     :func:`subdecompose_oversized_features`.
     """
-    return subdecompose_oversized_features(features)
+    return subdecompose_oversized_features(features, route_split=route_split)
 
 
 __all__ = [
