@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import os
 import re
+import statistics
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 from wystan.analyzer.safe_read import path_within_repo
 from wystan.pipeline_v2.spine_anchors import (
@@ -40,6 +41,12 @@ from wystan.pipeline_v2.spine_anchors import (
     load_spine_vocab,
     normalize_anchor_key,
 )
+from wystan.pipeline_v2.stage_6_9_test_strip import is_test_path
+from wystan.pipeline_v2.stage_6_97_feature_loc import (
+    _is_excluded_name,
+    count_file_loc,
+)
+from wystan.pipeline_v2.stage_6_9b_generated_strip import is_generated_path
 
 # ── What a route site locates (the extractor's declaration) ─────────────────
 # An extractor that sets ``route_site`` on its class promises what the
@@ -57,7 +64,8 @@ _ROUTE_SITE_KINDS = (ROUTE_SITE_REGISTRATION, ROUTE_SITE_HANDLER)
 
 # ── Floors ──────────────────────────────────────────────────────────────────
 # One route is an endpoint, not a route group (the same floor
-# ``route_group_recall`` uses for "a group").
+# ``route_group_recall`` uses for "a group"). A route is a distinct
+# ``(method, pattern)``: GET and POST on one URL are two things a user does.
 MIN_GROUP_ROUTES = 2
 # Fewer than two promoted groups is the row itself, not a split.
 MIN_GROUPS = 2
@@ -119,9 +127,11 @@ class _OverBudget(Exception):
 
 @dataclass
 class ReadBudget:
-    """Bytes this planner has read in the current scan."""
+    """Bytes this planner has read in the current scan, and the lines of the
+    files it has counted (a file's lines are counted once per scan)."""
 
     scan_bytes: int = 0
+    file_lines: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -133,6 +143,14 @@ class RouteSplitInput:
     budget: ReadBudget = field(default_factory=ReadBudget, compare=False)
 
 
+class RoutePlan(NamedTuple):
+    """The planner's answer for one row."""
+
+    domains: dict[str, list[str]]  # row name -> files, empty when no split
+    residual: list[str]            # files that stay with the parent
+    groups_capped: int = 0         # groups left in the residual by the cap
+
+
 @dataclass(frozen=True)
 class _Resolved:
     """One route attributed to the row file that handles it."""
@@ -140,6 +158,16 @@ class _Resolved:
     file: str
     group: str
     segment: str  # the URL segment as written, for the row name
+    route: tuple[str, str]  # (method, pattern): GET and POST are two routes
+
+
+@dataclass(frozen=True)
+class _Group:
+    """The files a route group takes, the routes they handle, their lines."""
+
+    files: list[str]
+    routes: frozenset[tuple[str, str]]
+    lines: int = 0
 
 
 # ── Route sites from the extractors ─────────────────────────────────────────
@@ -163,11 +191,12 @@ def collect_route_sites(
     kinds: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Route sites of the declaring extractors, as plain dicts
-    ``{"pattern", "file", "line", "kind"}``. Sorted and de-duplicated so the
-    stage input is stable. Sites of an extractor that declares nothing are
-    left out: nobody has said what their file and line mean."""
+    ``{"pattern", "method", "file", "line", "kind"}``. Sorted and
+    de-duplicated so the stage input is stable. Sites of an extractor that
+    declares nothing are left out: nobody has said what their file and line
+    mean."""
     kinds = declared_route_site_kinds() if kinds is None else kinds
-    sites: set[tuple[str, str, int, str]] = set()
+    sites: set[tuple[str, str, str, int, str]] = set()
     for name, candidates in (extractor_signals or {}).items():
         kind = kinds.get(name)
         if kind is None or not isinstance(candidates, (list, tuple)):
@@ -178,15 +207,17 @@ def collect_route_sites(
                 if site:
                     sites.add(site)
     return [
-        {"pattern": p, "file": f, "line": n, "kind": k}
-        for p, f, n, k in sorted(sites)
+        {"pattern": p, "method": m, "file": f, "line": n, "kind": k}
+        for p, m, f, n, k in sorted(sites)
     ]
 
 
-def _site_of(entry: Any, kind: str) -> tuple[str, str, int, str] | None:
-    """``(pattern, file, line, kind)`` of one extractor route tuple."""
+def _site_of(entry: Any, kind: str) -> tuple[str, str, str, int, str] | None:
+    """``(pattern, method, file, line, kind)`` of one extractor route tuple
+    ``(pattern, method, file, ...)``."""
     try:
-        pattern, file_path = str(entry[0] or ""), str(entry[2] or "")
+        pattern, method = str(entry[0] or ""), str(entry[1] or "").upper()
+        file_path = str(entry[2] or "")
     except (IndexError, TypeError):
         return None
     if not pattern or not _is_repo_relative(file_path):
@@ -196,7 +227,7 @@ def _site_of(entry: Any, kind: str) -> tuple[str, str, int, str] | None:
         line = entry[3] if len(entry) > 3 and isinstance(entry[3], int) else 0
         if line <= 0:
             return None  # a registration site without its line locates nothing
-    return pattern, file_path, line, kind
+    return pattern, method, file_path, line, kind
 
 
 def _is_repo_relative(path: str) -> bool:
@@ -218,39 +249,56 @@ def plan_route_group_split(
     *,
     parent_name: str,
     used_names: set[str],
-    min_files: int = 1,
+    other_rows: Iterable[list[str]] = (),
     max_domains: int | None = None,
-) -> tuple[dict[str, list[str]], list[str]]:
+) -> RoutePlan:
     """Partition a flat row into ``{row name: [files]}`` + residual.
 
-    Returns ``({}, owned)`` when the rule does not apply. Every input file is
-    in exactly one output bucket. *min_files* is the stage's grain floor: a
-    group with fewer files is not a row. Names promoted here are added to
-    *used_names*.
+    The domains are empty when the rule does not apply. Every input file is
+    in exactly one output bucket. *other_rows* are the files of every other
+    developer row of the repository: a group whose files have fewer lines
+    than the median of those rows is not a row. Names promoted here are
+    added to *used_names*.
     """
-    nothing: tuple[dict[str, list[str]], list[str]] = ({}, list(owned))
+    nothing = RoutePlan({}, list(owned))
     sites = split_input.route_sites or []
     if not sites or len(sites) > MAX_ROUTE_SITES or not is_flat(owned):
         return nothing
     try:
         resolved = _resolve_handlers(sorted(owned), sites, split_input)
+        groups = _group_files(resolved)
+        if len(groups) >= MIN_GROUPS:  # lines are counted only when needed
+            groups = _at_line_floor(groups, list(other_rows), split_input)
     except _OverBudget:
         return nothing
-    groups = {
-        g: fr for g, fr in _group_files(resolved).items()
-        if len(fr[0]) >= min_files
-    }
-    ranked = sorted(groups.items(), key=lambda kv: (-kv[1][1], kv[0]))
-    # The stage's anti-shatter cap, unchanged: the groups with most routes
-    # survive, the tail stays on the parent.
-    if max_domains is not None:
-        ranked = ranked[: max(MIN_GROUPS, max_domains)]
+    if len(groups) < MIN_GROUPS:
+        return nothing
+    ranked, capped = _rank_and_cap(groups, max_domains)
     named = _name_groups(ranked, resolved, parent_name, used_names)
     if len(named) < MIN_GROUPS:
         return nothing
     used_names.update(named)
     moved = {f for files in named.values() for f in files}
-    return named, [p for p in owned if p not in moved]
+    return RoutePlan(named, [p for p in owned if p not in moved], capped)
+
+
+def _rank_and_cap(
+    groups: dict[str, _Group], max_domains: int | None,
+) -> tuple[list[tuple[str, _Group]], int]:
+    """Groups by size, largest first, cut to the stage's anti-shatter cap.
+
+    Size is lines, then routes, then the key, so the groups kept when the
+    cap bites are the largest pieces of the product and the order never
+    depends on the order of the files. Returns the kept groups and how many
+    the cap left in the residual."""
+    ranked = sorted(
+        groups.items(),
+        key=lambda kv: (-kv[1].lines, -len(kv[1].routes), kv[0]),
+    )
+    if max_domains is None:
+        return ranked, 0
+    keep = max(MIN_GROUPS, max_domains)
+    return ranked[:keep], max(0, len(ranked) - keep)
 
 
 # ── Bounded reading ─────────────────────────────────────────────────────────
@@ -309,29 +357,32 @@ def _resolve_handlers(
     """Attribute each route to the row file that handles it."""
     owned_set = set(owned)
     out: list[_Resolved] = []
-    by_registration: dict[str, list[tuple[int, str, tuple[str, str]]]] = defaultdict(list)
+    by_registration: dict[str, list[tuple[int, str, tuple[str, str], str]]] = (
+        defaultdict(list))
     for site in sites:
-        group = _group_of_pattern(str(site.get("pattern") or ""))
+        pattern = str(site.get("pattern") or "")
+        group = _group_of_pattern(pattern)
         if group is None:
             continue
+        route = (str(site.get("method") or ""), pattern)
         file_path, kind = str(site.get("file") or ""), site.get("kind")
         if kind == ROUTE_SITE_HANDLER and file_path in owned_set:
-            out.append(_Resolved(file_path, *group))
+            out.append(_Resolved(file_path, *group, route))
         elif kind == ROUTE_SITE_REGISTRATION:
             by_registration[file_path].append(
-                (int(site.get("line") or 0), str(site["pattern"]), group))
+                (int(site.get("line") or 0), pattern, group, route[0]))
     if not by_registration:
         return out
     reader = _Reader(split_input)
     definers = _definers(owned, reader)
     for file_path in sorted(by_registration):
         lines = reader.lines(file_path)
-        for number, pattern, group in sorted(by_registration[file_path]):
+        for number, pattern, group, method in sorted(by_registration[file_path]):
             line = lines[number - 1] if 0 < number <= len(lines) else ""
             handler_file = _handler_file(
                 _line_references(line, pattern), definers)
             if handler_file:
-                out.append(_Resolved(handler_file, *group))
+                out.append(_Resolved(handler_file, *group, (method, pattern)))
     return out
 
 
@@ -448,25 +499,89 @@ def _group_of_file(path: str, handled: Counter) -> str | None:
     return None
 
 
-def _group_files(
-    resolved: Iterable[_Resolved],
-) -> dict[str, tuple[list[str], int]]:
-    """``group -> (files, routes those files handle of that group)`` for the
-    groups that reach :data:`MIN_GROUP_ROUTES`."""
-    by_file: dict[str, Counter] = defaultdict(Counter)
+def _group_files(resolved: Iterable[_Resolved]) -> dict[str, _Group]:
+    """``group -> its files and the routes they handle of it`` for the groups
+    that reach :data:`MIN_GROUP_ROUTES`. A route is a distinct ``(method,
+    pattern)``: the same route registered twice counts once."""
+    by_file: dict[str, dict[str, set[tuple[str, str]]]] = defaultdict(
+        lambda: defaultdict(set))
     for r in resolved:
-        by_file[r.file][r.group] += 1
+        by_file[r.file][r.group].add(r.route)
     files: dict[str, list[str]] = defaultdict(list)
-    routes: Counter = Counter()
+    routes: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for path in sorted(by_file):
-        group = _group_of_file(path, by_file[path])
+        handled = Counter({g: len(rs) for g, rs in by_file[path].items()})
+        group = _group_of_file(path, handled)
         if group is not None:
             files[group].append(path)
-            routes[group] += by_file[path][group]
+            routes[group] |= by_file[path][group]
     return {
-        g: (files[g], routes[g]) for g in files
-        if routes[g] >= MIN_GROUP_ROUTES
+        g: _Group(files[g], frozenset(routes[g])) for g in files
+        if len(routes[g]) >= MIN_GROUP_ROUTES
     }
+
+
+# ── The lines floor ─────────────────────────────────────────────────────────
+
+
+def _at_line_floor(
+    groups: dict[str, _Group], other_rows: list[list[str]],
+    split_input: RouteSplitInput,
+) -> dict[str, _Group]:
+    """The groups whose files hold at least the median lines of the other
+    developer rows: a group smaller than a typical row of this repository is
+    not a row. The median is the repository's own, unclamped, so the floor
+    has no cliff between a repository of one-file rows and one of two-file
+    rows. No other row, no ruler: the floor is zero."""
+    counter = _LineCounter(split_input)
+    totals = [sum(map(counter.lines, row)) for row in other_rows]
+    floor = statistics.median(totals) if totals else 0
+    sized = {
+        key: replace(group, lines=sum(map(counter.lines, group.files)))
+        for key, group in groups.items()
+    }
+    return {key: group for key, group in sized.items() if group.lines >= floor}
+
+
+class _LineCounter:
+    """A file's lines by the engine's own count (executable lines; tests,
+    generated files, lockfiles and binaries count 0), once per scan. Lines
+    are not on the rows yet at this stage (Stage 6.97 stamps them), so they
+    are counted here; every byte opened is charged to the scan budget by
+    the file's size before it is opened."""
+
+    def __init__(self, split_input: RouteSplitInput) -> None:
+        self._root = Path(split_input.repo_root)
+        self._budget = split_input.budget
+
+    def lines(self, rel_path: str) -> int:
+        known = self._budget.file_lines.get(rel_path)
+        if known is None:
+            known = self._count(rel_path)
+            self._budget.file_lines[rel_path] = known
+        return known
+
+    def _count(self, rel_path: str) -> int:
+        path = self._root / rel_path
+        if not _is_repo_relative(rel_path) or not path_within_repo(path, self._root):
+            return 0
+        if _counted_without_reading(rel_path):
+            return 0
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return 0
+        self._budget.scan_bytes += size
+        if self._budget.scan_bytes > MAX_SCAN_BYTES:
+            raise _OverBudget
+        return count_file_loc(path, rel_path)
+
+
+def _counted_without_reading(rel_path: str) -> bool:
+    """The files ``count_file_loc`` answers 0 for by their path alone: they
+    are never opened, so they cost the budget nothing."""
+    return (is_test_path(rel_path) or is_generated_path(rel_path)
+            or _is_excluded_name(rel_path))
 
 
 def _slug(segment: str) -> str:
@@ -487,21 +602,22 @@ def _lawful_name(base: str, parent: str, taken: set[str]) -> str | None:
 
 
 def _name_groups(
-    ranked: list[tuple[str, tuple[list[str], int]]],
+    ranked: list[tuple[str, _Group]],
     resolved: list[_Resolved],
     parent_name: str,
     used_names: set[str],
 ) -> dict[str, list[str]]:
     """Row name per group: the URL segment as its routes write it. A group
     that cannot get a lawful name is not promoted (its files stay)."""
-    group_of_file = {f: g for g, (files, _n) in ranked for f in files}
+    group_of_file = {f: key for key, group in ranked for f in group.files}
     written: dict[str, Counter] = defaultdict(Counter)
     for r in resolved:
         if group_of_file.get(r.file) == r.group:
             written[r.group][_slug(r.segment)] += 1
     taken = set(used_names)
     named: dict[str, list[str]] = {}
-    for group, (files, _routes) in ranked:
+    for group, members in ranked:
+        files = members.files
         base = min(written[group].items(), key=lambda kv: (-kv[1], kv[0]))[0]
         name = _lawful_name(base, _slug(parent_name), taken)
         if name is None:

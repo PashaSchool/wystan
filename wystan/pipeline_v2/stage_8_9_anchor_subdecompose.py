@@ -499,6 +499,8 @@ class SubdecomposeResult:
     husk_files_conserved: int = 0    # distinct sole-held files kept (never dropped)
     # Rows split by route group because they had no directory to split along.
     route_group_splits: int = 0
+    # Route groups the anti-shatter cap left in their parent's residual.
+    route_group_capped: int = 0
     # ``{flow uuid: FlowMove}`` of flows that followed their entry file onto
     # a route-group row. Not telemetry: the orchestrator reads it to rewrite
     # the edges and copies that still name a moved flow's old id.
@@ -519,6 +521,8 @@ class SubdecomposeResult:
         # every other scan is byte-identical to the one before the planner.
         if self.route_group_splits:
             telemetry["route_group_splits"] = self.route_group_splits
+        if self.route_group_capped:
+            telemetry["route_group_capped"] = self.route_group_capped
         return telemetry
 
     def _base_telemetry(self) -> dict[str, Any]:
@@ -1415,7 +1419,7 @@ def _split_one_feature(
     used_names: set[str],
     result: SubdecomposeResult,
     route_split: RouteSplitInput | None = None,
-    route_floor: int = 1,
+    rows_owned: dict[int, list[str]] | None = None,
 ) -> list["Feature"] | None:
     """Decompose ONE oversized feature into per-domain sub-features.
 
@@ -1435,8 +1439,9 @@ def _split_one_feature(
     *route_split* (route sites + repository root) arms the second planner: a
     row with NO directory plan whose files sit in one directory is grouped by
     the route group its files handle (:mod:`route_group_split`). ``None``
-    leaves the directory planner alone. *route_floor* is the fewest files a
-    route-group row may own (see :func:`subdecompose_oversized_features`).
+    leaves the directory planner alone. *rows_owned* (``id(row) -> owned
+    files`` of the stage-start rows) is the ruler of a route-group row's
+    size: the other rows' median lines.
     """
     owned = _owned_paths(source)
     if len(owned) <= cut:
@@ -1456,12 +1461,16 @@ def _split_one_feature(
     # domain is named from its leaf by ``_slug`` below.
     is_route_plan = False
     if not domains and route_split is not None:
-        domains, residual = plan_route_group_split(
+        plan = plan_route_group_split(
             owned, route_split, parent_name=source.name,
-            used_names=used_names, min_files=route_floor,
+            used_names=used_names,
+            other_rows=_other_rows(source, rows_owned or {}),
             max_domains=max_domains,
         )
+        domains, residual = plan.domains, plan.residual
         is_route_plan = bool(domains)
+        if is_route_plan:
+            result.route_group_capped += plan.groups_capped
     if not domains:
         return None  # no decomposable domain structure → fixed point
 
@@ -1504,6 +1513,15 @@ def _split_one_feature(
                              for k in domains})[:25],
         })
     return minted
+
+
+def _other_rows(
+    source: "Feature", rows_owned: dict[int, list[str]],
+) -> list[list[str]]:
+    """Owned files of every stage-start row except *source*, the row being
+    split (its own size must not set the ruler it is measured by)."""
+    return [paths for key, paths in rows_owned.items()
+            if key != id(source) and paths]
 
 
 def _mint_route_group_rows(
@@ -1669,11 +1687,6 @@ def subdecompose_oversized_features(
     if not sizes:
         return result
     median = max(2, int(statistics.median(sizes)))
-    # Grain floor of a route-group row: the repository's median row size
-    # itself. The directory floor above clamps it to 2 because a directory
-    # with one file is no domain; a file that handles a whole route group is
-    # one, where one-file rows are the repository's grain (median 1).
-    route_floor = max(1, int(statistics.median(sizes)))
     total_owned = len({p for v in owned_by_feature.values() for p in v})
     floor = median
     cut = max(
@@ -1714,7 +1727,7 @@ def subdecompose_oversized_features(
                 source,
                 floor=floor, cut=cut, max_domains=max_domains,
                 used_names=used_names, result=result,
-                route_split=route_split, route_floor=route_floor,
+                route_split=route_split, rows_owned=owned_by_feature,
             )
             if minted:
                 all_new.extend(minted)
