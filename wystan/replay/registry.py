@@ -38,10 +38,8 @@ from wystan.llm.cost import CostTracker
 from wystan.pipeline_v2.llm_health import LlmHealth
 from wystan.pipeline_v2.route_group_split import (
     BORN_ROWS_KEY,
-    PARENT_ROWS_KEY,
     STAGE_8_9_META_KEY,
     born_route_groups,
-    route_group_parents,
 )
 from wystan.pipeline_v2.run_logger import StageLogger
 from wystan.pipeline_v2.stage_7_output import write_stage_artifact
@@ -1151,7 +1149,6 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
         "features": features,
         "flow_moves": dict(subdecompose_result.flow_moves),
         BORN_ROWS_KEY: dict(subdecompose_result.route_group_born),
-        PARENT_ROWS_KEY: list(subdecompose_result.route_group_parents),
     }
 
 
@@ -1264,34 +1261,25 @@ def _chain_get(state: dict[str, Any], key: str, default: Any = None) -> Any:
     return chain.get(key, default)
 
 
-def _stage_8_9_record(state: dict[str, Any], key: str) -> None:
-    """Put the record *key* of a Stage 8.9 replayed in this chain into this
-    stage's ``scan_meta``, where the live stage's travels (transport 1);
-    leave the recorded one when Stage 8.9 was not replayed."""
+def _born_record(state: dict[str, Any]) -> dict[str, str]:
+    """Stage 8.9's record of the rows it bore, as a later stage receives it.
+
+    Live, the record travels in ``scan_meta`` (Stage 8.9's telemetry). A
+    replay that re-ran Stage 8.9 in this chain hands its own record on
+    (transport 1): it replaces the recorded one in this stage's
+    ``scan_meta``, as the live stage's would. Otherwise the recorded
+    ``scan_meta`` is the record."""
     scan_meta = state.get("scan_meta")
     chain = state.get("_chain") or {}
-    if key not in chain or not isinstance(scan_meta, dict):
-        return
+    if BORN_ROWS_KEY not in chain or not isinstance(scan_meta, dict):
+        return born_route_groups(scan_meta)
+    born = dict(chain[BORN_ROWS_KEY])
     stage = scan_meta.setdefault(STAGE_8_9_META_KEY, {})
-    if chain[key]:
-        stage[key] = chain[key]
+    if born:
+        stage[BORN_ROWS_KEY] = born
     else:
-        stage.pop(key, None)
-
-
-def _born_record(state: dict[str, Any]) -> dict[str, str]:
-    """Stage 8.9's record of the rows it bore, as a later stage receives
-    it: the replayed stage's when it ran in this chain, else the recorded
-    ``scan_meta``'s."""
-    _stage_8_9_record(state, BORN_ROWS_KEY)
-    return born_route_groups(state.get("scan_meta"))
-
-
-def _parents_record(state: dict[str, Any]) -> frozenset[str]:
-    """Stage 8.9's record of the residual parents, handed on as
-    :func:`_born_record` hands on the born rows."""
-    _stage_8_9_record(state, PARENT_ROWS_KEY)
-    return route_group_parents(state.get("scan_meta"))
+        stage.pop(BORN_ROWS_KEY, None)
+    return born
 
 
 def _sibling_input(
@@ -1725,7 +1713,6 @@ def _run_journey_lattice(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any
                     interior_evidence=_jl_interior,
                     labeler=_jl_labeler,
                     verifier=_jl_verifier,
-                    residual_parents=_parents_record(state),
                 )
                 if jl_tele.get("applied"):
                     from wystan.pipeline_v2.conservation import (

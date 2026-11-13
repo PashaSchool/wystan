@@ -427,17 +427,6 @@ def _dir_family(
     """``(norm_key, phrase)`` from the entry file's directory chain —
     first non-structural, non-root, non-CRUD segment (tenant-scope
     addressing skipped like the route axis); file stem as last resort."""
-    hit = _dir_family_at(entry_file, root_toks, tenant_scope)
-    return hit[:2] if hit else None
-
-
-def _dir_family_at(
-    entry_file: str | None,
-    root_toks: frozenset[str],
-    tenant_scope: frozenset[str],
-) -> tuple[str, str, str | None] | None:
-    """:func:`_dir_family` plus the directory the key was taken from (the
-    path up to and including that segment; ``None`` for the file stem)."""
     if not entry_file:
         return None
     segs = [s for s in entry_file.replace("\\", "/").split("/") if s]
@@ -445,7 +434,6 @@ def _dir_family_at(
         return None
     *dirs, fname = segs
     candidates: list[str] = []
-    source_dir: dict[int, str] = {}  # candidate index -> its directory path
     for i, seg in enumerate(dirs):
         low = seg.lower()
         if low in _STRUCTURAL_DIR_SEGS:
@@ -455,7 +443,6 @@ def _dir_family_at(
         if (low in tenant_scope and i + 1 < len(dirs)
                 and re.match(r"^[\[\($:{<*]", dirs[i + 1])):
             continue  # pure tenant addressing — transparent
-        source_dir[len(candidates)] = "/".join(dirs[:i + 1])
         candidates.append(seg)
     stem = re.sub(r"\.[A-Za-z0-9]+$", "", fname)
     if not candidates and stem:
@@ -477,29 +464,8 @@ def _dir_family_at(
         key = _norm_key(seg)
         if not key or key in _CRUD_LEAF_SEGS:
             continue  # reduced to a bare CRUD leaf — same journey
-        return key, " ".join(_key_words(seg)), source_dir.get(i)
+        return key, " ".join(_key_words(seg))
     return None
-
-
-def _residual_parent_dirs(
-    features: Iterable[Any], residual_parents: frozenset[str],
-) -> frozenset[str]:
-    """The directories of the rows a route-group split left as residual
-    parents (Stage 8.9's record, by row name): a flat row, so the one
-    directory its files sit in. A row whose files span directories names
-    none."""
-    if not residual_parents:
-        return frozenset()
-    from wystan.pipeline_v2.spine_anchors import owned_paths_of
-
-    out: set[str] = set()
-    for row in features:
-        if getattr(row, "name", None) not in residual_parents:
-            continue
-        dirs = {p.rsplit("/", 1)[0] if "/" in p else "" for p in owned_paths_of(row)}
-        if len(dirs) == 1 and next(iter(dirs)):
-            out.add(next(iter(dirs)))
-    return frozenset(out)
 
 
 # ── Cluster / plan data shapes ──────────────────────────────────────────
@@ -836,21 +802,12 @@ def run_journey_lattice(
     interior_evidence: Mapping[str, Any] | None = None,
     labeler: Callable[[list[Any]], dict[str, Any]] | None = None,
     verifier: Callable[[list[dict[str, Any]]], dict[str, bool]] | None = None,
-    residual_parents: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Apply the journey lattice IN PLACE; return telemetry.
 
     ``labeler`` / ``verifier`` are the Wave-3 persona callables
     (keyed scans; ``None`` keyless → deterministic templates, splits
     apply unreviewed — the engine is deterministic by construction).
-
-    ``residual_parents`` names the rows a route-group split left as the
-    residual parent in this scan (Stage 8.9's record). The directory such
-    a row sits in is what is left of a handler package after its route
-    groups became rows of their own, not a journey subject: no child is
-    keyed on it, and the flows it would have taken stay with their
-    journey. Children keyed on routes, sections, other directories or a
-    subdirectory of it are drafted as before.
     """
     from wystan.models.types import UserFlow
     from wystan.pipeline_v2.naming_contract import (
@@ -888,8 +845,6 @@ def run_journey_lattice(
     tenant_scope = frozenset(
         str(s).lower() for s in (spine_vocab.get("tenant_scope_segments") or ())
     )
-
-    residual_dirs = _residual_parent_dirs(features, residual_parents)
 
     # Flow lookup + per-flow caches (uuid first, name fallback).
     flow_by_mid: dict[str, Any] = {}
@@ -1029,13 +984,9 @@ def run_journey_lattice(
                 entry, pf_key, interior_pages, pf_key_by_display)
             if hit:
                 return ("section", *hit)
-            hit = _dir_family_at(entry, root_toks, tenant_scope)
-            if hit and hit[2] in residual_dirs:
-                tele["residual_parent_dir_skipped"] = (
-                    tele.get("residual_parent_dir_skipped", 0) + 1)
-                return None
+            hit = _dir_family(entry, root_toks, tenant_scope)
             if hit:
-                return ("dir", hit[0], hit[1])
+                return ("dir", *hit)
             return None
 
         # Segments with DEEPER continuations anywhere in this PF's pool —

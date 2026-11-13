@@ -137,9 +137,6 @@ ROUTE_GROUP_DOMAIN_PREFIX = "route-group/"
 # present only when the split bore a row.
 STAGE_8_9_META_KEY = "stage_8_9_subdecompose"
 BORN_ROWS_KEY = "route_group_born"
-# ``[row name]`` of the rows a route-group split left as residual parent
-# (the same record, present only when a split stands).
-PARENT_ROWS_KEY = "route_group_parents"
 
 # String literals are blanked (same length, so offsets hold) before a
 # registration line is parsed: a permission string such as
@@ -320,17 +317,6 @@ def _site_of(entry: Any, kind: str) -> tuple[str, str, str, int, str] | None:
 def _is_repo_relative(path: str) -> bool:
     parts = path.split("/")
     return bool(path) and not path.startswith("/") and ".." not in parts
-
-
-def route_group_parents(scan_meta: Any) -> frozenset[str]:
-    """Names of the rows a route-group split left as residual parent in
-    this scan, from Stage 8.9's record in *scan_meta*; empty when none."""
-    stage = (scan_meta or {}).get(STAGE_8_9_META_KEY) if isinstance(
-        scan_meta, dict) else None
-    parents = (stage or {}).get(PARENT_ROWS_KEY) if isinstance(stage, dict) else None
-    if not isinstance(parents, (list, tuple)):
-        return frozenset()
-    return frozenset(str(name) for name in parents)
 
 
 def born_route_groups(scan_meta: Any) -> dict[str, str]:
@@ -1044,7 +1030,6 @@ __all__ = [
     "SKIP_TRUNCATED_DEFINITION",
     "SKIP_UNDO_INCOMPLETE",
     "BORN_ROWS_KEY",
-    "PARENT_ROWS_KEY",
     "STAGE_8_9_META_KEY",
     "apply_flow_moves",
     "born_route_groups",
@@ -1056,5 +1041,4 @@ __all__ = [
     "is_flat",
     "move_key",
     "plan_route_group_split",
-    "route_group_parents",
 ]
