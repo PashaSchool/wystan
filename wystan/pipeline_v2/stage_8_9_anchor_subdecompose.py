@@ -194,9 +194,12 @@ from typing import TYPE_CHECKING, Any
 
 from wystan.pipeline_v2.route_group_split import (
     ROUTE_GROUP_DOMAIN_PREFIX,
+    FlowMove,
     RouteSplitInput,
+    has_flow_identity,
     plan_route_group_split,
 )
+from wystan.pipeline_v2.stage_5_5_bipartite import _flow_id
 from wystan.pipeline_v2.stage_8_7_anchor_desink import _FILE_KEYED_SURFACES
 
 if TYPE_CHECKING:
@@ -496,10 +499,10 @@ class SubdecomposeResult:
     husk_files_conserved: int = 0    # distinct sole-held files kept (never dropped)
     # Rows split by route group because they had no directory to split along.
     route_group_splits: int = 0
-    # ``{flow id: row name}`` of flows that followed their entry file onto a
-    # route-group row. Not telemetry: the orchestrator reads it to point the
-    # flows' primary edges at their new rows.
-    flow_moves: dict[str, str] = field(default_factory=dict)
+    # ``{flow uuid: FlowMove}`` of flows that followed their entry file onto
+    # a route-group row. Not telemetry: the orchestrator reads it to rewrite
+    # the edges and copies that still name a moved flow's old id.
+    flow_moves: dict[str, FlowMove] = field(default_factory=dict)
 
     # Back-compat aliases (older telemetry consumers / tests expect these).
     @property
@@ -1512,8 +1515,9 @@ def _mint_route_group_rows(
     its identity and every file no group took, as their owner. A flat row has
     no scaffold to disown; what stays is real code (helpers, the entry point,
     handlers of a single route) and must keep a primary row. Each flow follows
-    the file its entry point lives in, with its id, uuid and name unchanged,
-    so a born row is homed by its own flows and not by the parent's."""
+    the file its entry point lives in, with its uuid and name unchanged and
+    its id derived from its new row, so a born row is homed by its own flows
+    and not by the parent's."""
     minted: list["Feature"] = []
     moved_files: set[str] = set()
     for name, files in domains.items():
@@ -1557,21 +1561,29 @@ def _release_moved_files(source: "Feature", moved: set[str]) -> None:
 
 def _move_flows_to_entry_rows(
     source: "Feature", minted: list["Feature"],
-) -> dict[str, str]:
+) -> dict[str, FlowMove]:
     """Move each flow of *source* whose entry file a born row now owns onto
-    that row. Returns ``{flow id: row name}``; the caller's orchestrator
-    points the flows' primary edges at the new rows."""
+    that row. Returns ``{flow uuid: move}``; the orchestrator rewrites every
+    edge and copy that names a moved flow's old id.
+
+    ``uuid`` is the flow's identity and never changes. ``id`` and
+    ``primary_feature`` are derived from the holding row, so both are
+    re-derived here, in the step that moves the flow: a later reprojection
+    (twin merge) re-stamps ids from the holding row and must find nothing to
+    change. A flow without a uuid or an id stays where it is."""
     row_of_file = {p: sub for sub in minted for p in sub.paths}
     kept: list[Any] = []
-    moves: dict[str, str] = {}
+    moves: dict[str, FlowMove] = {}
     for flow in getattr(source, "flows", None) or []:
         row = row_of_file.get(str(getattr(flow, "entry_point_file", "") or ""))
-        if row is None:
+        if row is None or not has_flow_identity(flow):
             kept.append(flow)
             continue
-        row.flows.append(flow)
+        old_id = flow.id
         flow.primary_feature = row.name
-        moves[str(getattr(flow, "id", "") or "")] = row.name
+        flow.id = _flow_id(row.name, flow.name)
+        row.flows.append(flow)
+        moves[flow.uuid] = FlowMove(row.name, old_id, flow.id)
     source.flows = kept
     return moves
 

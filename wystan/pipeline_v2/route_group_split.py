@@ -502,26 +502,64 @@ def _name_groups(
 # ── Flows follow their entry files ──────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class FlowMove:
+    """Where one flow went. The flow's ``uuid`` (the key of the move map) is
+    its identity; ``id`` is derived from the row that holds it, so it changes
+    with the row and every reference to ``old_id`` must follow."""
+
+    row: str
+    old_id: str
+    new_id: str
+
+
+def has_flow_identity(flow: Any) -> bool:
+    """A flow can be moved only when both its keys exist: a move is recorded
+    by ``uuid`` and its edges are found by ``id``. An empty key would match
+    every other flow that lacks it."""
+    return bool(getattr(flow, "uuid", "")) and bool(getattr(flow, "id", ""))
+
+
 def apply_flow_moves(
-    flows: Iterable[Any], edges: Iterable[Any], flow_moves: dict[str, str],
+    flows: Iterable[Any], edges: Iterable[Any], flow_moves: dict[str, FlowMove],
 ) -> None:
-    """Make the flow store agree with the rows after Stage 8.9 moved flows:
-    each moved flow's ``primary_feature`` and primary edge name the row that
-    lists it now. Id, uuid and name are untouched; applying twice is the same
-    as once."""
+    """Make a flow store agree with the rows after Stage 8.9 moved flows.
+
+    A copy of a moved flow (matched by ``uuid``) takes the row and the id
+    the move derived; an edge naming the old id names the new one, and a
+    primary edge names the new row. Applying twice is the same as once."""
     if not flow_moves:
         return
     for flow in flows or ():
-        target = flow_moves.get(str(getattr(flow, "id", "") or ""))
-        if target:
-            flow.primary_feature = target
+        uuid = str(getattr(flow, "uuid", "") or "")
+        move = flow_moves.get(uuid) if uuid else None
+        if move is not None:
+            flow.primary_feature = move.row
+            flow.id = move.new_id
+    by_old_id = {m.old_id: m for m in flow_moves.values() if m.old_id}
     for edge in edges or ():
-        target = flow_moves.get(str(getattr(edge, "flow_id", "") or ""))
-        if target and getattr(edge, "type", None) == "primary":
-            edge.feature = target
+        move = by_old_id.get(str(getattr(edge, "flow_id", "") or ""))
+        if move is None:
+            continue
+        edge.flow_id = move.new_id
+        if getattr(edge, "type", None) == "primary":
+            edge.feature = move.row
+
+
+def flows_with_product_copies(
+    flows: Iterable[Any], product_features: Iterable[Any] | None,
+) -> list[Any]:
+    """The flow store plus the flows product features list. The live
+    pipeline shares one object per flow, but a recorded stage input holds a
+    copy in each list, and every copy must carry the moved flow's id."""
+    out = list(flows or ())
+    for product in product_features or ():
+        out.extend(getattr(product, "flows", None) or ())
+    return out
 
 
 __all__ = [
+    "FlowMove",
     "MIN_GROUPS",
     "MIN_GROUP_ROUTES",
     "ROUTE_GROUP_DOMAIN_PREFIX",
@@ -529,9 +567,11 @@ __all__ = [
     "ROUTE_SITE_REGISTRATION",
     "ReadBudget",
     "RouteSplitInput",
+    "apply_flow_moves",
     "collect_route_sites",
     "declared_route_site_kinds",
+    "flows_with_product_copies",
+    "has_flow_identity",
     "is_flat",
-    "apply_flow_moves",
     "plan_route_group_split",
 ]

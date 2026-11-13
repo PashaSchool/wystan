@@ -93,6 +93,7 @@ from wystan.pipeline_v2.phase_postprocess import run_postprocess_phase
 from wystan.pipeline_v2.route_group_split import (
     apply_flow_moves,
     collect_route_sites,
+    flows_with_product_copies,
 )
 from wystan.pipeline_v2 import scan_result_cache as _scan_cache
 from wystan.pipeline_v2.run_dir import update_latest_symlink
@@ -894,10 +895,12 @@ def run_pipeline_v2(
         route_sites=collect_route_sites(stage1_out),
     )
     features = layer2.features
-    # Flows that followed their entry file onto a route-group row: the flow
-    # store and the primary edges name the new row (ids unchanged).
+    # Flows that followed their entry file onto a route-group row took the
+    # row's id at the move: every edge that names the old id follows, before
+    # any later stage reads the edges.
     apply_flow_moves(
-        bipartite.flows, bipartite.edges, layer2.stage_8_9_flow_moves)
+        flows_with_product_copies(bipartite.flows, layer2.product_features),
+        bipartite.edges, layer2.stage_8_9_flow_moves)
     product_features = layer2.product_features
     dev_to_product_map = layer2.dev_to_product_map
     stage_8_telemetry = layer2.stage_8_telemetry
