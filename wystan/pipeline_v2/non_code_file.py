@@ -1,24 +1,30 @@
-"""Is this file code? Decided from the file's own properties.
+"""Is this file unmistakably not code? Decided from the file's own properties.
 
-A feature's lines of code are the lines somebody wrote as code. A tokenizer
-vocabulary, a dashboard export, a bundle a build tool emitted or a client a
-generator wrote belong to their feature and stay listed there, but their
-lines say nothing about how large the feature is.
+A feature's lines of code are the lines a team maintains as code. A tokenizer
+vocabulary, an API description dumped by a tool, a bundle a build emitted
+belong to their feature and stay listed there, but their lines say nothing
+about how large the feature is.
+
+The rules are narrow on purpose: when in doubt the file is code. Anything a
+team keeps by hand stays code: a manifest, a config or a reference table of
+a few thousand lines, a migration a framework scaffolded, a large source
+file with ordinary names in it. Only five properties count, each one a
+machine's signature:
+
+  * a generator's banner standing as a comment line of its own at the top;
+  * the source-map trailer a build tool appends;
+  * minified shape: lines hundreds of bytes long on average;
+  * a megabyte of source whose identifiers are mostly one or two letters
+    (a bundle put through a code formatter keeps its minified names);
+  * a data-format file longer than anybody maintains by hand.
 
 The rules look at the extension, the size, the first bytes and the last
 bytes of a file. They never look at a directory name, so they hold for any
 repository. Classification reads at most ``HEAD_BYTES + TAIL_BYTES`` of a
-file: the engine scans repositories it does not trust, and a class must not
-cost a full read of a file of any size.
+file and matches patterns only against lines cut to ``LINE_CAP`` characters:
+the engine scans repositories it does not trust.
 
-Small files are deliberately out of reach. A file under
-``SMALL_FILE_MAX_BYTES`` is counted as it always was unless it declares
-itself (a lock extension, a generator's banner, a source-map trailer): a
-manifest or a config somebody maintains by hand cannot change a feature's
-size either way, so no list of manifest names is kept.
-
-Prose (``PROSE_EXTENSIONS``) is not judged here. Whether documentation
-counts as lines of code is a separate question with its own answer.
+Prose (``PROSE_EXTENSIONS``) is not judged here.
 """
 
 from __future__ import annotations
@@ -28,102 +34,97 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-from wystan.pipeline_v2.stage_6_9b_generated_strip import (
-    BANNER_SNIFF_BYTES,
-    head_marks_generated,
-)
-
 __all__ = [
     "CLASS_BUNDLED",
     "CLASS_DATA",
     "CLASS_GENERATED",
-    "CLASS_LOCKFILE",
-    "CLASS_MACHINE_SIZED",
     "CLASS_MINIFIED",
     "DATA_AUTHORED_MAX_LINES",
     "FileSample",
+    "HEAD_BYTES",
+    "LINE_CAP",
     "MACHINE_SIZED_BYTES",
     "NON_CODE_CLASSES",
+    "SMALL_FILE_MAX_BYTES",
+    "TAIL_BYTES",
     "classify_sample",
     "non_code_class",
-    "SMALL_FILE_MAX_BYTES",
     "read_sample",
 ]
 
-CLASS_LOCKFILE = "lockfile"
 CLASS_DATA = "data"
 CLASS_GENERATED = "generated"
 CLASS_BUNDLED = "bundled"
 CLASS_MINIFIED = "minified"
-CLASS_MACHINE_SIZED = "machine_sized"
-NON_CODE_CLASSES = (
-    CLASS_LOCKFILE, CLASS_DATA, CLASS_GENERATED, CLASS_BUNDLED,
-    CLASS_MINIFIED, CLASS_MACHINE_SIZED,
-)
+NON_CODE_CLASSES = (CLASS_DATA, CLASS_GENERATED, CLASS_BUNDLED, CLASS_MINIFIED)
 
-# The line count already sniffs this many bytes for a NUL; a generator's
-# banner, a dump's first rows and the shape of the first lines all fit.
+# A generator's banner and the shape of the first lines fit in this.
 HEAD_BYTES = 8192
 # A source-map trailer is the last line of the file.
 TAIL_BYTES = 512
+# No pattern sees more of a line than this: a banner is short, and a crafted
+# line of megabytes must not cost a pattern more than a short one does.
+LINE_CAP = 240
 
-# Below this a file is judged only by what it declares about itself, never
-# by its shape: at ordinary line lengths it is at most some 2,000 lines, and
-# the hand-kept manifests and configs measured on the corpus all sit under it
-# (a 955-line package manifest is 35 kB, a 684-line linter config 32 kB).
+# Below this a file is judged only by what it declares about itself (a
+# banner, a trailer), never by its shape or length.
 SMALL_FILE_MAX_BYTES = 64 * 1024
 
-# Serialisations that hold values and no behaviour. A file in one of them is
-# data once it is too large to be configuration somebody maintains by hand.
+# Serialisations that hold values and no behaviour.
 DATA_EXTENSIONS = frozenset({
-    ".json", ".jsonl", ".ndjson", ".json5", ".geojson",
-    ".yaml", ".yml", ".toml", ".xml", ".plist", ".svg",
-    # Translation catalogs.
-    ".xliff", ".xlf", ".arb", ".resx", ".strings", ".properties",
+    ".json", ".jsonl", ".ndjson", ".geojson", ".yaml", ".yml", ".xml",
 })
-# A data-format file longer than this is a dataset, an export or a catalog.
-# Lines are counted beside bytes because bytes alone depend on the script: a
-# 709-line translation catalog is 46 kB in English and 69 kB in Russian, and
-# both must get the same answer. The length is estimated from the head.
-DATA_AUTHORED_MAX_LINES = 1000
-# A dependency snapshot under any package manager's name.
-LOCK_EXTENSION = ".lock"
-SQL_EXTENSION = ".sql"
-# A SQL file is a dump when at least this share of the statements in its
-# head load rows instead of declaring schema.
-SQL_DUMP_ROW_SHARE = 0.5
+# A data-format file longer than this is a dump, an export or a vocabulary.
+# Measured on the eleven repositories with an accepted map: hand-kept
+# reference data and specifications reach 9,069 lines (client library
+# specifications, price tables, map data); from 10,000 estimated lines up
+# the files are tokenizer vocabularies, API descriptions written by a tool,
+# snapshots and generated resource definitions. The length is estimated from
+# the line density of the head, so the file is never read to count it.
+DATA_AUTHORED_MAX_LINES = 10_000
 
-# Nobody writes a megabyte of source in one file; a text file this large was
-# emitted by a tool even when it carries no marker (a bundle reformatted by
-# a code formatter has ordinary line lengths and no trailer).
+# Minified or packed text. Hand-written code averages 30 to 50 bytes a line;
+# files a team keeps with long lines (tables, templates, inline icons)
+# measured up to 282; build output starts at 546.
+MINIFIED_MEAN_LINE_BYTES = 500
+
+# A megabyte of source is machine-made only when it also looks it: a bundle
+# put through a code formatter has ordinary line lengths and no trailer, but
+# its identifiers are still the minifier's.
 MACHINE_SIZED_BYTES = 1024 * 1024
-
-# Minified or packed text: hand-written code averages 30 to 50 bytes a line.
-MINIFIED_MEAN_LINE_BYTES = 300
+# Share of identifiers of one or two characters. Measured: hand-written and
+# generated-but-readable source of this size 0.01 to 0.16; reformatted and
+# minified bundles 0.41 to 0.72.
+SHORT_IDENTIFIER_SHARE = 0.4
+SHORT_IDENTIFIER_CHARS = 2
+# Words of two letters that are the language's, not a minifier's.
+_SHORT_KEYWORDS = frozenset({"if", "in", "do", "of", "as", "is", "or", "to"})
 
 # A generator states itself at the top of the file, above any code.
-DECLARATION_LINES = 15
+BANNER_LINES = 15
 
 PROSE_EXTENSIONS = frozenset({".md", ".mdx", ".markdown", ".rst", ".adoc", ".txt"})
 
-_COMMENT_LEADER = r"(?://+|#+|/\*+|\*+|--+|<!--+|;+|%+|\"\"\"|''')"
-_SUBJECT = (
-    r"(?:(?:this|the)\s+(?:file|code|module|document|class)\s+"
-    r"(?:is|was|has\s+been)\s+|code\s+|file\s+)"
-)
-_GENERATED = r"(?:auto[- ]?generated|automatically\s+generated|generated)"
-# A comment line that opens by declaring the file generated: either it names
-# its subject ("This file was generated", "Code generated") or it names the
-# tool ("Generated by", "Auto-generated from"). A sentence that merely
-# contains the word ("helpers for generated ids") does not open this way.
-_DECLARATION_RE = re.compile(
-    rf"(?i)^\s*{_COMMENT_LEADER}\s*(?:{_SUBJECT}{_GENERATED}\b"
-    rf"|{_GENERATED}\s+(?:by|from|with|using)\b)"
+_COMMENT_LEADER = r"(?://+|#+|/\*+|\*+|--+|<!--+|;+|%+)"
+# The banner must BE the comment line, from its first word. Three forms, each
+# a statement about this file by the tool that wrote it:
+#   "Code generated ... DO NOT EDIT"          (the form Go formalised)
+#   "@generated"                               (the annotation, alone or first)
+#   "This file is|was auto-generated ..."      (automatically, autogenerated)
+# A sentence that mentions generated things, a "@generated" inside prose and
+# a scaffold's "Generated by <tool>" (the file is then edited by hand) do
+# not start this way.
+_BANNER_RE = re.compile(
+    rf"(?i)^\s*{_COMMENT_LEADER}\s*(?:"
+    r"code generated\b.{0,160}\bdo not edit\b"
+    r"|@generated\b"
+    r"|this (?:file|code|module) (?:is|was|has been) "
+    r"(?:auto[- ]?generated|automatically generated)\b"
+    r")"
 )
 # The source-map specification's trailer: only a build tool writes it.
-_SOURCE_MAP_TRAILER_RE = re.compile(rb"(?://|/\*)[#@]\s*sourceMappingURL=")
-_SQL_ROW_RE = re.compile(r"(?i)^\s*(?:insert\s+into\b|copy\s+\S+.*\bfrom\s+stdin|\(|values\b)")
-_SQL_COMMENT_RE = re.compile(r"^\s*(?:--|/\*|\*)")
+_SOURCE_MAP_TRAILER = (b"//# sourceMappingURL=", b"//@ sourceMappingURL=", b"/*# sourceMappingURL=")
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 
 
 class FileSample(NamedTuple):
@@ -135,9 +136,11 @@ class FileSample(NamedTuple):
 
 
 def read_sample(abs_path: Path) -> FileSample | None:
-    """Size, first ``HEAD_BYTES`` and last ``TAIL_BYTES`` of a file; ``None``
-    when it cannot be read or is empty."""
+    """Size, first ``HEAD_BYTES`` and last ``TAIL_BYTES`` of a regular file;
+    ``None`` when it cannot be read, is empty or is not a regular file."""
     try:
+        if not os.path.isfile(abs_path):
+            return None
         size = os.stat(abs_path).st_size
         if size <= 0:
             return None
@@ -156,15 +159,11 @@ def _extension(rel_path: str) -> str:
     return os.path.splitext(base)[1]
 
 
-def _is_sql_dump(head_text: str) -> bool:
-    statements = [
-        line for line in head_text.splitlines()
-        if line.strip() and not _SQL_COMMENT_RE.match(line)
-    ]
-    if not statements:
-        return False
-    rows = sum(1 for line in statements if _SQL_ROW_RE.match(line))
-    return rows / len(statements) >= SQL_DUMP_ROW_SHARE
+def _has_banner(head_text: str) -> bool:
+    return any(
+        _BANNER_RE.match(line[:LINE_CAP])
+        for line in head_text.splitlines()[:BANNER_LINES]
+    )
 
 
 def _estimated_lines(sample: FileSample) -> float:
@@ -172,59 +171,51 @@ def _estimated_lines(sample: FileSample) -> float:
     return sample.size * sample.head.count(b"\n") / len(sample.head)
 
 
-def _data_class(ext: str, sample: FileSample, head_text: str) -> str | None:
-    if ext == LOCK_EXTENSION:
-        return CLASS_LOCKFILE
-    if sample.size <= SMALL_FILE_MAX_BYTES:
-        return None
-    if ext in DATA_EXTENSIONS and _estimated_lines(sample) > DATA_AUTHORED_MAX_LINES:
-        return CLASS_DATA
-    if ext == SQL_EXTENSION and _is_sql_dump(head_text):
-        return CLASS_DATA
-    return None
-
-
-def _declares_generated(head: bytes, head_text: str) -> bool:
-    # The banner the generated-file strip knows, on the bytes it reads, so
-    # the two never disagree about a file; then the wider declaration.
-    banner = head[:BANNER_SNIFF_BYTES].decode("utf-8", errors="replace")
-    if head_marks_generated(banner):
-        return True
-    return any(
-        _DECLARATION_RE.match(line)
-        for line in head_text.splitlines()[:DECLARATION_LINES]
-    )
-
-
 def _is_minified(sample: FileSample) -> bool:
-    if sample.size <= SMALL_FILE_MAX_BYTES:
-        return False
     mean_line_bytes = len(sample.head) / (sample.head.count(b"\n") + 1)
     return mean_line_bytes >= MINIFIED_MEAN_LINE_BYTES
+
+
+def _has_minifier_names(head_text: str) -> bool:
+    names = [
+        name for line in head_text.splitlines()
+        for name in _IDENTIFIER_RE.findall(line[:LINE_CAP])
+        if name not in _SHORT_KEYWORDS
+    ]
+    if not names:
+        return False
+    short = sum(1 for name in names if len(name) <= SHORT_IDENTIFIER_CHARS)
+    return short / len(names) >= SHORT_IDENTIFIER_SHARE
+
+
+def _shape_class(ext: str, sample: FileSample, head_text: str) -> str | None:
+    """What a large file's shape says; ``None`` for a small one."""
+    if sample.size <= SMALL_FILE_MAX_BYTES:
+        return None
+    if _is_minified(sample):
+        return CLASS_MINIFIED
+    if ext in DATA_EXTENSIONS:
+        long_data = _estimated_lines(sample) > DATA_AUTHORED_MAX_LINES
+        return CLASS_DATA if long_data else None
+    if sample.size >= MACHINE_SIZED_BYTES and _has_minifier_names(head_text):
+        return CLASS_BUNDLED
+    return None
 
 
 def classify_sample(rel_path: str, sample: FileSample) -> str | None:
     """The non-code class of a file, or ``None`` when it counts as code.
 
-    Pure. First match wins, from the most certain property to the least:
-    what the extension says, what the file says about itself, what a build
-    tool left in it, what its shape and size say."""
+    Pure. What the file declares comes first (a banner, a trailer), then
+    what its shape says once it is large."""
     ext = _extension(rel_path)
     if ext in PROSE_EXTENSIONS or b"\x00" in sample.head:
         return None
     head_text = sample.head.decode("utf-8", errors="replace")
-    data = _data_class(ext, sample, head_text)
-    if data is not None:
-        return data
-    if _declares_generated(sample.head, head_text):
+    if ext not in DATA_EXTENSIONS and _has_banner(head_text):
         return CLASS_GENERATED
-    if _SOURCE_MAP_TRAILER_RE.search(sample.tail):
+    if any(marker in sample.tail for marker in _SOURCE_MAP_TRAILER):
         return CLASS_BUNDLED
-    if _is_minified(sample):
-        return CLASS_MINIFIED
-    if sample.size >= MACHINE_SIZED_BYTES:
-        return CLASS_MACHINE_SIZED
-    return None
+    return _shape_class(ext, sample, head_text)
 
 
 def non_code_class(abs_path: Path, rel_path: str) -> str | None:
