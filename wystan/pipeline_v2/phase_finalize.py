@@ -6304,6 +6304,29 @@ def run_finalize_phase(
     except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
         scan_meta.setdefault("warnings", []).append(f"lane sync failed ({exc}); lane rows left")
 
+    # Lines of code are reported as code. Until here ``loc`` held every
+    # counted line, so that no pass above decided differently because a
+    # feature's file is a vocabulary or a bundle; ownership is final now and
+    # only the map's readers are left. After the lane sync, so the sync
+    # compares and counts the lines every pass above saw; the settle then
+    # moves on a lane row the lines it moves on that row's developer row.
+    try:
+        from wystan.pipeline_v2.code_lines import settle_code_lines
+        _code_lines_tele = settle_code_lines(
+            features, product_features, _pf_loc_ledger,
+            lineage_result.path_index, scan_meta.get("loc_accounting"),
+            lane_rows=platform_infrastructure)
+        if _code_lines_tele is not None:
+            scan_meta["code_lines"] = _code_lines_tele
+            # The product layer's total was taken by the lane sync above,
+            # on the lines before the settle; it reports code lines too.
+            from wystan.pipeline_v2.ownership_moves import product_layer_total
+            scan_meta["product_layer_lines"] = product_layer_total(
+                product_features, [f for f in features if getattr(f, "layer", None) != "product"])
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
+        scan_meta.setdefault("warnings", []).append(
+            f"code-lines settle failed ({exc}); loc includes non-code files")
+
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import
     write_stage_input(run_dir, 7, "output", {
