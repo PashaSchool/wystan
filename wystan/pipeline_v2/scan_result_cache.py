@@ -3774,7 +3774,8 @@ ENV_OUTPUT_FLAGS = (
 #: KS127 (2026-11-13): the route-group split (KS125) merged with KS126; moves
 #: compose, qualified references keep their qualifier, access tiers are not
 #: names.
-KEY_SCHEMA_VERSION = 127
+#: KS128 (2026-11-13): born-row record and anchor rule changed the map.
+KEY_SCHEMA_VERSION = 128
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
