@@ -3771,7 +3771,13 @@ ENV_OUTPUT_FLAGS = (
 #: takes the tool's anchor where it would stand alone under its package name;
 #: the file lane counts a product feature that lives wholly in a nested
 #: module only for files of that module.
-KEY_SCHEMA_VERSION = 121
+#: KS122 (2026-11-12): the journey refiner and the name writer remember an
+#: answer under a key without the scan ordinals (the question sent to the
+#: model is unchanged; the refiner's answer is stored by local id and mapped
+#: back); 118-121 are other branches'.
+#: KS123 (2026-11-13): the nested-module scope rules (KS118-121) and the
+#: content-keyed name memory (KS122) in one build; no rule changed.
+KEY_SCHEMA_VERSION = 123
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
