@@ -71,7 +71,6 @@ from wystan.llm.cost import CostTracker, deterministic_params, estimate_call_cos
 from wystan.llm.model_gateway import resolve_model as gateway_model
 from wystan.pipeline_v2.llm_health import LlmHealth
 from wystan.pipeline_v2.nav_taxonomy import aggregate_product_feature
-from wystan.pipeline_v2.route_group_split import is_route_group_row
 from wystan.pipeline_v2.stage_6_7c_uf_splitter import (
     residual_citability_enabled as _residual_citability_enabled,
 )
@@ -624,15 +623,18 @@ _SPLIT_MARKER = "sub-domain"
 _SPLIT_PARENT_RE = re.compile(r"of feature '([^']+)'\s*$")
 
 
-def _split_parent_name(f: "Feature") -> str | None:
+def _split_parent_name(
+    f: "Feature", born_rows: frozenset[str] = frozenset(),
+) -> str | None:
     """The parent feature NAME a Stage 8.9/8.9.5 subfeature was split from,
-    or ``None`` when *f* is not a split subfeature."""
+    or ``None`` when *f* is not a split subfeature. *born_rows*: names of
+    the rows the route-group split bore (Stage 8.9's record)."""
     desc = getattr(f, "description", None) or ""
     if _SPLIT_MARKER not in desc.lower():
         return None
     # A route-group row that holds flows is a capability with behaviour of
     # its own, not a grain choice inside a container: it is not folded back.
-    if is_route_group_row(f) and getattr(f, "flows", None):
+    if f.name in born_rows and getattr(f, "flows", None):
         return None
     m = _SPLIT_PARENT_RE.search(desc)
     return m.group(1) if m else None
@@ -644,9 +646,11 @@ def _dev_key(f: Any) -> str:
 
 def _rollup_split_view(
     developer_features: list["Feature"],
+    born_rows: frozenset[str] = frozenset(),
 ) -> tuple[list[Any], dict[str, str]]:
     """Abstraction-input view with split-minted subfeatures FOLDED back into
-    their parents. Returns ``(view, sub_to_parent_key)``.
+    their parents. Returns ``(view, sub_to_parent_key)``. A row the
+    route-group split bore (*born_rows*) that holds flows stands alone.
 
     The DF layer decomposes physical containers (Stage 8.9 deterministic +
     8.9.5 LLM splits, 19-67 thin subfeatures on a monorepo) — but that grain
@@ -678,7 +682,7 @@ def _rollup_split_view(
         seen: set[int] = set()
         cur = sub
         while True:
-            parent_name = _split_parent_name(cur)
+            parent_name = _split_parent_name(cur, born_rows)
             if parent_name is None:
                 return cur  # reached a non-sub feature = the root
             if id(cur) in seen:
@@ -694,7 +698,7 @@ def _rollup_split_view(
     sub_to_parent: dict[str, str] = {}
     folded: dict[int, list["Feature"]] = defaultdict(list)
     for f in developer_features:
-        if _split_parent_name(f) is None:
+        if _split_parent_name(f, born_rows) is None:
             continue
         root = _root_ancestor(f)
         if root is None or root is f:
@@ -841,6 +845,7 @@ def _digest_dev_order(developer_features: list[Any]) -> list[Any]:
 
 def _digest_truncation(
     dev_view: list[Any], developer_features: list[Any],
+    born_rows: frozenset[str] = frozenset(),
 ) -> dict[str, int] | None:
     """How many rows the digest cap leaves out, and how many of those are
     route-group rows born at Stage 8.9 (they stand alone in the view when
@@ -849,13 +854,13 @@ def _digest_truncation(
     changed, and a scan the route-group rule did not touch keeps its
     telemetry byte for byte."""
     dropped = _digest_dev_order(dev_view)[MAX_DEV_FEATURES_DIGEST:]
-    if not dropped or not any(map(is_route_group_row, developer_features)):
+    if not dropped or not any(f.name in born_rows for f in developer_features):
         return None
     return {
         "rows": len(dev_view),
         "kept": MAX_DEV_FEATURES_DIGEST,
         "dropped": len(dropped),
-        "dropped_born": sum(1 for f in dropped if is_route_group_row(f)),
+        "dropped_born": sum(1 for f in dropped if f.name in born_rows),
     }
 
 
@@ -3851,6 +3856,7 @@ def run_journey_abstraction(
     anchored: bool = False,
     interior_evidence: dict[str, Any] | None = None,
     _client_factory: Callable[[], Any | None] = _default_client_factory,
+    born_rows: frozenset[str] = frozenset(),
 ) -> tuple[list["UserFlow"], list["Feature"], dict[str, tuple[str, ...]] | None, dict[str, Any]]:
     """Rewrite user_flows[] + product_features[] at journey/capability grain.
 
@@ -3940,7 +3946,7 @@ def run_journey_abstraction(
 
     non_facet_devs = [f for f in developer_features if not _is_facet(f)]
     tele["facet_devs_excluded"] = len(developer_features) - len(non_facet_devs)
-    dev_view, sub_to_parent = _rollup_split_view(non_facet_devs)
+    dev_view, sub_to_parent = _rollup_split_view(non_facet_devs, born_rows)
     # S5b Seg H — digest stratification (default OFF): the page-anchor walk
     # runs over the ORIGINAL feature list (rollup views carry no flows) and
     # only when armed, so the unset/``0`` digest is byte-identical.
@@ -3953,7 +3959,7 @@ def run_journey_abstraction(
         dev_view, product_features, user_flows, routes_index,
         stratified=_strat, page_anchored=_strat_page_ids,
     )
-    truncation = _digest_truncation(dev_view, non_facet_devs)
+    truncation = _digest_truncation(dev_view, non_facet_devs, born_rows)
     if truncation:
         tele["digest_dev_truncated"] = truncation
     if _strat:

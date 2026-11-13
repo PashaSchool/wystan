@@ -662,6 +662,7 @@ def run_finalize_phase(
     # 2026-07-06: the Shared Platform PF no longer exists on this path).
     # Deterministic, $0 LLM. Kill-switch WYSTAN_SPINE_ANCHORED_MINT=0
     # restores the old path byte-identically.
+    from wystan.pipeline_v2.route_group_split import born_route_groups
     from wystan.pipeline_v2.stage_6_86_anchored_mint import (
         anchored_mint_enabled,
         run_anchored_mint,
@@ -752,6 +753,7 @@ def run_finalize_phase(
                     # WYSTAN_MINT_EMPTY_HONEST on an empty mint.
                     repo_class=getattr(
                         repo_class_result, "repo_class", None),
+                    born_route_groups=born_route_groups(scan_meta),
                 )
                 # B69-v2 — pop the anchor-registry side-channel BEFORE the
                 # tele reaches scan_meta / the stage artifact (live
@@ -1088,6 +1090,7 @@ def run_finalize_phase(
                     tracker=tracker,
                     llm_health=llm_health,
                     log=log_frd,
+                    born_rows=frozenset(born_route_groups(scan_meta)),
                 )
                 if frd_tele is not None:
                     scan_meta["flow_rederive"] = frd_tele
@@ -1451,6 +1454,7 @@ def run_finalize_phase(
                 # Call-2, the per-item membership oracle (RC1), retires.
                 anchored=anchored_mint_applied,
                 interior_evidence=_s67d_interior,
+                born_rows=frozenset(born_route_groups(scan_meta)),
             )
             # Re-stamp dev features' product_feature_id so the bipartite /
             # output linkage stays coherent with the rewritten product layer.

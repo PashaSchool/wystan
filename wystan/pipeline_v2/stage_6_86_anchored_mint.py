@@ -73,7 +73,7 @@ import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from wystan.pipeline_v2.cli_commands import (  # noqa: F401 — re-export
     CLI_ANCHOR_SUPPLY_ENV,
@@ -1827,6 +1827,7 @@ def run_anchored_mint(
     extractor_signals: dict[str, list[Any]] | None = None,
     nav_keys: frozenset[str] = frozenset(),
     repo_class: str | None = None,
+    born_route_groups: Mapping[str, str] | None = None,
 ) -> tuple[list["Feature"], dict[str, Any]]:
     """Derive dev→PF from anchor lineage; REPLACE the product layer.
 
@@ -1841,6 +1842,11 @@ def run_anchored_mint(
     answer (library / CLI / infra / framework) or a lost one (product-app).
     ``None`` ⇒ re-derived from ``ctx`` (Stage 0.7 is pure) so replay matches
     the live site.
+
+    ``born_route_groups`` (``{row name: route group key}``) is Stage 8.9's
+    record of the rows its route-group split bore
+    (``route_group_split.born_route_groups(scan_meta)``); empty or ``None``
+    when it bore none.
     """
     from wystan.pipeline_v2.nav_taxonomy import aggregate_product_feature
     from wystan.pipeline_v2.spine_hygiene import is_facet
@@ -1883,7 +1889,7 @@ def run_anchored_mint(
     # anchor, as a same-stem models file would (route_group_anchor). No born
     # row, or no route anchor for its group: the anchors are unchanged.
     anchors, born_rows_anchored = with_born_row_files(
-        anchors, in_scope, owned_paths_of)
+        anchors, in_scope, owned_paths_of, born_route_groups or {})
     if born_rows_anchored:
         tele["born_rows_route_anchored"] = born_rows_anchored
 

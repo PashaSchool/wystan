@@ -126,18 +126,17 @@ SKIP_DANGLING_REFERENCE = "dangling_reference"
 #: had before the split (recorded beside ``dangling_reference``, with counts)
 SKIP_UNDO_INCOMPLETE = "undo_incomplete"
 
-# Marks the domain key of a route-group row, so a reader can tell it from a
-# directory domain (the key is not a path that exists).
+# Prefixes the domain key of a route-group row in the text of its
+# description (``sub-domain 'route-group/<group key>' of feature '<parent>'``),
+# which also feeds the row's uuid. The text is never read back: which rows
+# were born, and for which group, is the stage's own record below.
 ROUTE_GROUP_DOMAIN_PREFIX = "route-group/"
-# How Stage 8.9 writes that key into a born row's description
-# (``sub-domain 'route-group/<group key>' of feature '<parent>'``). The
-# description is the row's lineage from this stage (Stage 8.9 reads its own
-# ``sub-domain`` marker there to know its prior output): it carries the
-# route group the row was cut along, as a directory row's carries its
-# directory, so a later stage can find the group's route anchor.
-_ROUTE_GROUP_ROW_MARKER = f"sub-domain '{ROUTE_GROUP_DOMAIN_PREFIX}"
-_ROUTE_GROUP_OF_ROW_RE = re.compile(
-    re.escape(_ROUTE_GROUP_ROW_MARKER) + r"([^'/]+)'")
+# Where that record travels: Stage 8.9's telemetry in ``scan_meta``, the
+# stage output every later stage of the scan (and every replay capture of
+# Stage 6.86 and after) already receives. ``{row name: route group key}``,
+# present only when the split bore a row.
+STAGE_8_9_META_KEY = "stage_8_9_subdecompose"
+BORN_ROWS_KEY = "route_group_born"
 
 # String literals are blanked (same length, so offsets hold) before a
 # registration line is parsed: a permission string such as
@@ -320,18 +319,15 @@ def _is_repo_relative(path: str) -> bool:
     return bool(path) and not path.startswith("/") and ".." not in parts
 
 
-def is_route_group_row(feature: Any) -> bool:
-    """A row Stage 8.9 minted from a route group (later stages read this to
-    tell a born capability from a directory split)."""
-    return _ROUTE_GROUP_ROW_MARKER in (getattr(feature, "description", None) or "")
-
-
-def route_group_of(feature: Any) -> str | None:
-    """The route group key a born row was cut along (``user``), or
-    ``None`` for any row the route-group split did not make."""
-    match = _ROUTE_GROUP_OF_ROW_RE.search(
-        getattr(feature, "description", None) or "")
-    return match.group(1) if match else None
+def born_route_groups(scan_meta: Any) -> dict[str, str]:
+    """``{row name: route group key}`` of the rows Stage 8.9 bore in this
+    scan, from its record in *scan_meta*; empty when it bore none."""
+    stage = (scan_meta or {}).get(STAGE_8_9_META_KEY) if isinstance(
+        scan_meta, dict) else None
+    born = (stage or {}).get(BORN_ROWS_KEY) if isinstance(stage, dict) else None
+    if not isinstance(born, dict):
+        return {}
+    return {str(name): str(group) for name, group in born.items()}
 
 
 def is_flat(owned: list[str]) -> bool:
@@ -1033,15 +1029,16 @@ __all__ = [
     "SKIP_OVER_BUDGET",
     "SKIP_TRUNCATED_DEFINITION",
     "SKIP_UNDO_INCOMPLETE",
+    "BORN_ROWS_KEY",
+    "STAGE_8_9_META_KEY",
     "apply_flow_moves",
+    "born_route_groups",
     "close_flow_moves",
     "collect_route_sites",
     "declared_route_site_kinds",
     "flows_with_product_copies",
     "has_flow_identity",
     "is_flat",
-    "is_route_group_row",
     "move_key",
     "plan_route_group_split",
-    "route_group_of",
 ]

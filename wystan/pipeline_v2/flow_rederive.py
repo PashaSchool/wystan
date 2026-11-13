@@ -97,7 +97,6 @@ from wystan.analyzer.validation import is_test_file
 from wystan.cache.backend import CacheKind
 from wystan.llm.cost import CostTracker
 from wystan.pipeline_v2.llm_health import LlmHealth
-from wystan.pipeline_v2.route_group_split import is_route_group_row
 from wystan.pipeline_v2.stage_3_flows import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_WORKERS,
@@ -288,11 +287,13 @@ def select_rederive_cohort(
     features: list[Any],
     stage3_unit_snapshot: dict[str, list[str]],
     ctx: Any,
+    born_rows: frozenset[str] = frozenset(),
 ) -> CohortSelection:
     """Causal cohort selection over the CURRENT (post-grain) board.
 
     Pure and $0 — runs identically keyed and keyless, so the armed
-    keyless census judges exactly this function's output.
+    keyless census judges exactly this function's output. *born_rows* are
+    the names of the rows Stage 8.9's route-group split bore (its record).
     """
     repo_path = Path(ctx.repo_path)
     sel = CohortSelection()
@@ -349,7 +350,7 @@ def select_rederive_cohort(
         # A route-group row born at Stage 8.9 that received its flows by the
         # move is not starved: its flows were derived on the files it owns.
         # Asking again could give it a second flow at the same entry.
-        if is_route_group_row(f) and getattr(f, "flows", None):
+        if f.name in born_rows and getattr(f, "flows", None):
             sel.excluded_born_with_flows += 1
             continue
 
@@ -713,6 +714,7 @@ def run_flow_rederive(
     _client_factory: Callable[[], Any | None] = _default_client_factory,
     max_workers: int = DEFAULT_MAX_WORKERS,
     log: Any = None,
+    born_rows: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Run the F3′ post-grain flow re-derivation. Mutates in place.
 
@@ -725,7 +727,7 @@ def run_flow_rederive(
         logger.info("flow_rederive: no stage-3 unit snapshot — skipped")
         return None
 
-    sel = select_rederive_cohort(features, stage3_unit_snapshot, ctx)
+    sel = select_rederive_cohort(features, stage3_unit_snapshot, ctx, born_rows)
     if sel.causal_total == 0:
         return None  # inertness law — armed no-fire is byte-identical
 

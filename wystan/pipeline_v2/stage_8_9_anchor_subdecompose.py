@@ -194,6 +194,7 @@ from typing import TYPE_CHECKING, Any
 
 from wystan.pipeline_v2.route_group_ledger import RouteSplitLedger
 from wystan.pipeline_v2.route_group_split import (
+    BORN_ROWS_KEY,
     ROUTE_GROUP_DOMAIN_PREFIX,
     SKIP_DANGLING_REFERENCE,
     SKIP_MOVE_CYCLE,
@@ -507,6 +508,9 @@ class SubdecomposeResult:
     route_group_splits: int = 0
     # Route groups the anti-shatter cap left in their parent's residual.
     route_group_capped: int = 0
+    # ``{row name: route group key}`` of the rows the route-group split bore:
+    # the stage's record of them, read by later stages through scan_meta.
+    route_group_born: dict[str, str] = field(default_factory=dict)
     # Flows that entered a born row's file but stayed with the parent: another
     # flow of the row shares both their id and their entry file.
     route_group_flows_unmoved: int = 0
@@ -538,6 +542,8 @@ class SubdecomposeResult:
             telemetry["route_group_capped"] = self.route_group_capped
         if self.route_group_flows_unmoved:
             telemetry["route_group_flows_unmoved"] = self.route_group_flows_unmoved
+        if self.route_group_born:
+            telemetry[BORN_ROWS_KEY] = dict(self.route_group_born)
         if self.route_group_skipped:
             telemetry["route_group_skipped"] = list(self.route_group_skipped)
         return telemetry
@@ -1619,12 +1625,13 @@ def _mint_route_group_rows(
     moved_files: set[str] = set()
     for name, files in domains.items():
         # the domain key is the route group, as a directory row's is its
-        # directory: Stage 6.86 reads it to find the group's route anchor
+        # directory; the ledger records it for later stages
         group = (plan.groups or {}).get(name, name)
-        minted.append(_make_subfeature(
-            source, ROUTE_GROUP_DOMAIN_PREFIX + group, files, name))
+        row = _make_subfeature(
+            source, ROUTE_GROUP_DOMAIN_PREFIX + group, files, name)
+        ctx.ledger.record_born(split, row, group)
+        minted.append(row)
         moved_files.update(files)
-    split.born.extend(minted)
     _release_moved_files(source, moved_files)
     flow_moves = _move_flows_to_entry_rows(source, minted, planned)
     ctx.ledger.record_moves(split, flow_moves)
@@ -1903,6 +1910,7 @@ def subdecompose_oversized_features(
     # twice) and checked: every final id is held by a flow, or the split
     # that broke it is undone whole. Only then do the edges follow them.
     result.flow_moves = ledger.settle(features, result, used_names)
+    result.route_group_born = ledger.born_groups(features)
     return result
 
 

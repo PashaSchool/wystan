@@ -11,7 +11,8 @@ flows yet at the mint, was laned (``no_anchor_lineage``).
 
 The split already resolved each route of the group to the file that defines
 its handler. So a born row's files join the route anchor of the group it was
-cut along (read from the row's lineage, :func:`route_group_of`), exactly as
+cut along (Stage 8.9's record, :func:`route_group_split.born_route_groups`,
+keyed by row name; a row's text is never read), exactly as
 a same-stem models file joins it: same membership, same rungs, same
 refusals. Only that one group: other segments whose routes resolved to the
 same file add nothing. No route anchor for the group, or no born row: the
@@ -22,9 +23,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Callable, Iterable
-
-from wystan.pipeline_v2.route_group_split import route_group_of
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 if TYPE_CHECKING:
     from wystan.pipeline_v2.spine_anchors import SpineAnchor
@@ -37,13 +36,15 @@ def with_born_row_files(
     anchors: list["SpineAnchor"],
     rows: Iterable[Any],
     owned_of: Callable[[Any], list[str]],
+    born: Mapping[str, str],
 ) -> tuple[list["SpineAnchor"], int]:
     """*anchors* with each born row's owned files added to its group's route
-    anchor, and how many born rows were given one."""
+    anchor (*born*: ``{row name: group}``), and how many born rows were
+    given one."""
     added: dict[str, set[str]] = defaultdict(set)
     rows_given = 0
-    for row in rows:
-        group = route_group_of(row)
+    for row in rows if born else ():
+        group = born.get(getattr(row, "name", None) or "")
         anchor = _group_anchor(anchors, group) if group else None
         owned = owned_of(row) if anchor is not None else []
         if anchor is None or not owned:

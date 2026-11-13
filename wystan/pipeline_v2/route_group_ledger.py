@@ -61,6 +61,7 @@ class _RouteSplit:
     files: int        # owned files of the parent, for the record
     route_sites: int  # route sites the planner read, for the record
     born: list["Feature"] = field(default_factory=list)
+    groups: dict[int, str] = field(default_factory=dict)  # id(born) -> group
     moves: list[FlowMove] = field(default_factory=list)
 
 
@@ -130,6 +131,21 @@ class RouteSplitLedger:
             return False
         return bool(getattr(row, "paths", None) or getattr(row, "member_files", None)
                     or getattr(row, "flows", None))
+
+    def record_born(
+        self, split: _RouteSplit, row: "Feature", group: str,
+    ) -> None:
+        """*row* was born by *split* for the route group *group*."""
+        split.born.append(row)
+        split.groups[id(row)] = group
+
+    def born_groups(self, features: list["Feature"]) -> dict[str, str]:
+        """``{row name: group}`` of the born rows the stage ends with: the
+        record later stages read to know a born row (never its text)."""
+        group_of = {key: g for s in self._splits for key, g in s.groups.items()}
+        return dict(sorted(
+            (row.name, group_of[id(row)])
+            for row in features if id(row) in group_of))
 
     def record_moves(self, split: _RouteSplit, moves: list[FlowMove]) -> None:
         split.moves.extend(moves)

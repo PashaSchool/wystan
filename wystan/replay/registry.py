@@ -36,6 +36,7 @@ from typing import Any, Callable
 
 from wystan.llm.cost import CostTracker
 from wystan.pipeline_v2.llm_health import LlmHealth
+from wystan.pipeline_v2.route_group_split import born_route_groups
 from wystan.pipeline_v2.run_logger import StageLogger
 from wystan.pipeline_v2.stage_7_output import write_stage_artifact
 
@@ -1443,6 +1444,7 @@ def _run_anchored_mint(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
                     features, routes_index, ctx,
                     extractor_signals=stage1_out,
                     nav_keys=frozenset(nav_keys),
+                    born_route_groups=born_route_groups(scan_meta),
                 )
                 hh_anchor_registry = mint_tele.pop(
                     "homing_hygiene_anchor_registry", None)
@@ -2626,6 +2628,7 @@ def _run_flow_rederive(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
                 tracker=env.tracker,
                 llm_health=env.llm_health,
                 log=log_frd,
+                born_rows=frozenset(born_route_groups(scan_meta)),
             )
             if frd_tele is not None:
                 scan_meta["flow_rederive"] = frd_tele
@@ -2816,6 +2819,7 @@ def _run_journey_abstraction(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
             llm_health=env.llm_health,
             anchored=anchored_mint_applied,
             interior_evidence=_s67d_interior,
+            born_rows=frozenset(born_route_groups(scan_meta)),
         )
         if s67d_dev_map:
             for _dev in features:
