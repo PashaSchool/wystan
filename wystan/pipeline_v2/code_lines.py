@@ -23,7 +23,6 @@ __all__ = [
     "NON_CODE_SAMPLES",
     "non_code_lines_by_row",
     "settle_code_lines",
-    "stamp_lane_ink",
 ]
 
 # Ledger key under which the settle step leaves its report once it has run.
@@ -130,16 +129,78 @@ def _report(held: dict[str, dict[str, int]], classes: dict[str, str]) -> dict[st
     }
 
 
+def _settle_developer_rows(features: list[Any], held: dict[str, dict[str, int]]) -> dict[str, int]:
+    """Move each developer row's held non-code lines to its ink; returns
+    developer row uuid -> lines moved, for the rows that moved any."""
+    taken_by_row: dict[str, int] = {}
+    for row in features:
+        if not _is_developer(row):
+            continue
+        taken = _move_to_ink(row, sum(held.get(_uuid(row), {}).values()))
+        if taken:
+            taken_by_row[_uuid(row)] = taken
+    return taken_by_row
+
+
+def _settle_product_rows(
+    features: list[Any], product_features: list[Any], ledger: dict[str, Any], taken_by_row: dict[str, int],
+) -> int:
+    """Move on each product row the lines its developer rows moved (or, for
+    a row with none, its own listed non-code lines); returns what product
+    features moved."""
+    taken_by_product: dict[str, int] = {}
+    homes: set[str] = set()
+    for row in features:
+        if _is_developer(row):
+            home = str(getattr(row, "product_feature_id", "") or "")
+            homes.add(home)
+            taken_by_product[home] = taken_by_product.get(home, 0) + taken_by_row.get(_uuid(row), 0)
+    taken_product = 0
+    seen: set[int] = set()
+    for row in list(product_features) + [f for f in features if not _is_developer(f)]:
+        if id(row) in seen:
+            continue
+        seen.add(id(row))
+        name = str(getattr(row, "name", "") or "")
+        lines = taken_by_product.get(name, 0) if name in homes else _own_listed_lines(row, ledger)
+        taken = _move_to_ink(row, lines)
+        if any(row is pf for pf in product_features):
+            taken_product += taken
+    return taken_product
+
+
+def _settle_lane_rows(lane_rows: list[dict[str, Any]] | None, features: list[Any], taken_by_row: dict[str, int]) -> None:
+    """A lane row shows its developer row's lines (the lane sync copied
+    them), so it moves exactly the lines its developer row moved. A lane row
+    whose developer row moved nothing is not touched: ink its developer row
+    carries by path convention was never on the lane row, and this step does
+    not put it there. Rows are matched by name, as the lane sync matches."""
+    by_name = {str(getattr(f, "name", "") or ""): f for f in features if _is_developer(f)}
+    for row in lane_rows or ():
+        developer = by_name.get(str(row.get("name") or ""))
+        lines = taken_by_row.get(_uuid(developer)) if developer is not None else None
+        current = row.get("loc")
+        if not lines or not isinstance(current, int) or isinstance(current, bool):
+            continue
+        taken = min(lines, current)
+        if taken > 0:
+            row["loc"] = current - taken
+            row["artifact_ink_loc"] = int(row.get("artifact_ink_loc") or 0) + taken
+
+
 def settle_code_lines(
     features: list[Any],
     product_features: list[Any],
     ledger: dict[str, Any] | None,
     path_index: Any = None,
     loc_accounting: dict[str, Any] | None = None,
+    *,
+    lane_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Move the lines of non-code files from ``loc`` to ``artifact_ink_loc``
-    on every row that holds them, in place. Run once, when ownership is
-    final and nothing is left to read ``loc`` but the map's readers.
+    on every feature and lane row that holds them, in place, and on no other
+    row. Run once, when ownership is final and the lane is in sync, so that
+    nothing is left to read ``loc`` but the map's readers.
 
     Returns telemetry, or ``None`` when no file was classed: a repository
     with no such file is written exactly as before. A second call changes
@@ -150,55 +211,15 @@ def settle_code_lines(
     held = non_code_lines_by_row(features, ledger, path_index)
     if not held:
         return None
-    taken_by_product: dict[str, int] = {}
-    rows_changed = 0
-    for row in features:
-        if not _is_developer(row):
-            continue
-        taken = _move_to_ink(row, sum(held.get(_uuid(row), {}).values()))
-        if taken:
-            rows_changed += 1
-            home = str(getattr(row, "product_feature_id", "") or "")
-            taken_by_product[home] = taken_by_product.get(home, 0) + taken
-    homes = {str(getattr(f, "product_feature_id", "") or "") for f in features if _is_developer(f)}
-    taken_product = 0
-    product_rows = list(product_features) + [f for f in features if not _is_developer(f)]
-    seen: set[int] = set()
-    for row in product_rows:
-        if id(row) in seen:
-            continue
-        seen.add(id(row))
-        name = str(getattr(row, "name", "") or "")
-        lines = taken_by_product.get(name, 0) if name in homes else _own_listed_lines(row, ledger or {})
-        taken = _move_to_ink(row, lines)
-        if any(row is pf for pf in product_features):
-            taken_product += taken
+    taken_by_row = _settle_developer_rows(features, held)
+    taken_product = _settle_product_rows(features, product_features, ledger or {}, taken_by_row)
+    _settle_lane_rows(lane_rows, features, taken_by_row)
     if loc_accounting is not None and isinstance(loc_accounting.get("sum_pf_owned"), int):
         loc_accounting["sum_pf_owned"] -= taken_product
         if "sum_artifact_ink" in loc_accounting:
             loc_accounting["sum_artifact_ink"] += taken_product
     report = _report(held, (ledger or {}).get("non_code") or {})
-    report["rows_changed"] = rows_changed
+    report["rows_changed"] = len(taken_by_row)
     report["product_lines_moved"] = taken_product
     ledger[_SETTLED] = report
     return report
-
-
-def stamp_lane_ink(lane_rows: list[dict[str, Any]] | None, features: list[Any], report: dict[str, Any] | None) -> int:
-    """Give a platform-lane row the ink of its developer row, when the
-    settle step moved lines there. The lane sync copies ``loc`` only, so a
-    lane row made of non-code files would read 0 lines and nothing else.
-    Rows of a repository where nothing was settled are not touched."""
-    if not lane_rows or not report:
-        return 0
-    ink = {
-        str(getattr(f, "name", "") or ""): getattr(f, "artifact_ink_loc", None)
-        for f in features if _is_developer(f)
-    }
-    stamped = 0
-    for row in lane_rows:
-        lines = ink.get(str(row.get("name") or ""))
-        if lines and row.get("artifact_ink_loc") != lines:
-            row["artifact_ink_loc"] = lines
-            stamped += 1
-    return stamped
