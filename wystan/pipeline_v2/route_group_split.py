@@ -742,9 +742,12 @@ def _name_groups(
 
 @dataclass(frozen=True)
 class FlowMove:
-    """Where one flow went. The flow's ``uuid`` (the key of the move map) is
-    its identity; ``id`` is derived from the row that holds it, so it changes
-    with the row and every reference to ``old_id`` must follow."""
+    """Where one flow went. ``id`` is derived from the row that holds the
+    flow, so it changes with the row and every reference to ``old_id`` must
+    follow. The move map is keyed by ``old_id``: the flow's ``uuid`` (its
+    lasting identity, the journeys' join key) is stamped only at Stage 6.8,
+    after this stage, so at the move it is empty for every flow; it is
+    minted later from the name and is untouched by the move."""
 
     row: str
     old_id: str
@@ -752,10 +755,10 @@ class FlowMove:
 
 
 def has_flow_identity(flow: Any) -> bool:
-    """A flow can be moved only when both its keys exist: a move is recorded
-    by ``uuid`` and its edges are found by ``id``. An empty key would match
-    every other flow that lacks it."""
-    return bool(getattr(flow, "uuid", "")) and bool(getattr(flow, "id", ""))
+    """A flow can be moved only when it has an id: the move and its edges
+    are found by it, and an empty id would match every other flow that
+    lacks one."""
+    return bool(getattr(flow, "id", ""))
 
 
 def apply_flow_moves(
@@ -763,25 +766,29 @@ def apply_flow_moves(
 ) -> None:
     """Make a flow store agree with the rows after Stage 8.9 moved flows.
 
-    A copy of a moved flow (matched by ``uuid``) takes the row and the id
-    the move derived; an edge naming the old id names the new one, and a
-    primary edge names the new row. Applying twice is the same as once."""
+    A copy of a moved flow (still carrying the old id) takes the row and the
+    id the move derived; an edge naming the old id names the new one, and a
+    primary edge names the new row. An empty id matches nothing. Applying
+    twice is the same as once."""
     if not flow_moves:
         return
     for flow in flows or ():
-        uuid = str(getattr(flow, "uuid", "") or "")
-        move = flow_moves.get(uuid) if uuid else None
+        move = _move_of(getattr(flow, "id", ""), flow_moves)
         if move is not None:
             flow.primary_feature = move.row
             flow.id = move.new_id
-    by_old_id = {m.old_id: m for m in flow_moves.values() if m.old_id}
     for edge in edges or ():
-        move = by_old_id.get(str(getattr(edge, "flow_id", "") or ""))
+        move = _move_of(getattr(edge, "flow_id", ""), flow_moves)
         if move is None:
             continue
         edge.flow_id = move.new_id
         if getattr(edge, "type", None) == "primary":
             edge.feature = move.row
+
+
+def _move_of(flow_id: Any, flow_moves: dict[str, FlowMove]) -> FlowMove | None:
+    key = str(flow_id or "")
+    return flow_moves.get(key) if key else None
 
 
 def flows_with_product_copies(

@@ -94,7 +94,7 @@ class Layer2Result:
     stage_8_9_5_telemetry: dict[str, Any]
     stage_8_9_6_telemetry: dict[str, Any]
     stage_8_9_7_telemetry: dict[str, Any]
-    #: ``{flow uuid: FlowMove}`` of flows Stage 8.9 moved onto a
+    #: ``{old flow id: FlowMove}`` of flows Stage 8.9 moved onto a
     #: route-group row (``route_group_split.FlowMove``).
     stage_8_9_flow_moves: dict[str, Any] = field(default_factory=dict)
 

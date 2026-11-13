@@ -505,7 +505,7 @@ class SubdecomposeResult:
     # Rows the route-group planner was consulted for and stopped on a bound:
     # ``{"row", "reason", "files", "route_sites"}`` (names and counts only).
     route_group_skipped: list[dict[str, Any]] = field(default_factory=list)
-    # ``{flow uuid: FlowMove}`` of flows that followed their entry file onto
+    # ``{old flow id: FlowMove}`` of flows that followed their entry file onto
     # a route-group row. Not telemetry: the orchestrator reads it to rewrite
     # the edges and copies that still name a moved flow's old id.
     flow_moves: dict[str, FlowMove] = field(default_factory=dict)
@@ -1604,14 +1604,15 @@ def _move_flows_to_entry_rows(
     source: "Feature", minted: list["Feature"],
 ) -> dict[str, FlowMove]:
     """Move each flow of *source* whose entry file a born row now owns onto
-    that row. Returns ``{flow uuid: move}``; the orchestrator rewrites every
-    edge and copy that names a moved flow's old id.
+    that row. Returns ``{old flow id: move}``; the orchestrator rewrites
+    every edge and copy that names a moved flow's old id.
 
-    ``uuid`` is the flow's identity and never changes. ``id`` and
-    ``primary_feature`` are derived from the holding row, so both are
-    re-derived here, in the step that moves the flow: a later reprojection
-    (twin merge) re-stamps ids from the holding row and must find nothing to
-    change. A flow without a uuid or an id stays where it is."""
+    ``id`` and ``primary_feature`` are derived from the holding row, so both
+    are re-derived here, in the step that moves the flow: a later
+    reprojection (twin merge) re-stamps ids from the holding row and must
+    find nothing to change. ``uuid`` and ``name`` are not touched (the uuid
+    is stamped after this stage, from the name). A flow without an id stays
+    where it is."""
     row_of_file = {p: sub for sub in minted for p in sub.paths}
     kept: list[Any] = []
     moves: dict[str, FlowMove] = {}
@@ -1624,7 +1625,7 @@ def _move_flows_to_entry_rows(
         flow.primary_feature = row.name
         flow.id = _flow_id(row.name, flow.name)
         row.flows.append(flow)
-        moves[flow.uuid] = FlowMove(row.name, old_id, flow.id)
+        moves[old_id] = FlowMove(row.name, old_id, flow.id)
     source.flows = kept
     return moves
 
