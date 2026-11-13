@@ -112,8 +112,11 @@ def _own_listed_lines(row: Any, ledger: dict[str, Any]) -> int:
     return sum(int(file_loc.get(path, 0)) for path in sorted(listed) if path in non_code)
 
 
-def _report(held: dict[str, dict[str, int]], classes: dict[str, str]) -> dict[str, Any]:
+def _report(held: dict[str, dict[str, int]], classes: dict[str, str], names: dict[str, str]) -> dict[str, Any]:
+    """The scan's one account of what the settle moved: files and lines, by
+    class, and the largest files with the developer row that holds each."""
     files = {path: lines for paths in held.values() for path, lines in paths.items()}
+    owner = {path: names.get(uuid, "") for uuid, paths in held.items() for path in paths}
     by_class: dict[str, int] = {}
     for path, lines in files.items():
         by_class[classes[path]] = by_class.get(classes[path], 0) + lines
@@ -123,7 +126,7 @@ def _report(held: dict[str, dict[str, int]], classes: dict[str, str]) -> dict[st
         "lines": sum(files.values()),
         "by_class": {cls: by_class[cls] for cls in sorted(by_class)},
         "largest": [
-            {"path": path, "class": classes[path], "lines": files[path]}
+            {"path": path, "class": classes[path], "lines": files[path], "owner": owner[path]}
             for path in largest[:NON_CODE_SAMPLES]
         ],
     }
@@ -218,7 +221,8 @@ def settle_code_lines(
         loc_accounting["sum_pf_owned"] -= taken_product
         if "sum_artifact_ink" in loc_accounting:
             loc_accounting["sum_artifact_ink"] += taken_product
-    report = _report(held, (ledger or {}).get("non_code") or {})
+    names = {_uuid(f): str(getattr(f, "name", "") or "") for f in features if _is_developer(f)}
+    report = _report(held, (ledger or {}).get("non_code") or {}, names)
     report["rows_changed"] = len(taken_by_row)
     report["product_lines_moved"] = taken_product
     ledger[_SETTLED] = report

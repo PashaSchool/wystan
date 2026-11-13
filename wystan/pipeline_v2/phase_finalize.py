@@ -6318,6 +6318,11 @@ def run_finalize_phase(
             lane_rows=platform_infrastructure)
         if _code_lines_tele is not None:
             scan_meta["code_lines"] = _code_lines_tele
+            # The product layer's total was taken by the lane sync above,
+            # on the lines before the settle; it reports code lines too.
+            from wystan.pipeline_v2.ownership_moves import product_layer_total
+            scan_meta["product_layer_lines"] = product_layer_total(
+                product_features, [f for f in features if getattr(f, "layer", None) != "product"])
     except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
         scan_meta.setdefault("warnings", []).append(
             f"code-lines settle failed ({exc}); loc includes non-code files")
