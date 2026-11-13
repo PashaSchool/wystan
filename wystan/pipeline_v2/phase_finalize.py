@@ -6298,6 +6298,7 @@ def run_finalize_phase(
     # feature's file is a vocabulary or a bundle; ownership is final now and
     # only the map's readers are left. Before the lane sync, which copies
     # developer rows' lines into the lane.
+    _code_lines_tele = None
     try:
         from wystan.pipeline_v2.code_lines import settle_code_lines
         _code_lines_tele = settle_code_lines(
@@ -6315,6 +6316,9 @@ def run_finalize_phase(
     try:
         from wystan.pipeline_v2.ownership_moves import product_layer_total, sync_lane_rows
         scan_meta["lane_sync"] = sync_lane_rows(platform_infrastructure, features, product_features)
+        if _code_lines_tele is not None:
+            from wystan.pipeline_v2.code_lines import stamp_lane_ink
+            stamp_lane_ink(platform_infrastructure, features, _code_lines_tele)
         scan_meta["product_layer_lines"] = product_layer_total(
             product_features, [f for f in features if getattr(f, "layer", None) != "product"])
     except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan

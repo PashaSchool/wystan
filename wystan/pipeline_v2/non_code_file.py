@@ -14,9 +14,14 @@ machine's signature:
   * a generator's banner standing as a comment line of its own at the top;
   * the source-map trailer a build tool appends;
   * minified shape: lines hundreds of bytes long on average;
-  * a megabyte of source whose identifiers are mostly one or two letters
-    (a bundle put through a code formatter keeps its minified names);
+  * a megabyte of script or stylesheet whose identifiers are mostly one or
+    two letters (a bundle put through a code formatter keeps its minified
+    names);
   * a data-format file longer than anybody maintains by hand.
+
+A property of shape must hold at BOTH ends of the file: a source file that
+opens with one long constant, or a data file whose first lines are short and
+whose body is not, is code.
 
 The rules look at the extension, the size, the first bytes and the last
 bytes of a file. They never look at a directory name, so they hold for any
@@ -60,8 +65,9 @@ NON_CODE_CLASSES = (CLASS_DATA, CLASS_GENERATED, CLASS_BUNDLED, CLASS_MINIFIED)
 
 # A generator's banner and the shape of the first lines fit in this.
 HEAD_BYTES = 8192
-# A source-map trailer is the last line of the file.
-TAIL_BYTES = 512
+# The other end of the file: its last line (a source-map trailer) and enough
+# lines to check that the shape of the head is the shape of the file.
+TAIL_BYTES = 4096
 # No pattern sees more of a line than this: a banner is short, and a crafted
 # line of megabytes must not cost a pattern more than a short one does.
 LINE_CAP = 240
@@ -79,8 +85,10 @@ DATA_EXTENSIONS = frozenset({
 # reference data and specifications reach 9,069 lines (client library
 # specifications, price tables, map data); from 10,000 estimated lines up
 # the files are tokenizer vocabularies, API descriptions written by a tool,
-# snapshots and generated resource definitions. The length is estimated from
-# the line density of the head, so the file is never read to count it.
+# snapshots and generated resource definitions. The length is estimated
+# from the line density of the head and of the tail, taking the sparser of
+# the two, so the file is never read to count it and a file is called long
+# only when both ends say so.
 DATA_AUTHORED_MAX_LINES = 10_000
 
 # Minified or packed text. Hand-written code averages 30 to 50 bytes a line;
@@ -88,14 +96,19 @@ DATA_AUTHORED_MAX_LINES = 10_000
 # measured up to 282; build output starts at 546.
 MINIFIED_MEAN_LINE_BYTES = 500
 
-# A megabyte of source is machine-made only when it also looks it: a bundle
-# put through a code formatter has ordinary line lengths and no trailer, but
-# its identifiers are still the minifier's.
+# A megabyte of script or stylesheet is machine-made only when it also looks
+# it: a bundle put through a code formatter has ordinary line lengths and no
+# trailer, but its identifiers are still the minifier's. Only the languages
+# that are shipped bundled are asked: short names in a megabyte of C or of a
+# word list are tables and loop counters, and that file is code.
 MACHINE_SIZED_BYTES = 1024 * 1024
-# Share of identifiers of one or two characters. Measured: hand-written and
-# generated-but-readable source of this size 0.01 to 0.16; reformatted and
-# minified bundles 0.41 to 0.72.
-SHORT_IDENTIFIER_SHARE = 0.4
+BUNDLE_EXTENSIONS = frozenset({".js", ".mjs", ".cjs", ".jsx", ".css"})
+# Fewer identifiers than this in a sample say nothing about naming.
+MIN_IDENTIFIERS = 100
+# Share of identifiers of one or two characters, over the head and the tail
+# together. Measured: hand-written and generated-but-readable source of this
+# size 0.01 to 0.16; reformatted bundles 0.41 and up. The bound sits midway.
+SHORT_IDENTIFIER_SHARE = 0.3
 SHORT_IDENTIFIER_CHARS = 2
 # Words of two letters that are the language's, not a minifier's.
 _SHORT_KEYWORDS = frozenset({"if", "in", "do", "of", "as", "is", "or", "to"})
@@ -122,7 +135,9 @@ _BANNER_RE = re.compile(
     r"(?:auto[- ]?generated|automatically generated)\b"
     r")"
 )
-# The source-map specification's trailer: only a build tool writes it.
+# The source-map specification's trailer: only a build tool writes it, as
+# the last line of the file and from that line's first character. The same
+# text inside a string or a longer line is somebody's code about source maps.
 _SOURCE_MAP_TRAILER = (b"//# sourceMappingURL=", b"//@ sourceMappingURL=", b"/*# sourceMappingURL=")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 
@@ -166,26 +181,49 @@ def _has_banner(head_text: str) -> bool:
     )
 
 
+def _newline_density(chunk: bytes) -> float:
+    return chunk.count(b"\n") / len(chunk) if chunk else 0.0
+
+
 def _estimated_lines(sample: FileSample) -> float:
-    """Length of the file in lines, from the line density of its head."""
-    return sample.size * sample.head.count(b"\n") / len(sample.head)
+    """Length of the file in lines, from the sparser of its two ends."""
+    density = min(_newline_density(sample.head), _newline_density(sample.tail))
+    return sample.size * density
+
+
+def _mean_line_bytes(chunk: bytes) -> float:
+    return len(chunk) / (chunk.count(b"\n") + 1)
 
 
 def _is_minified(sample: FileSample) -> bool:
-    mean_line_bytes = len(sample.head) / (sample.head.count(b"\n") + 1)
-    return mean_line_bytes >= MINIFIED_MEAN_LINE_BYTES
+    return (
+        _mean_line_bytes(sample.head) >= MINIFIED_MEAN_LINE_BYTES
+        and _mean_line_bytes(sample.tail) >= MINIFIED_MEAN_LINE_BYTES
+    )
 
 
-def _has_minifier_names(head_text: str) -> bool:
+def _has_source_map_trailer(tail: bytes) -> bool:
+    lines = tail.rstrip().rsplit(b"\n", 1)
+    return lines[-1].lstrip(b"\r").startswith(_SOURCE_MAP_TRAILER)
+
+
+def _has_minifier_names(text: str) -> bool:
     names = [
-        name for line in head_text.splitlines()
+        name for line in text.splitlines()
         for name in _IDENTIFIER_RE.findall(line[:LINE_CAP])
         if name not in _SHORT_KEYWORDS
     ]
-    if not names:
+    if len(names) < MIN_IDENTIFIERS:
         return False
     short = sum(1 for name in names if len(name) <= SHORT_IDENTIFIER_CHARS)
     return short / len(names) >= SHORT_IDENTIFIER_SHARE
+
+
+def _is_reformatted_bundle(ext: str, sample: FileSample, head_text: str) -> bool:
+    if ext not in BUNDLE_EXTENSIONS or sample.size < MACHINE_SIZED_BYTES:
+        return False
+    tail_text = sample.tail.decode("utf-8", errors="replace")
+    return _has_minifier_names(head_text + "\n" + tail_text)
 
 
 def _shape_class(ext: str, sample: FileSample, head_text: str) -> str | None:
@@ -197,7 +235,7 @@ def _shape_class(ext: str, sample: FileSample, head_text: str) -> str | None:
     if ext in DATA_EXTENSIONS:
         long_data = _estimated_lines(sample) > DATA_AUTHORED_MAX_LINES
         return CLASS_DATA if long_data else None
-    if sample.size >= MACHINE_SIZED_BYTES and _has_minifier_names(head_text):
+    if _is_reformatted_bundle(ext, sample, head_text):
         return CLASS_BUNDLED
     return None
 
@@ -213,7 +251,7 @@ def classify_sample(rel_path: str, sample: FileSample) -> str | None:
     head_text = sample.head.decode("utf-8", errors="replace")
     if ext not in DATA_EXTENSIONS and _has_banner(head_text):
         return CLASS_GENERATED
-    if any(marker in sample.tail for marker in _SOURCE_MAP_TRAILER):
+    if _has_source_map_trailer(sample.tail):
         return CLASS_BUNDLED
     return _shape_class(ext, sample, head_text)
 

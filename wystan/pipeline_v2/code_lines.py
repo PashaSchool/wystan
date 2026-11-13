@@ -6,12 +6,9 @@ what a model is told about it, where lines go when code changes owner. Those
 decisions must not move because one of a feature's files turned out to be a
 vocabulary or a bundle, so this module leaves them alone.
 
-Non-code lines matter in two places only:
-
-  * what the map REPORTS as lines of code (:func:`settle_code_lines`, the
-    last step before the map is written);
-  * what counts toward a feature being too large
-    (:func:`non_code_lines_by_row`, read by the capability split).
+Non-code lines matter in one place only: what the map REPORTS as lines of
+code (:func:`settle_code_lines`, the last step before the map is written).
+No decision and no model request in the pipeline reads the result.
 
 A file's non-code lines stay visible: they move from ``loc`` to
 ``artifact_ink_loc``, the channel the map already has for lines that exist
@@ -22,7 +19,15 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["NON_CODE_SAMPLES", "non_code_lines_by_row", "settle_code_lines"]
+__all__ = [
+    "NON_CODE_SAMPLES",
+    "non_code_lines_by_row",
+    "settle_code_lines",
+    "stamp_lane_ink",
+]
+
+# Ledger key under which the settle step leaves its report once it has run.
+_SETTLED = "code_lines_settled"
 
 # How many of the largest non-code files the telemetry names. Enough to
 # explain a total by eye; the counts and the per-class sums are exact.
@@ -137,7 +142,11 @@ def settle_code_lines(
     final and nothing is left to read ``loc`` but the map's readers.
 
     Returns telemetry, or ``None`` when no file was classed: a repository
-    with no such file is written exactly as before."""
+    with no such file is written exactly as before. A second call changes
+    nothing and returns the first call's telemetry: the lines have left
+    ``loc`` and must not leave it again."""
+    if ledger is not None and _SETTLED in ledger:
+        return ledger[_SETTLED]
     held = non_code_lines_by_row(features, ledger, path_index)
     if not held:
         return None
@@ -171,4 +180,25 @@ def settle_code_lines(
     report = _report(held, (ledger or {}).get("non_code") or {})
     report["rows_changed"] = rows_changed
     report["product_lines_moved"] = taken_product
+    ledger[_SETTLED] = report
     return report
+
+
+def stamp_lane_ink(lane_rows: list[dict[str, Any]] | None, features: list[Any], report: dict[str, Any] | None) -> int:
+    """Give a platform-lane row the ink of its developer row, when the
+    settle step moved lines there. The lane sync copies ``loc`` only, so a
+    lane row made of non-code files would read 0 lines and nothing else.
+    Rows of a repository where nothing was settled are not touched."""
+    if not lane_rows or not report:
+        return 0
+    ink = {
+        str(getattr(f, "name", "") or ""): getattr(f, "artifact_ink_loc", None)
+        for f in features if _is_developer(f)
+    }
+    stamped = 0
+    for row in lane_rows:
+        lines = ink.get(str(row.get("name") or ""))
+        if lines and row.get("artifact_ink_loc") != lines:
+            row["artifact_ink_loc"] = lines
+            stamped += 1
+    return stamped

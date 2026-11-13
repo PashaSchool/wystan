@@ -168,16 +168,8 @@ def _developer_features(features: Iterable[Any]) -> list[Any]:
 
 def find_pools(
     product_features: list[Any], user_flows: list[Any], flows: list[Any], features: list[Any],
-    loc_ledger: dict[str, Any] | None = None,
 ) -> list[Pool]:
-    """Mega features in slug order, then the unowned pool.
-
-    A feature's share of lines is its share of lines of CODE: a vocabulary
-    or a bundle among its files does not make it large. ``loc_ledger`` names
-    those files; without it every counted line is code, as before."""
-    from wystan.pipeline_v2.code_lines import non_code_lines_by_row
-
-    non_code = non_code_lines_by_row(features, loc_ledger)
+    """Mega features in slug order, then the unowned pool."""
     journeys = [j for j in user_flows if _has_members(j)]
     by_parent: dict[str, list[Any]] = {}
     for journey in journeys:
@@ -190,9 +182,7 @@ def find_pools(
         # Lines under a parent that no longer exists are nobody's: counting
         # them would dilute every feature's share.
         if home in alive:
-            not_code = sum(non_code.get(str(getattr(dev, "uuid", "") or ""), {}).values())
-            code = max(int(getattr(dev, "loc", None) or 0) - not_code, 0)
-            lines[home] = lines.get(home, 0) + code
+            lines[home] = lines.get(home, 0) + int(getattr(dev, "loc", None) or 0)
     total_lines = sum(lines.values())
     pools: list[Pool] = []
     for pf in sorted(product_features, key=lambda f: f.name):
@@ -674,7 +664,7 @@ def run_capability_split(
         "llm_calls": 0, "cache_hits": 0, "refused_replies": 0,
         "input_tokens": 0, "output_tokens": 0,
     }
-    pools = find_pools(product_features, user_flows, flows, features, loc_ledger)
+    pools = find_pools(product_features, user_flows, flows, features)
     if not pools:
         telemetry["reason"] = "no_pool"
         return telemetry

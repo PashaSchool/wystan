@@ -678,8 +678,8 @@ def apply_feature_loc(
             "devs_without_uuid": _no_uuid,
             # Owned files that are unmistakably not code. Nothing here acts
             # on it: ``loc`` is stamped as always, so every pass that reads
-            # it decides as before. ``code_lines`` reads this when the map
-            # is about to be written and when "too large" is judged.
+            # it decides as before. ``code_lines`` reads this once, when
+            # the map is about to be written.
             "non_code": _non_code_owned(
                 root, _owner_by_file, _art_of if art_enabled else (lambda rel: None)),
         })
