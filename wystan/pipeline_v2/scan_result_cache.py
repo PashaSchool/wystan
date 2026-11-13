@@ -3768,7 +3768,13 @@ ENV_OUTPUT_FLAGS = (
 #: KS125 (2026-11-13): Stage 8.9 splits a flat oversized row by the route
 #: group its files handle when it has no directory to split along; 123 and
 #: 124 are other branches'.
-KEY_SCHEMA_VERSION = 125
+#: KS126 (2026-11-13): the map reports lines of code as code; a file that is
+#: unmistakably data, generated, bundled or minified keeps its owner and its
+#: lines are reported as ink (123, 124, 125 are taken by maps).
+#: KS127 (2026-11-13): the route-group split (KS125) merged with KS126; moves
+#: compose, qualified references keep their qualifier, access tiers are not
+#: names.
+KEY_SCHEMA_VERSION = 127
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
