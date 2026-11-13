@@ -6293,6 +6293,22 @@ def run_finalize_phase(
             f"orphan-uf owner-attach failed ({exc}); orphans left"
         )
 
+    # Lines of code are reported as code. Until here ``loc`` held every
+    # counted line, so that no pass above decided differently because a
+    # feature's file is a vocabulary or a bundle; ownership is final now and
+    # only the map's readers are left. Before the lane sync, which copies
+    # developer rows' lines into the lane.
+    try:
+        from wystan.pipeline_v2.code_lines import settle_code_lines
+        _code_lines_tele = settle_code_lines(
+            features, product_features, _pf_loc_ledger,
+            lineage_result.path_index, scan_meta.get("loc_accounting"))
+        if _code_lines_tele is not None:
+            scan_meta["code_lines"] = _code_lines_tele
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
+        scan_meta.setdefault("warnings", []).append(
+            f"code-lines settle failed ({exc}); loc includes non-code files")
+
     # The platform lane was written mid-phase. Developer features that gave
     # files to a carved one, or gained an owner, since then are brought up to
     # date, so no line is in the lane and under a product feature at once.

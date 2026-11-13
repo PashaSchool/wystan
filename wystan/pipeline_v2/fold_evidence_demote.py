@@ -95,12 +95,11 @@ def _containment_spec(path: str, anchor: "SpineAnchor") -> tuple[int, int]:
 
 def _file_loc(repo_root: Path, rel: str, cache: dict[str, int]) -> int:
     """6.97-mirrored per-file LOC (same counter + exclusions) — best-effort,
-    an unreadable file counts 0. A file 6.97 kept out of ``loc`` for its
-    contents counts 0 too: the lines moved here are the ones 6.97 stamped."""
+    an unreadable file counts 0."""
     if rel not in cache:
-        from wystan.pipeline_v2.stage_6_97_feature_loc import count_code_lines
+        from wystan.pipeline_v2.stage_6_97_feature_loc import count_file_loc
         try:
-            cache[rel] = count_code_lines(repo_root / rel, rel)
+            cache[rel] = count_file_loc(repo_root / rel, rel)
         except Exception:  # noqa: BLE001 — LOC is additive, never breaks
             cache[rel] = 0
     return cache[rel]

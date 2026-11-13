@@ -500,14 +500,11 @@ def apply_pf_loc_reroll(
     if ledger.get("art_enabled"):
         from wystan.pipeline_v2.artifact_ink import classify_artifact
         _memo: dict[str, Any] = {}
-        # Files 6.97 kept out of ``loc`` for their contents: this pass has
-        # no checkout to ask, so it takes 6.97's answer from the ledger.
-        _non_code: dict[str, str] = ledger.get("non_code") or {}
 
         def art_of(fp: str) -> Any:  # noqa: F811 — narrow local closure
             hit = _memo.get(fp, "\0")
             if hit == "\0":
-                hit = classify_artifact(fp) or _non_code.get(fp)
+                hit = classify_artifact(fp)
                 _memo[fp] = hit
             return hit
 
