@@ -147,6 +147,13 @@ class RouteSplitLedger:
             (row.name, group_of[id(row)])
             for row in features if id(row) in group_of))
 
+    def parent_names(self, features: list["Feature"]) -> list[str]:
+        """Names of the residual parents of the splits the stage ends with
+        (a born row that split again is one too)."""
+        present = {id(f) for f in features}
+        return sorted({s.source.name for s in self._splits
+                       if id(s.source) in present})
+
     def record_moves(self, split: _RouteSplit, moves: list[FlowMove]) -> None:
         split.moves.extend(moves)
         for move in moves:

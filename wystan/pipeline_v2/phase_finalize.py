@@ -662,7 +662,10 @@ def run_finalize_phase(
     # 2026-07-06: the Shared Platform PF no longer exists on this path).
     # Deterministic, $0 LLM. Kill-switch WYSTAN_SPINE_ANCHORED_MINT=0
     # restores the old path byte-identically.
-    from wystan.pipeline_v2.route_group_split import born_route_groups
+    from wystan.pipeline_v2.route_group_split import (
+        born_route_groups,
+        route_group_parents,
+    )
     from wystan.pipeline_v2.stage_6_86_anchored_mint import (
         anchored_mint_enabled,
         run_anchored_mint,
@@ -2085,6 +2088,7 @@ def run_finalize_phase(
                     interior_evidence=_jl_interior,
                     labeler=_jl_labeler,
                     verifier=_jl_verifier,
+                    residual_parents=route_group_parents(scan_meta),
                 )
                 if jl_tele.get("applied"):
                     # §4.5 — children resettle to the capability their
