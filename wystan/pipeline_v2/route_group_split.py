@@ -74,18 +74,26 @@ MIN_GROUPS = 2
 FILE_GROUP_MAJORITY = 0.5
 
 # ── Bounds for untrusted repositories ───────────────────────────────────────
-# Beyond a byte or count cap the planner does nothing for the row: a plan
-# built from a truncated view could move files on partial evidence. Files are
-# read head-first, line by line, and nothing read is kept after the row.
+# Beyond a byte or count cap the planner does nothing for the row, and says
+# why (``SKIP_*`` below): a plan built from a truncated view could move files
+# on partial evidence. Files are read head-first, line by line, and nothing
+# read is kept after the row.
 MAX_ROUTE_SITES = 20_000       # largest measured route table: 558
 MAX_FILES_READ = 2_000         # row files + registration files, per row
 FILE_HEAD_BYTES = 262_144      # bytes read from the start of one file
 MAX_ROW_BYTES = 16_777_216     # bytes read for one row
 MAX_SCAN_BYTES = 67_108_864    # bytes read by this planner in one scan
-MAX_LINE_CHARS = 2_000         # a longer line is not matched at all
+MAX_LINE_CHARS = 2_000         # a longer line is not read
 MAX_CALL_DEPTH = 8             # wrappers unwrapped around one handler
 # A row name is a URL segment a person reads in a table.
 MAX_NAME_CHARS = 40
+
+# Why a row the planner was consulted for is not split (Stage 8.9 telemetry).
+#: a count or byte bound above was reached
+SKIP_OVER_BUDGET = "over_budget"
+#: a route needs a line the planner did not read (past a file's head, or a
+#: line over ``MAX_LINE_CHARS``), so the route's file cannot be known
+SKIP_TRUNCATED_DEFINITION = "truncated_definition"
 
 # Marks the domain key of a route-group row, so a reader can tell it from a
 # directory domain (the key is not a path that exists).
@@ -121,8 +129,24 @@ _DEFINITION_RES: tuple[re.Pattern[str], ...] = (
 _UNNAMEABLE_SEGMENT_RE = re.compile(r"^(?:[\d._-]+|v\d+[a-z0-9]*)$")
 
 
-class _OverBudget(Exception):
+class _NotSplit(Exception):
+    """The row is not split, for the reason the subclass names. Per row the
+    split is all or nothing: a plan of the routes that could be read would
+    move files on part of the evidence."""
+
+    reason = ""
+
+
+class _OverBudget(_NotSplit):
     """The row would need more reading than the bounds allow."""
+
+    reason = SKIP_OVER_BUDGET
+
+
+class _TruncatedDefinition(_NotSplit):
+    """A route needs a line that lies beyond what was read."""
+
+    reason = SKIP_TRUNCATED_DEFINITION
 
 
 @dataclass
@@ -149,6 +173,7 @@ class RoutePlan(NamedTuple):
     domains: dict[str, list[str]]  # row name -> files, empty when no split
     residual: list[str]            # files that stay with the parent
     groups_capped: int = 0         # groups left in the residual by the cap
+    skip_reason: str | None = None  # SKIP_* when a bound stopped the plan
 
 
 @dataclass(frozen=True)
@@ -262,15 +287,17 @@ def plan_route_group_split(
     """
     nothing = RoutePlan({}, list(owned))
     sites = split_input.route_sites or []
-    if not sites or len(sites) > MAX_ROUTE_SITES or not is_flat(owned):
+    if not sites or not is_flat(owned):
         return nothing
     try:
+        if len(sites) > MAX_ROUTE_SITES:
+            raise _OverBudget
         resolved = _resolve_handlers(sorted(owned), sites, split_input)
         groups = _group_files(resolved)
         if len(groups) >= MIN_GROUPS:  # lines are counted only when needed
             groups = _at_line_floor(groups, list(other_rows), split_input)
-    except _OverBudget:
-        return nothing
+    except _NotSplit as stop:
+        return nothing._replace(skip_reason=stop.reason)
     if len(groups) < MIN_GROUPS:
         return nothing
     ranked, capped = _rank_and_cap(groups, max_domains)
@@ -304,6 +331,27 @@ def _rank_and_cap(
 # ── Bounded reading ─────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class _FileView:
+    """The lines read of one file. ``None`` stands for a line that was not
+    read (longer than ``MAX_LINE_CHARS``); *is_cut* says the file goes on
+    past the head, so a line beyond the last one read is unknown too."""
+
+    lines: list[str | None]
+    is_cut: bool = False
+
+    def line(self, number: int) -> str | None:
+        """Line *number* (1-based); ``""`` past the end of a whole file,
+        ``None`` when it was not read."""
+        if 0 < number <= len(self.lines):
+            return self.lines[number - 1]
+        return None if self.is_cut else ""
+
+    @property
+    def has_unread(self) -> bool:
+        return self.is_cut or any(ln is None for ln in self.lines)
+
+
 class _Reader:
     """Reads the head of a file once, inside the repository, counting every
     byte against the row's and the scan's budget. Keeps nothing."""
@@ -314,38 +362,56 @@ class _Reader:
         self._row_bytes = 0
         self._files = 0
 
-    def lines(self, rel_path: str) -> list[str]:
-        """Lines of the file's head; a line over the bound is emptied."""
+    def view(self, rel_path: str) -> _FileView:
+        """The file's head. Its last line is dropped when the file goes on:
+        that line is cut and could name anything."""
         self._files += 1
         if self._files > MAX_FILES_READ:
             raise _OverBudget
         path = self._root / rel_path
         if not _is_repo_relative(rel_path) or not path_within_repo(path, self._root):
-            return []
+            return _FileView([])
         try:
             with open(path, "rb") as handle:
-                head = handle.read(FILE_HEAD_BYTES)
+                head = handle.read(FILE_HEAD_BYTES + 1)
         except OSError:
-            return []
-        self._row_bytes += len(head)
-        self._budget.scan_bytes += len(head)
+            return _FileView([])
+        is_cut = len(head) > FILE_HEAD_BYTES
+        head = head[:FILE_HEAD_BYTES]
+        self._charge(len(head))
+        lines = head.decode("utf-8", errors="replace").split("\n")
+        if is_cut:
+            lines.pop()
+        return _FileView(
+            [ln if len(ln) <= MAX_LINE_CHARS else None for ln in lines], is_cut)
+
+    def _charge(self, size: int) -> None:
+        self._row_bytes += size
+        self._budget.scan_bytes += size
         if (self._row_bytes > MAX_ROW_BYTES
                 or self._budget.scan_bytes > MAX_SCAN_BYTES):
             raise _OverBudget
-        text = head.decode("utf-8", errors="replace")
-        return [ln if len(ln) <= MAX_LINE_CHARS else "" for ln in text.split("\n")]
 
 
-def _definers(owned: list[str], reader: _Reader) -> dict[str, set[str]]:
-    """``identifier -> row files that define a function of that name``."""
+def _definers(
+    owned: list[str], reader: _Reader,
+) -> tuple[dict[str, set[str]], bool]:
+    """``identifier -> row files that define a function of that name``, and
+    whether any row file holds lines that were not read (a definition may
+    stand there)."""
     out: dict[str, set[str]] = defaultdict(set)
+    has_unread = False
     for path in owned:
-        for line in reader.lines(path):
+        view = reader.view(path)
+        has_unread = has_unread or view.has_unread
+        for line in view.lines:
+            if not line:
+                continue
             for definition_re in _DEFINITION_RES:
                 match = definition_re.match(line)
                 if match:
                     out[match.group(1)].add(path)
-    return out
+    return out, has_unread
 
 
 # ── Handler resolution ──────────────────────────────────────────────────────
@@ -374,16 +440,25 @@ def _resolve_handlers(
     if not by_registration:
         return out
     reader = _Reader(split_input)
-    definers = _definers(owned, reader)
+    definers, row_has_unread = _definers(owned, reader)
     for file_path in sorted(by_registration):
-        lines = reader.lines(file_path)
+        view = reader.view(file_path)
         for number, pattern, group, method in sorted(by_registration[file_path]):
-            line = lines[number - 1] if 0 < number <= len(lines) else ""
-            handler_file = _handler_file(
-                _line_references(line, pattern), definers)
+            references = _references_read(view.line(number), pattern)
+            if row_has_unread and any(not definers.get(n) for n in references):
+                # the reference may be defined in a row line not read
+                raise _TruncatedDefinition
+            handler_file = _handler_file(references, definers)
             if handler_file:
                 out.append(_Resolved(handler_file, *group, (method, pattern)))
     return out
+
+
+def _references_read(line: str | None, pattern: str) -> list[str]:
+    """The references of a registration line, which must have been read."""
+    if line is None:
+        raise _TruncatedDefinition
+    return _line_references(line, pattern)
 
 
 def _group_of_pattern(pattern: str) -> tuple[str, str] | None:
@@ -694,7 +769,10 @@ __all__ = [
     "ROUTE_SITE_HANDLER",
     "ROUTE_SITE_REGISTRATION",
     "ReadBudget",
+    "RoutePlan",
     "RouteSplitInput",
+    "SKIP_OVER_BUDGET",
+    "SKIP_TRUNCATED_DEFINITION",
     "apply_flow_moves",
     "collect_route_sites",
     "declared_route_site_kinds",

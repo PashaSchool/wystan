@@ -195,6 +195,7 @@ from typing import TYPE_CHECKING, Any
 from wystan.pipeline_v2.route_group_split import (
     ROUTE_GROUP_DOMAIN_PREFIX,
     FlowMove,
+    RoutePlan,
     RouteSplitInput,
     has_flow_identity,
     plan_route_group_split,
@@ -501,6 +502,9 @@ class SubdecomposeResult:
     route_group_splits: int = 0
     # Route groups the anti-shatter cap left in their parent's residual.
     route_group_capped: int = 0
+    # Rows the route-group planner was consulted for and stopped on a bound:
+    # ``{"row", "reason", "files", "route_sites"}`` (names and counts only).
+    route_group_skipped: list[dict[str, Any]] = field(default_factory=list)
     # ``{flow uuid: FlowMove}`` of flows that followed their entry file onto
     # a route-group row. Not telemetry: the orchestrator reads it to rewrite
     # the edges and copies that still name a moved flow's old id.
@@ -523,6 +527,8 @@ class SubdecomposeResult:
             telemetry["route_group_splits"] = self.route_group_splits
         if self.route_group_capped:
             telemetry["route_group_capped"] = self.route_group_capped
+        if self.route_group_skipped:
+            telemetry["route_group_skipped"] = list(self.route_group_skipped)
         return telemetry
 
     def _base_telemetry(self) -> dict[str, Any]:
@@ -1467,10 +1473,9 @@ def _split_one_feature(
             other_rows=_other_rows(source, rows_owned or {}),
             max_domains=max_domains,
         )
+        _record_route_plan(source, plan, route_split, result)
         domains, residual = plan.domains, plan.residual
         is_route_plan = bool(domains)
-        if is_route_plan:
-            result.route_group_capped += plan.groups_capped
     if not domains:
         return None  # no decomposable domain structure → fixed point
 
@@ -1513,6 +1518,24 @@ def _split_one_feature(
                              for k in domains})[:25],
         })
     return minted
+
+
+def _record_route_plan(
+    source: "Feature", plan: RoutePlan, route_split: RouteSplitInput,
+    result: SubdecomposeResult,
+) -> None:
+    """Telemetry of one route-group plan: the groups the cap left behind
+    when the row split, and the bound that stopped it when it did not (a
+    cap is never silent)."""
+    if plan.domains:
+        result.route_group_capped += plan.groups_capped
+    if plan.skip_reason:
+        result.route_group_skipped.append({
+            "row": source.name,
+            "reason": plan.skip_reason,
+            "files": len(plan.residual),
+            "route_sites": len(route_split.route_sites or ()),
+        })
 
 
 def _other_rows(
