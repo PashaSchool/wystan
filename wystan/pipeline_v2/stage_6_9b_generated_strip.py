@@ -48,6 +48,8 @@ __all__ = [
     "GENERATED_CONTENT_ENV_FLAG",
     "generated_content_marker_enabled",
     "GeneratedContentProbe",
+    "BANNER_SNIFF_BYTES",
+    "head_marks_generated",
 ]
 
 STAGE_6_9B_ENV_FLAG = "WYSTAN_STAGE_6_9B_GENERATED_STRIP"
@@ -120,6 +122,9 @@ def generated_content_marker_enabled() -> bool:
 #: orval / openapi-generator / graphql-codegen / protobuf all print them at
 #: byte 0); 2 KiB tolerates a licence header above the banner.
 _BANNER_SNIFF = 2048
+#: The same window under a public name, for a caller that has read a longer
+#: head and must judge the same bytes this probe does.
+BANNER_SNIFF_BYTES = _BANNER_SNIFF
 #: The universal marker mechanisms (NOT a vendor vocabulary):
 #:   * the Go-spec-formalized line class — "Code generated … DO NOT EDIT."
 #:     (Speakeasy, sqlc, protoc-gen, oapi-codegen all emit this exact shape);
@@ -138,6 +143,17 @@ _GENERATED_WORD_RE = re.compile(
 _DO_NOT_EDIT_RE = re.compile(
     r"(?i)\b(?:do not|don'?t|should not be|never)\s+"
     r"(?:be\s+)?(?:edit|modif|chang)")
+
+
+def head_marks_generated(head_text: str) -> bool:
+    """``True`` when *head_text* (the decoded first ``BANNER_SNIFF_BYTES`` of
+    a file) carries one of the three marker mechanisms above. Pure, so the
+    line count can ask the same question about a head it has already read."""
+    return bool(
+        _GENERATED_LINE_RE.search(head_text)
+        or _AT_GENERATED_RE.search(head_text)
+        or (_GENERATED_WORD_RE.search(head_text)
+            and _DO_NOT_EDIT_RE.search(head_text)))
 
 
 class GeneratedContentProbe:
@@ -177,12 +193,8 @@ class GeneratedContentProbe:
                 with open(self._root / rel_path, "rb") as fp:
                     head = fp.read(_BANNER_SNIFF)
                 if b"\x00" not in head:
-                    text = head.decode("utf-8", errors="replace")
-                    out = bool(
-                        _GENERATED_LINE_RE.search(text)
-                        or _AT_GENERATED_RE.search(text)
-                        or (_GENERATED_WORD_RE.search(text)
-                            and _DO_NOT_EDIT_RE.search(text)))
+                    out = head_marks_generated(
+                        head.decode("utf-8", errors="replace"))
             except OSError:
                 out = False
         self._memo[rel_path] = out

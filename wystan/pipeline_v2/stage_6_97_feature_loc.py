@@ -59,6 +59,13 @@ feature — this is a metric, not a membership strip):
 * files missing on disk (historical paths from the git window)
 * (directory walks only) non-source extensions + build/cache dirs
 
+Counted, owned, and kept out of ``loc`` (the artifact-ink drain): locale
+catalogs and generated directories by path convention, and any file that
+is not code by its own properties, whatever its name or place: large data,
+generated, bundled, minified, machine-sized
+(:mod:`wystan.pipeline_v2.non_code_file`). Such a file keeps its owner and
+its ``member_files[].loc``; its lines are the owner's ``artifact_ink_loc``.
+
 Per-file counts are cached for the whole scan (shared files and the
 PF rollup never re-read a file). Deterministic, no LLM, no network.
 Disable via ``WYSTAN_STAGE_6_97_FEATURE_LOC=0`` (default ON).
@@ -70,6 +77,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
+from wystan.pipeline_v2.non_code_file import non_code_class
 from wystan.pipeline_v2.owner_oracle import elect_primary_owners
 from wystan.pipeline_v2.ownership_v2 import ownership_v2_enabled
 from wystan.pipeline_v2.stage_6_9_test_strip import is_test_path
@@ -82,7 +90,9 @@ __all__ = [
     "STAGE_6_97_ENV_FLAG",
     "stage_6_97_enabled",
     "apply_feature_loc",
+    "count_code_lines",
     "count_file_loc",
+    "file_non_code_class",
     "prefetch_loc_cache",
 ]
 
@@ -162,6 +172,10 @@ _REPORT_EXTS = {
 
 _SNIFF_BYTES = 8192
 
+#: How many of the largest non-code files the telemetry names. Enough to
+#: explain a total by eye; the file count and the per-class sums are exact.
+_NON_CODE_SAMPLES = 20
+
 
 def stage_6_97_enabled() -> bool:
     """Default ON; ``WYSTAN_STAGE_6_97_FEATURE_LOC=0`` disables."""
@@ -220,6 +234,33 @@ def count_file_loc(abs_path: Path, rel_path: str) -> int:
 
     ext = os.path.splitext(rel_path)[1].lower()
     return len(executable_lines(text, ext))
+
+
+def file_non_code_class(abs_path: Path, rel_path: str) -> str | None:
+    """Why a counted file's lines are not lines of code, or ``None``.
+
+    Decided from the file's own properties on a bounded sample, never from
+    its place. A file the path conventions of the artifact-ink drain already
+    name keeps the class it has there and is not asked again."""
+    # Late import: artifact_ink imports this module's ``_is_excluded_name``.
+    from wystan.pipeline_v2.artifact_ink import (
+        artifact_ink_enabled,
+        classify_artifact,
+    )
+
+    if not artifact_ink_enabled() or classify_artifact(rel_path) is not None:
+        return None
+    return non_code_class(abs_path, rel_path)
+
+
+def count_code_lines(abs_path: Path, rel_path: str) -> int:
+    """:func:`count_file_loc`, and 0 for a file that is not code by its own
+    properties. For a pass that moves lines this stage stamped: this stage
+    stamps none in ``loc`` for such a file."""
+    lines = count_file_loc(abs_path, rel_path)
+    if lines and file_non_code_class(abs_path, rel_path) is not None:
+        return 0
+    return lines
 
 
 def _iter_dir_files(root: Path) -> Iterable[Path]:
@@ -535,11 +576,20 @@ def apply_feature_loc(
 
     art_enabled = artifact_ink_enabled()
     _art_memo: dict[str, str | None] = {}
+    # rel path -> class of the owned files that are ink by their own
+    # properties and not by a path convention (large data, generated,
+    # bundled, minified, machine-sized). Asked of owned files only, on a
+    # bounded sample of each.
+    non_code: dict[str, str] = {}
 
     def _art_of(fp: str) -> str | None:
         cls = _art_memo.get(fp, "\0")
         if cls == "\0":
             cls = classify_artifact(fp)
+            if cls is None:
+                cls = non_code_class(root / fp, fp)
+                if cls is not None:
+                    non_code[fp] = cls
             _art_memo[fp] = cls
         return cls
 
@@ -674,6 +724,9 @@ def apply_feature_loc(
             "owner_by_file": _owner_by_file,
             "files_by_dev": _files_by_dev,
             "art_enabled": art_enabled,
+            # What ``_art_of`` decided from file contents. A later pass has
+            # no checkout to ask again, and must not count these as code.
+            "non_code": dict(non_code),
             "devs_without_uuid": _no_uuid,
         })
 
@@ -797,7 +850,31 @@ def apply_feature_loc(
             "conservation_ok": (sum_pf_owned + art_total == sum_pf_owned_before),
             "samples": sorted(art_samples),
         }
+        if non_code:
+            # Present only when a file was told apart by its properties, so
+            # a repository with no such file keeps the telemetry it had.
+            result["artifact_ink"]["non_code"] = _non_code_report(non_code, cache)
     return result
+
+
+def _non_code_report(non_code: dict[str, str], cache: dict[str, int]) -> dict[str, Any]:
+    """The owned files kept out of ``loc`` for what they are: how many, their
+    lines by class, and the largest by name. Covers every developer feature,
+    also those under no product feature (``by_pf`` covers product features
+    only), so a change in any row's ``loc`` can be traced to a file."""
+    by_class: dict[str, int] = {}
+    for rel, cls in non_code.items():
+        by_class[cls] = by_class.get(cls, 0) + cache.get(rel, 0)
+    largest = sorted(non_code, key=lambda rel: (-cache.get(rel, 0), rel))
+    return {
+        "files": len(non_code),
+        "lines": sum(by_class.values()),
+        "by_class": {cls: by_class[cls] for cls in sorted(by_class)},
+        "largest": [
+            {"path": rel, "class": non_code[rel], "lines": cache.get(rel, 0)}
+            for rel in largest[:_NON_CODE_SAMPLES]
+        ],
+    }
 
 
 def _merged_span_len(intervals: list[tuple[int, int]]) -> int:

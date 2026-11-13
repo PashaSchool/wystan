@@ -389,8 +389,14 @@ class _Carver:
         if self._knows(dev):
             file_loc = self._ledger.get("file_loc") or {}
             owner = self._ledger.get("owner_by_file") or {}
+            # A file the line count kept out of the donor's ``loc`` for its
+            # contents has no lines there to give.
+            non_code = self._ledger.get("non_code") or {}
             me = _ledger_key(dev)
-            return sum(int(file_loc.get(f, 0)) for f in files if owner.get(f) == me)
+            return sum(
+                int(file_loc.get(f, 0)) for f in files
+                if owner.get(f) == me and f not in non_code
+            )
         by_path = {
             (m.get("path") if isinstance(m, dict) else getattr(m, "path", None)):
             (m.get("loc") if isinstance(m, dict) else getattr(m, "loc", None))

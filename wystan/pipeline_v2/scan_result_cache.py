@@ -3765,7 +3765,10 @@ ENV_OUTPUT_FLAGS = (
 #: answer under a key without the scan ordinals (the question sent to the
 #: model is unchanged; the refiner's answer is stored by local id and mapped
 #: back); 118-121 are other branches'.
-KEY_SCHEMA_VERSION = 122
+#: KS124 (2026-11-13): lines of code count code only; a file that is large
+#: data, generated, bundled, minified or machine-sized keeps its owner and
+#: adds no lines (123 is another branch's).
+KEY_SCHEMA_VERSION = 124
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
