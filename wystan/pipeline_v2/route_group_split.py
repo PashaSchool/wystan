@@ -49,6 +49,9 @@ from wystan.pipeline_v2.route_group_scope import ROW, FileScope, file_scope
 from wystan.pipeline_v2.journey_lattice import (
     _CRUD_LEAF_SEGS as GENERIC_ROUTE_SEGMENTS,
 )
+from wystan.pipeline_v2.journey_lattice import (
+    _TIER_SEGS as ACCESS_TIER_SEGMENTS,
+)
 from wystan.pipeline_v2.spine_anchors import (
     _pattern_key_chain,
     _split_tokens,
@@ -158,6 +161,12 @@ _DEFINITION_RES: tuple[re.Pattern[str], ...] = (
 # ``detail``...), the segments it never takes for an object, imported above
 # as ``GENERIC_ROUTE_SEGMENTS``. Matched against the segment as written, so
 # ``lists`` (an object) is a name where ``list`` (an action) is not.
+# Access tiers are the engine's own list too: ``journey_lattice._TIER_SEGS``
+# (``public``, ``internal``, ``management``, ``client``), the segments it
+# reads as an architecture split, not an object, imported above as
+# ``ACCESS_TIER_SEGMENTS``. A group behind one is an audience of the
+# product, not a capability, so it names no row. Matched as written, like
+# the generic segments (``clients``, an object, stays a name).
 # A segment that is a number, a date or a version says nothing a row could be
 # called (``2024``, ``2024-01``, ``v1``, ``v2beta``).
 _UNNAMEABLE_SEGMENT_RE = re.compile(r"^(?:[\d._-]+|v\d+[a-z0-9]*)$")
@@ -771,12 +780,12 @@ def _lawful_name(base: str, parent: str, taken: set[str]) -> str | None:
     """The row name for a group whose URL segment slugs to *base*, or
     ``None`` when it has none: a number, a date or a version is not a name,
     nor is a segment the engine already treats as naming no object
-    (``new``, ``index``); the parent's own name stays with the parent (never
-    ``orders-orders``); a name another row has is qualified by the parent,
-    once, never numbered, and not when the parent already says it
-    (``orders-api-orders``)."""
+    (``new``, ``index``) or as an access tier (``public``); the parent's own
+    name stays with the parent (never ``orders-orders``); a name another row
+    has is qualified by the parent, once, never numbered, and not when the
+    parent already says it (``orders-api-orders``)."""
     if (not base or base == parent or _UNNAMEABLE_SEGMENT_RE.match(base)
-            or base in GENERIC_ROUTE_SEGMENTS):
+            or base in GENERIC_ROUTE_SEGMENTS or base in ACCESS_TIER_SEGMENTS):
         return None
     if base not in taken:
         name = base
