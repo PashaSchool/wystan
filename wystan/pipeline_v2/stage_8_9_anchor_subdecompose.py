@@ -494,7 +494,10 @@ class SubdecomposeResult:
     subfeatures_created: int = 0
     paths_moved: int = 0             # owned files relocated to sub-features
     members_deowned: int = 0         # residual member files flipped to shared
-    iterations: int = 0              # fixed-point recursion levels actually run
+    # Fixed-point recursion levels actually run. It counts attempts: a level
+    # run for rows a split bore is counted even when that split is later
+    # undone (route-group undo takes back every other count, not this one).
+    iterations: int = 0
     depth_cap_hit: bool = False      # safety cap reached (should never happen)
     floor_by_feature: dict[str, int] = field(default_factory=dict)
     split_sample: list[dict[str, Any]] = field(default_factory=list)
