@@ -73,7 +73,7 @@ import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from wystan.pipeline_v2.cli_commands import (  # noqa: F401 — re-export
     CLI_ANCHOR_SUPPLY_ENV,
@@ -83,6 +83,11 @@ from wystan.pipeline_v2.cli_commands import (  # noqa: F401 — re-export
     detect_cli_clusters,
     detect_cli_clusters_cached,
     supplied_tile_admits,
+)
+from wystan.pipeline_v2.route_group_anchor import (
+    BornScopedMintable,
+    born_view_of,
+    with_born_row_files,
 )
 from wystan.pipeline_v2.spine_anchors import (
     SOURCE_RANK,
@@ -1826,6 +1831,7 @@ def run_anchored_mint(
     extractor_signals: dict[str, list[Any]] | None = None,
     nav_keys: frozenset[str] = frozenset(),
     repo_class: str | None = None,
+    born_route_groups: Mapping[str, str] | None = None,
 ) -> tuple[list["Feature"], dict[str, Any]]:
     """Derive dev→PF from anchor lineage; REPLACE the product layer.
 
@@ -1840,6 +1846,11 @@ def run_anchored_mint(
     answer (library / CLI / infra / framework) or a lost one (product-app).
     ``None`` ⇒ re-derived from ``ctx`` (Stage 0.7 is pure) so replay matches
     the live site.
+
+    ``born_route_groups`` (``{row name: route group key}``) is Stage 8.9's
+    record of the rows its route-group split bore
+    (``route_group_split.born_route_groups(scan_meta)``); empty or ``None``
+    when it bore none.
     """
     from wystan.pipeline_v2.nav_taxonomy import aggregate_product_feature
     from wystan.pipeline_v2.spine_hygiene import is_facet
@@ -1878,6 +1889,18 @@ def run_anchored_mint(
     anchors = build_spine_anchors(
         in_scope, routes_index, ctx, extractor_signals, nav_keys)
     tele["anchors_total"] = len(anchors)
+    # A row born by the Stage 8.9 route-group split joins its group's route
+    # anchor, as a same-stem models file would (route_group_anchor). The
+    # grown anchors are a view for born rows only: their classification and
+    # the mint bar of the anchors they win. Every other row, and every other
+    # rung, keeps ``anchors`` as built. No born row: nothing changes.
+    born_names = frozenset(born_route_groups or {})
+    born_anchors, born_rows_anchored = with_born_row_files(
+        anchors, in_scope, owned_paths_of, born_route_groups or {})
+    grown_by_id = {
+        a.canonical_id: a for a in born_anchors if born_rows_anchored}
+    if born_rows_anchored:
+        tele["born_rows_route_anchored"] = born_rows_anchored
 
     # ── B65-v3 iter-2 — SPA-mint containment fence ────────────────────────
     # A client-side SPA page row (routes_index kind="spa-page") gives its
@@ -2128,10 +2151,12 @@ def run_anchored_mint(
     verdicts: dict[str, str] = {}
     plurality_by_dev: dict[str, list[tuple[SpineAnchor, float]]] = {}
     prev_stamp = {f.name: getattr(f, "product_feature_id", None) for f in in_scope}
+    original_by_id = {a.canonical_id: a for a in anchors}
     for f in sorted(in_scope, key=lambda x: x.name):
         owned = owned_paths_of(f)
         owned_by_dev[f.name] = owned
-        winner, share, verdict, plur = _classify_dev(owned, anchors)
+        winner, share, verdict, plur = _classify_dev(
+            owned, born_anchors if f.name in born_names else anchors)
         # B65-v3 iter-2 — containment fence at the lineage rung: an
         # uncontained dev never WINS a spa-paged anchor (and never rides
         # it as a union-plurality candidate). It reclassifies as "none"
@@ -2143,6 +2168,10 @@ def run_anchored_mint(
                     tele.get("spa_fence_blocked", 0) + 1)
                 winner, share, verdict = None, 0.0, "none"
             plur = [(c, s) for c, s in plur if _spa_contained(c, owned)]
+        if f.name in born_names:
+            # every later rung knows the anchor by its built files
+            winner = born_view_of(winner, original_by_id)
+            plur = [(born_view_of(c, original_by_id), sc) for c, sc in plur]
         winner_by_dev[f.name] = winner
         verdicts[f.name] = verdict
         plurality_by_dev[f.name] = plur
@@ -2236,6 +2265,9 @@ def run_anchored_mint(
     bar_by_anchor: dict[str, str | None] = {}
     for cid in sorted(winners_by_anchor):
         a = anchor_by_id[cid]
+        if any(w.name in born_names for w in winners_by_anchor[cid]):
+            # judged with the born rows' files, as the born row was
+            a = grown_by_id.get(cid, a)
         bar_by_anchor[cid] = _mint_bar(
             a, winners_by_anchor[cid], flow_entries, repo_has_pages,
             code_exts, mint_repo_root, loc_cache,
@@ -2345,7 +2377,12 @@ def run_anchored_mint(
                 {"anchor": cid, "bar": bar_by_anchor[cid],
                  "devs": [f.name for f in winners_by_anchor[cid][:5]]})
 
-    mintable = {cid for cid, bar in bar_by_anchor.items() if bar is None}
+    mintable = BornScopedMintable(
+        (cid for cid, bar in bar_by_anchor.items() if bar is None),
+        born_only=(
+            cid for cid, bar in bar_by_anchor.items()
+            if bar is None and winners_by_anchor[cid]
+            and all(w.name in born_names for w in winners_by_anchor[cid])))
 
     # B65-v4 iter-3 — SPA-BORN mint census (the wave-17 'Compliance'
     # 14.5K/100%-outside annexation family, reborn as 'findings' after
@@ -3426,6 +3463,7 @@ def run_anchored_mint(
 
     fold_pending: list[tuple["Feature", SpineAnchor | None, str]] = []
     for f in sorted(in_scope, key=lambda x: x.name):
+        mintable.for_row(f.name in born_names)
         w = winner_by_dev[f.name]
         if w is not None and w.canonical_id in mintable:
             assignment[f.name] = (w.canonical_id, "lineage")
@@ -3540,6 +3578,7 @@ def run_anchored_mint(
     # name-sorted, so the extension is deterministic.
     still_pending: list[tuple["Feature", SpineAnchor | None, str]] = []
     for f, w, reason in fold_pending:
+        mintable.for_row(f.name in born_names)
         if getattr(f, "flows", None):
             target = _entry_route_mint(f)
             if os.environ.get("WYSTAN_MINT_DEBUG") == "1":
@@ -3592,6 +3631,7 @@ def run_anchored_mint(
         file_owner = _file_owner_map()
         still_pending = []
         for f, w, reason in fold_pending:
+            mintable.for_row(f.name in born_names)
             if reason == _SHARED_REASON_INSTRUMENT:
                 # Fix 1: instrument code is DEPENDED ON by everything —
                 # the import vote is exactly backwards for it.
@@ -3695,6 +3735,7 @@ def run_anchored_mint(
     )
 
     for f, w, reason in fold_pending:
+        mintable.for_row(f.name in born_names)
         flowful = bool(getattr(f, "flows", None))
         if flowful and _is_workspace_anchor(f) and f.name in _cli_by_dev:
             # fixb125 exit 5/5 — WS-ANCHOR SHELL CARVE-OUT. The W3.1 D1
@@ -3899,6 +3940,9 @@ def run_anchored_mint(
             tele["law_flowful_in_lane"] = (
                 tele.get("law_flowful_in_lane", 0) + 1)
         infra[f.name] = reason
+
+    # The ladder is over: every minting anchor is seen again.
+    mintable.for_row(None)
 
     # fixb125 — the supplied CLI anchors become mintable only NOW, after
     # every other dev's disposition is already decided (see

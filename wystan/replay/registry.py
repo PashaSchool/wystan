@@ -36,6 +36,11 @@ from typing import Any, Callable
 
 from wystan.llm.cost import CostTracker
 from wystan.pipeline_v2.llm_health import LlmHealth
+from wystan.pipeline_v2.route_group_split import (
+    BORN_ROWS_KEY,
+    STAGE_8_9_META_KEY,
+    born_route_groups,
+)
 from wystan.pipeline_v2.run_logger import StageLogger
 from wystan.pipeline_v2.stage_7_output import write_stage_artifact
 
@@ -1095,6 +1100,28 @@ def _run_shared_members(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]
     return {"features": features}
 
 
+def _route_split_input(env: ReplayEnv, state: dict[str, Any]) -> Any:
+    """Route sites + repository root for Stage 8.9's route-group planner.
+
+    A capture written before the planner existed carries neither: the sites
+    are then rebuilt from the SOURCE run's recorded Stage 1 output and the
+    root read from its intake, so an older run replays with the current rule.
+    ``None`` (directory planner only) when either is unrecoverable."""
+    from wystan.pipeline_v2.route_group_split import (
+        RouteSplitInput,
+        collect_route_sites,
+    )
+
+    route_sites = state.get("route_sites")
+    if route_sites is None:
+        sibling = _sibling_input(env, state, 2, "reconcile") or {}
+        route_sites = collect_route_sites(sibling.get("stage1_out"))
+    repo_path = state.get("repo_path") or _replayed_repo_root(env, state)
+    if not repo_path:
+        return None
+    return RouteSplitInput(list(route_sites), Path(repo_path))
+
+
 def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
     from wystan.pipeline_v2.stage_8_9_anchor_subdecompose import (
         subdecompose_workspace_anchors,
@@ -1102,7 +1129,9 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
 
     features = state["features"]
     with StageLogger(env.run_dir, 8, "anchor_subdecompose") as log8_9:
-        subdecompose_result = subdecompose_workspace_anchors(features)
+        subdecompose_result = subdecompose_workspace_anchors(
+            features, route_split=_route_split_input(env, state),
+        )
         log8_9.info(
             f"anchor_subdecompose enabled={subdecompose_result.enabled}",
         )
@@ -1112,7 +1141,15 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
             payload=subdecompose_result.as_telemetry(),
             run_dir=env.run_dir,
         )
-    return {"features": features}
+    # ``flow_moves`` is in no capture: the runner applies it to the flow
+    # store and edges of every later stage's recorded input. The record of
+    # born rows is in no capture either (live it travels in scan_meta): the
+    # later stages read it from the chain (``_born_record``).
+    return {
+        "features": features,
+        "flow_moves": dict(subdecompose_result.flow_moves),
+        BORN_ROWS_KEY: dict(subdecompose_result.route_group_born),
+    }
 
 
 def _run_llm_component_split(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
@@ -1222,6 +1259,27 @@ def _replayed_repo_root(env: ReplayEnv, state: dict[str, Any]) -> Path | None:
 def _chain_get(state: dict[str, Any], key: str, default: Any = None) -> Any:
     chain = state.get("_chain") or {}
     return chain.get(key, default)
+
+
+def _born_record(state: dict[str, Any]) -> dict[str, str]:
+    """Stage 8.9's record of the rows it bore, as a later stage receives it.
+
+    Live, the record travels in ``scan_meta`` (Stage 8.9's telemetry). A
+    replay that re-ran Stage 8.9 in this chain hands its own record on
+    (transport 1): it replaces the recorded one in this stage's
+    ``scan_meta``, as the live stage's would. Otherwise the recorded
+    ``scan_meta`` is the record."""
+    scan_meta = state.get("scan_meta")
+    chain = state.get("_chain") or {}
+    if BORN_ROWS_KEY not in chain or not isinstance(scan_meta, dict):
+        return born_route_groups(scan_meta)
+    born = dict(chain[BORN_ROWS_KEY])
+    stage = scan_meta.setdefault(STAGE_8_9_META_KEY, {})
+    if born:
+        stage[BORN_ROWS_KEY] = born
+    else:
+        stage.pop(BORN_ROWS_KEY, None)
+    return born
 
 
 def _sibling_input(
@@ -1414,6 +1472,7 @@ def _run_anchored_mint(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
                     features, routes_index, ctx,
                     extractor_signals=stage1_out,
                     nav_keys=frozenset(nav_keys),
+                    born_route_groups=_born_record(state),
                 )
                 hh_anchor_registry = mint_tele.pop(
                     "homing_hygiene_anchor_registry", None)
@@ -2597,6 +2656,7 @@ def _run_flow_rederive(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
                 tracker=env.tracker,
                 llm_health=env.llm_health,
                 log=log_frd,
+                born_rows=frozenset(_born_record(state)),
             )
             if frd_tele is not None:
                 scan_meta["flow_rederive"] = frd_tele
@@ -2787,6 +2847,7 @@ def _run_journey_abstraction(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
             llm_health=env.llm_health,
             anchored=anchored_mint_applied,
             interior_evidence=_s67d_interior,
+            born_rows=frozenset(_born_record(state)),
         )
         if s67d_dev_map:
             for _dev in features:

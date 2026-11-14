@@ -184,6 +184,8 @@ class CohortSelection:
     excluded_healthy_density: int = 0
     excluded_flow_gate: int = 0
     excluded_at_cap: int = 0
+    # route-group rows that hold flows moved onto them at Stage 8.9
+    excluded_born_with_flows: int = 0
     excluded_flow_gate_names: list[str] = field(default_factory=list)
     flowful_median_density: float = 0.0
     blob_units: list[str] = field(default_factory=list)
@@ -285,11 +287,13 @@ def select_rederive_cohort(
     features: list[Any],
     stage3_unit_snapshot: dict[str, list[str]],
     ctx: Any,
+    born_rows: frozenset[str] = frozenset(),
 ) -> CohortSelection:
     """Causal cohort selection over the CURRENT (post-grain) board.
 
     Pure and $0 — runs identically keyed and keyless, so the armed
-    keyless census judges exactly this function's output.
+    keyless census judges exactly this function's output. *born_rows* are
+    the names of the rows Stage 8.9's route-group split bore (its record).
     """
     repo_path = Path(ctx.repo_path)
     sel = CohortSelection()
@@ -342,6 +346,13 @@ def select_rederive_cohort(
         else:
             kind = "birth"
             sel.births += 1
+
+        # A route-group row born at Stage 8.9 that received its flows by the
+        # move is not starved: its flows were derived on the files it owns.
+        # Asking again could give it a second flow at the same entry.
+        if f.name in born_rows and getattr(f, "flows", None):
+            sel.excluded_born_with_flows += 1
+            continue
 
         # Blob-origin majority (the disease is BLOB-grain starvation):
         # at least θ=0.5 of the candidate's surface must come from an
@@ -703,6 +714,7 @@ def run_flow_rederive(
     _client_factory: Callable[[], Any | None] = _default_client_factory,
     max_workers: int = DEFAULT_MAX_WORKERS,
     log: Any = None,
+    born_rows: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Run the F3′ post-grain flow re-derivation. Mutates in place.
 
@@ -715,7 +727,7 @@ def run_flow_rederive(
         logger.info("flow_rederive: no stage-3 unit snapshot — skipped")
         return None
 
-    sel = select_rederive_cohort(features, stage3_unit_snapshot, ctx)
+    sel = select_rederive_cohort(features, stage3_unit_snapshot, ctx, born_rows)
     if sel.causal_total == 0:
         return None  # inertness law — armed no-fire is byte-identical
 
@@ -748,6 +760,10 @@ def run_flow_rederive(
         "timed_out": 0,
         "no_client": False,
     }
+    # Present only when a route-group row was left out, so every other
+    # scan's artifact is byte-identical.
+    if sel.excluded_born_with_flows:
+        telemetry["excluded_born_with_flows"] = sel.excluded_born_with_flows
 
     if not sel.candidates:
         return telemetry  # causal class present, all excluded — honest

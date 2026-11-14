@@ -3765,10 +3765,19 @@ ENV_OUTPUT_FLAGS = (
 #: answer under a key without the scan ordinals (the question sent to the
 #: model is unchanged; the refiner's answer is stored by local id and mapped
 #: back); 118-121 are other branches'.
+#: KS125 (2026-11-13): Stage 8.9 splits a flat oversized row by the route
+#: group its files handle when it has no directory to split along; 123 and
+#: 124 are other branches'.
 #: KS126 (2026-11-13): the map reports lines of code as code; a file that is
 #: unmistakably data, generated, bundled or minified keeps its owner and its
 #: lines are reported as ink (123, 124, 125 are taken by maps).
-KEY_SCHEMA_VERSION = 126
+#: KS127 (2026-11-13): the route-group split (KS125) merged with KS126; moves
+#: compose, qualified references keep their qualifier, access tiers are not
+#: names.
+#: KS128 (2026-11-13): born-row record and anchor rule changed the map.
+#: KS129 (2026-11-13): a split's residual parent seeds no lattice journey.
+#: KS130 (2026-11-13): the KS129 rule is withdrawn; maps of 129 are not this engine's.
+KEY_SCHEMA_VERSION = 130
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
