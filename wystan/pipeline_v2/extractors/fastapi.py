@@ -169,6 +169,9 @@ class FastApiRouteExtractor(PatternExtractor):
     """
 
     name = "fastapi-route"
+    #: Each route tuple is ``(pattern, method, file)``: ``file`` holds the
+    #: decorator, which sits on the handler function.
+    route_site = "handler"
 
     def load_config(self) -> dict:
         return _load_config()
