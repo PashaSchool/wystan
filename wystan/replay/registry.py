@@ -324,9 +324,6 @@ def _run_reconcile(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
         )
         deterministic_features = stage2.features
         unattributed = stage2.unattributed
-        # As in the live run: later stages of a replayed chain read the
-        # record of nested-module rows from the context.
-        ctx.module_scopes = stage2.module_scopes
         for f in deterministic_features:
             log2.emit(
                 f.name,
@@ -356,9 +353,12 @@ def _run_reconcile(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
             },
             run_dir=env.run_dir,
         )
+    # Live, the record goes on the context every later stage reads; in a
+    # replay each stage decodes its own context, so it goes on the chain.
     return {
         "deterministic_features": deterministic_features,
         "unattributed": unattributed,
+        MODULE_SCOPES_KEY: stage2.module_scopes,
     }
 
 
@@ -391,7 +391,7 @@ def _run_membership_closure(env: ReplayEnv, state: dict[str, Any]) -> dict[str, 
 def _run_flows(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
     from wystan.pipeline_v2.stage_3_flows import stage_3_flows
 
-    ctx = prepare_ctx(state["ctx"], env)
+    ctx = _with_module_scopes(prepare_ctx(state["ctx"], env), state)
     profile = env.profile(ctx)
     with StageLogger(env.run_dir, 3, "flows") as log3:
         stage3 = stage_3_flows(
@@ -505,7 +505,10 @@ def _run_flows(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
                         feature=None,
                     )
 
-    return {"stage3_features_with_flows": stage3.features_with_flows}
+    return {
+        "stage3_features_with_flows": stage3.features_with_flows,
+        MODULE_SCOPES_KEY: ctx.module_scopes,
+    }
 
 
 def _run_residual(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
@@ -523,9 +526,8 @@ def _run_residual(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
         residual_features = stage4.residual_features
         # As in the live run: residual rows are older rows for the
         # stages that read the record of nested-module rows.
-        ctx.module_scopes = with_older_rows(
-            getattr(ctx, "module_scopes", None),
-            [f.paths for f in residual_features],
+        module_scopes = with_older_rows(
+            _module_scopes(state), [f.paths for f in residual_features],
         )
         for f in residual_features:
             log4.emit(f.name, f"residual cluster from {len(f.paths)} paths")
@@ -556,7 +558,10 @@ def _run_residual(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
             },
             run_dir=env.run_dir,
         )
-    return {"residual_features": residual_features}
+    return {
+        "residual_features": residual_features,
+        MODULE_SCOPES_KEY: module_scopes,
+    }
 
 
 def _run_postprocess(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
@@ -662,11 +667,12 @@ def _run_bipartite(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
 
     features = state["features"]
     with StageLogger(env.run_dir, 5, "bipartite") as log5_5:
-        # Absent from runs recorded before flow names were scoped: they
-        # replay with the one repository-wide namespace they had.
+        # Absent from runs recorded before flow names were scoped (and
+        # not recomputed in this chain): they replay with the one
+        # repository-wide namespace they had.
+        module_scopes = _module_scopes(state)
         bipartite = stage_5_5_bipartite(
-            features, log=log5_5,
-            module_scopes=state.get("module_scopes"),
+            features, log=log5_5, module_scopes=module_scopes,
         )
         write_stage_artifact(
             Path(state.get("repo_path", ".")), stage_index=5,
@@ -693,6 +699,7 @@ def _run_bipartite(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
         "features": bipartite.features,
         "bipartite_flows": list(bipartite.flows),
         "bipartite_edges": list(bipartite.edges),
+        MODULE_SCOPES_KEY: module_scopes,
     }
 
 
@@ -1144,10 +1151,12 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
 
     features = state["features"]
     with StageLogger(env.run_dir, 8, "anchor_subdecompose") as log8_9:
-        # Runs recorded before the stage took module scopes have none:
-        # they replay with the repo-wide ruler they were scanned with.
+        # Runs recorded before the stage took module scopes have none
+        # (unless this chain recomputed them): they replay with the
+        # repo-wide ruler they were scanned with.
+        module_scopes = _module_scopes(state)
         subdecompose_result = subdecompose_workspace_anchors(
-            features, module_scopes=state.get("module_scopes"),
+            features, module_scopes=module_scopes,
             route_split=_route_split_input(env, state),
         )
         log8_9.info(
@@ -1167,6 +1176,7 @@ def _run_anchor_subdecompose(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
         "features": features,
         "flow_moves": dict(subdecompose_result.flow_moves),
         BORN_ROWS_KEY: dict(subdecompose_result.route_group_born),
+        MODULE_SCOPES_KEY: module_scopes,
     }
 
 
@@ -1189,7 +1199,7 @@ def _run_llm_component_split(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
             repo_slug=getattr(ctx, "slug", None) or ctx.repo_path.name,
             # Absent from runs recorded before the stage took module
             # scopes: they replay with the repo-wide ruler they had.
-            module_scopes=state.get("module_scopes"),
+            module_scopes=_module_scopes(state),
         )
         log8_9_5.info(
             f"llm_component_split enabled={llm_split_result.enabled}",
@@ -1199,7 +1209,7 @@ def _run_llm_component_split(env: ReplayEnv, state: dict[str, Any]) -> dict[str,
             payload=llm_split_result.as_telemetry(),
             run_dir=env.run_dir,
         )
-    return {"features": features}
+    return {"features": features, MODULE_SCOPES_KEY: _module_scopes(state)}
 
 
 def _run_domain_member_attribution(
@@ -1301,6 +1311,35 @@ def _born_record(state: dict[str, Any]) -> dict[str, str]:
     else:
         stage.pop(BORN_ROWS_KEY, None)
     return born
+
+
+#: Chain key of the scan's record of nested-module rows
+#: (``module_scope.ModuleScopes``). Live it rides on ``ctx``; every replayed
+#: stage decodes its own ``ctx``, so it is handed on like the born record.
+MODULE_SCOPES_KEY = "module_scopes"
+
+
+def _module_scopes(state: dict[str, Any]) -> Any:
+    """The record of nested-module rows, as the live stage receives it.
+
+    A replay that ran the stage computing it (Stage 2, then Stage 4) or a
+    stage that read it earlier in this chain hands its value on
+    (transport 1); a replay that starts after them reads the capture of
+    the stage it starts at: the stage's own ``module_scopes`` input, else
+    its ``ctx``'s. ``None`` from a run recorded before the record existed."""
+    chain = state.get("_chain") or {}
+    if MODULE_SCOPES_KEY in chain:
+        return chain[MODULE_SCOPES_KEY]
+    if MODULE_SCOPES_KEY in state:
+        return state[MODULE_SCOPES_KEY]
+    return getattr(state.get("ctx"), "module_scopes", None)
+
+
+def _with_module_scopes(ctx: Any, state: dict[str, Any]) -> Any:
+    """*ctx* carrying :func:`_module_scopes`, for a stage that reads the
+    record from its context, as the live stage does."""
+    ctx.module_scopes = _module_scopes(state)
+    return ctx
 
 
 def _sibling_input(
@@ -2662,7 +2701,7 @@ def _run_flow_rederive(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
     bipartite flows / edges in place, exactly like the live site."""
     from wystan.pipeline_v2.flow_rederive import run_flow_rederive
 
-    ctx = prepare_ctx(state["ctx"], env)
+    ctx = _with_module_scopes(prepare_ctx(state["ctx"], env), state)
     features = state["features"]
     flows = state["bipartite_flows"]
     edges = state.get("bipartite_edges") or []
@@ -2699,6 +2738,7 @@ def _run_flow_rederive(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
         "bipartite_flows": flows,
         "bipartite_edges": edges,
         "scan_meta": scan_meta,
+        MODULE_SCOPES_KEY: ctx.module_scopes,
     }
 
 
@@ -3019,7 +3059,7 @@ def _run_impact(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
 def _run_monorepo_assembly(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any]:
     from wystan.pipeline_v2.llm_health import stamp_llm_degraded
 
-    ctx = prepare_ctx(state["ctx"], env)
+    ctx = _with_module_scopes(prepare_ctx(state["ctx"], env), state)
     scan_meta = state["scan_meta"]
     features = state["features"]
     # The live pipeline stamps LLM health right before this stage.
