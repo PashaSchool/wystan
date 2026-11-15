@@ -28,9 +28,6 @@ is on or off — which is what the byte-identical keyless A/B proves.
 from __future__ import annotations
 
 import os
-import stat
-from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -50,27 +47,11 @@ __all__ = [
     "open_repo_file",
     "path_within_repo",
     "read_repo_bytes",
-    "repo_root_of",
+    "repo_path",
     "safe_read_text",
     "symlink_containment_enabled",
 ]
 
-#: Largest file a counting reader opens. The largest tracked text file on
-#: the ten corpus clones is 10.7 MB (a bundled script); six times that keeps
-#: every file the map has ever counted and bounds what a crafted file costs.
-MAX_FILE_BYTES = 64 * 1024 * 1024
-#: Head inspected for a NUL byte before a file is read on (the line count's
-#: binary sniff has always read this much).
-SNIFF_BYTES = 8192
-#: Why a bounded read returned no bytes.
-REFUSED_MISSING = "missing_on_disk"
-REFUSED_OUTSIDE = "symlink_outside_repo"
-REFUSED_NOT_REGULAR = "not_regular_file"
-REFUSED_OVER_CAP = "over_read_cap"
-REFUSED_BINARY = "binary_content"
-_READ_CHUNK = 1 << 20
-_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-_NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 def symlink_containment_enabled() -> bool:
@@ -172,114 +153,18 @@ def iter_repo_files(root: os.PathLike[str] | str) -> Iterator[Path]:
         yield p
 
 
-# ── Bounded reads of one file (line counts and samples) ─────────────────
-
-
-@dataclass(frozen=True)
-class FileBytes:
-    """The bytes of a file, or why it was not read (``REFUSED_*``)."""
-
-    data: bytes | None
-    refused: str | None
-
-
-def repo_root_of(abs_path: os.PathLike[str] | str, rel_path: str) -> Path:
-    """The repository root ``abs_path`` was built from as ``root / rel_path``
-    (callers that pass only those two). Falls back to the file's directory,
-    the narrowest root, when the two do not line up."""
-    text = str(abs_path).replace("\\", "/")
-    rel = str(rel_path or "").replace("\\", "/").strip("/")
-    if rel and text.endswith("/" + rel):
-        return Path(text[: -len(rel) - 1] or "/")
-    return Path(abs_path).parent
-
-
-def _parent_inside(path: Path, repo_root: Path) -> bool:
-    """A path reached through a symlinked directory is outside the repository
-    even when the file itself is no symlink (git never tracks one; a
-    directory walk can reach one)."""
-    if not symlink_containment_enabled():
-        return True
-    try:
-        return Path(os.path.realpath(path.parent)).is_relative_to(Path(os.path.realpath(repo_root)))
-    except (OSError, ValueError):
-        return False
-
-
-def _target(path: Path, repo_root: Path) -> tuple[os.stat_result | None, str | None, bool]:
-    """``(stat of what would be opened, refusal, is a symlink)``: ``lstat``
-    first; a symlink is followed only when it stays inside the repository."""
-    try:
-        link = os.lstat(path)
-    except OSError:
-        return None, REFUSED_MISSING, False
-    is_link = stat.S_ISLNK(link.st_mode)
-    if not _parent_inside(path, repo_root) or (is_link and not path_within_repo(path, repo_root)):
-        return None, REFUSED_OUTSIDE, is_link
-    if not is_link:
-        return link, None, False
-    try:
-        return os.stat(path), None, True
-    except OSError:
-        return None, REFUSED_OUTSIDE, True
-
-
-@contextmanager
-def open_repo_file(
-    path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, *, max_bytes: int | None = None,
-) -> Iterator[tuple[int | None, int, str | None]]:
-    """Yield ``(fd, size, refusal)`` for a file of an untrusted repository:
-    a descriptor only for a regular file inside the repository of at most
-    ``max_bytes``, opened non-blocking (a FIFO swapped in never blocks) and
-    without following a symlink that was not one at ``lstat`` time, checked
-    again with ``fstat``. ``fd`` is ``None`` with the refusal otherwise."""
-    p, root = Path(path), Path(repo_root)
-    max_bytes = MAX_FILE_BYTES if max_bytes is None else max_bytes  # read at call time
-    target, refused, is_link = _target(p, root)
-    fd: int | None = None
-    try:
-        if refused is None and not stat.S_ISREG(target.st_mode):
-            refused = REFUSED_NOT_REGULAR
-        elif refused is None and target.st_size > max_bytes:
-            refused = REFUSED_OVER_CAP
-        if refused is None:
-            try:
-                fd = os.open(p, _OPEN_FLAGS | (0 if is_link else _NO_FOLLOW))
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    refused = REFUSED_NOT_REGULAR
-            except OSError:
-                refused = REFUSED_NOT_REGULAR
-        yield (None if refused else fd), (target.st_size if target else 0), refused
-    finally:
-        if fd is not None:
-            os.close(fd)
-
-
-def _read_rest(fd: int, first: bytes, max_bytes: int) -> FileBytes:
-    chunks, total = [first], len(first)
-    while chunk := os.read(fd, min(_READ_CHUNK, max_bytes + 1 - total)):
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > max_bytes:  # the file grew past the cap after stat
-            return FileBytes(None, REFUSED_OVER_CAP)
-    return FileBytes(b"".join(chunks), None)
-
-
-def read_repo_bytes(
-    path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, *,
-    max_bytes: int | None = None, stop_at_binary: bool = True,
-) -> FileBytes:
-    """All bytes of a regular file inside the repository, at most
-    ``max_bytes`` (default ``MAX_FILE_BYTES``). With ``stop_at_binary`` a NUL byte in the first
-    ``SNIFF_BYTES`` ends the read there (``REFUSED_BINARY``). Never raises."""
-    cap = MAX_FILE_BYTES if max_bytes is None else max_bytes
-    try:
-        with open_repo_file(path, repo_root, max_bytes=cap) as (fd, _size, refused):
-            if fd is None:
-                return FileBytes(None, refused)
-            head = os.read(fd, SNIFF_BYTES)
-            if stop_at_binary and b"\x00" in head:
-                return FileBytes(None, REFUSED_BINARY)
-            return _read_rest(fd, head, cap)
-    except OSError:
-        return FileBytes(None, REFUSED_NOT_REGULAR)
+# The bounded reader lives in ``repo_reader`` (it uses the containment switch
+# above); its names are re-exported here so the readers import one module.
+from wystan.analyzer.repo_reader import (  # noqa: E402  (after the switch it imports)
+    MAX_FILE_BYTES,
+    REFUSED_BINARY,
+    REFUSED_MISSING,
+    REFUSED_NOT_REGULAR,
+    REFUSED_OUTSIDE,
+    REFUSED_OVER_CAP,
+    SNIFF_BYTES,
+    FileBytes,
+    open_repo_file,
+    read_repo_bytes,
+    repo_path,
+)

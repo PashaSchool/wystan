@@ -89,7 +89,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from wystan.analyzer.features import _calculate_health
-from wystan.analyzer.safe_read import read_repo_bytes
+from wystan.analyzer.safe_read import read_repo_bytes, repo_path as guarded_path
 from wystan.pipeline_v2.stage_6_97b_uf_loc import (
     flow_owned_spans,
     union_span_len,
@@ -158,7 +158,10 @@ def count_file_lines(repo_path: Path, rel_path: str) -> int | None:
     ``analyzer.safe_read.read_repo_bytes`` (regular files inside the
     repository, at most ``MAX_FILE_BYTES``); a refused file is ``None`` like
     an unreadable one. Binary files are still counted, as they always were."""
-    read = read_repo_bytes(Path(repo_path) / rel_path, repo_path, stop_at_binary=False)
+    path = guarded_path(repo_path, rel_path)
+    if path is None:
+        return None
+    read = read_repo_bytes(path, repo_path, stop_at_binary=False)
     if read.data is None:
         return None
     data = read.data

@@ -794,7 +794,7 @@ class _LineCounter:
         self._budget.scan_bytes += size
         if self._budget.scan_bytes > MAX_SCAN_BYTES:
             raise _OverBudget
-        return count_file_loc(path, rel_path)
+        return count_file_loc(self._root, rel_path)
 
 
 def _counted_without_reading(rel_path: str) -> bool:

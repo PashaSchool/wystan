@@ -1573,7 +1573,7 @@ def _files_loc(
     total = 0
     for rel in rel_paths:
         if rel not in cache:
-            cache[rel] = count_file_loc(repo_root / rel, rel)
+            cache[rel] = count_file_loc(repo_root, rel)
         total += cache[rel]
     return total
 

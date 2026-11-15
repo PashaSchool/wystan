@@ -84,8 +84,9 @@ def func_spans(text: str) -> dict[str, tuple[int, int]]:
 def _file_spans(abs_path: str, repo_root: str) -> dict[str, tuple[int, int]]:
     """Spans of one file, read through ``analyzer.safe_read`` (a regular
     file inside the repository, at most ``MAX_FILE_BYTES``); ``{}`` when
-    refused, as when unreadable. Universal newlines, as ``read_text``."""
-    read = read_repo_bytes(abs_path, repo_root)
+    refused, as when unreadable. No binary sniff: ``dev`` read every file
+    whole. Universal newlines, as ``read_text``."""
+    read = read_repo_bytes(abs_path, repo_root, stop_at_binary=False)
     if read.data is None:
         return {}
     text = read.data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")

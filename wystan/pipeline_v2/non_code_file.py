@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from wystan.analyzer.safe_read import open_repo_file, repo_root_of
+from wystan.analyzer.safe_read import open_repo_file, repo_path
 
 __all__ = [
     "CLASS_BUNDLED",
@@ -167,17 +167,19 @@ class FileSample(NamedTuple):
     tail: bytes
 
 
-def read_sample(abs_path: Path, repo_root: Path | None = None) -> FileSample | None:
-    """Size, first ``HEAD_BYTES`` and last ``TAIL_BYTES`` of a regular file;
-    ``None`` when it cannot be read, is empty or is not a regular file.
+def read_sample(repo_root: Path, rel_path: str) -> FileSample | None:
+    """Size, first ``HEAD_BYTES`` and last ``TAIL_BYTES`` of a regular file
+    of the repository at ``repo_root``; ``None`` when it cannot be read, is
+    empty, is not a regular file, or ``rel_path`` is absolute or has ``..``.
 
-    Opened through ``analyzer.safe_read.open_repo_file`` (regular file only,
-    no symlink out of ``repo_root``, never a FIFO or device). Only the two
-    ends are read, so no size cap applies: ``max_bytes`` is unbounded.
-    ``repo_root`` defaults to the file's directory, the narrowest root."""
-    root = Path(repo_root) if repo_root is not None else Path(abs_path).parent
+    Opened through ``analyzer.safe_read.open_repo_file`` (contained in the
+    root, regular file only, never a FIFO or device). Only the two ends are
+    read, so no size cap applies: ``max_bytes`` is unbounded."""
+    path = repo_path(repo_root, rel_path)
+    if path is None:
+        return None
     try:
-        with open_repo_file(abs_path, root, max_bytes=sys.maxsize) as (fd, size, _refused):
+        with open_repo_file(path, repo_root, max_bytes=sys.maxsize) as (fd, size, _refused):
             if fd is None or size <= 0:
                 return None
             head = os.read(fd, HEAD_BYTES)
@@ -295,9 +297,9 @@ def classify_sample(rel_path: str, sample: FileSample) -> str | None:
     return _shape_class(ext, sample, head_text)
 
 
-def non_code_class(abs_path: Path, rel_path: str) -> str | None:
-    """Read the bounded sample of ``abs_path`` and classify it."""
-    sample = read_sample(Path(abs_path), repo_root_of(abs_path, rel_path))
+def non_code_class(repo_root: Path, rel_path: str) -> str | None:
+    """Read the bounded sample of ``rel_path`` under ``repo_root`` and classify it."""
+    sample = read_sample(Path(repo_root), rel_path)
     if sample is None:
         return None
     return classify_sample(rel_path, sample)
