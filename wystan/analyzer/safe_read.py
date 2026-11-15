@@ -31,13 +31,17 @@ import os
 from pathlib import Path
 from typing import Iterator
 
-SYMLINK_CONTAINMENT_ENV = "WYSTAN_SYMLINK_CONTAINMENT"
+# The switch lives with the opener (``repo_open``), which reads it on every
+# open; re-exported here, its historical home.
+from wystan.analyzer.repo_open import SYMLINK_CONTAINMENT_ENV, symlink_containment_enabled
+
 
 __all__ = [
     "MAX_FILE_BYTES",
     "REFUSED_BINARY",
     "REFUSED_MISSING",
     "REFUSED_NOT_REGULAR",
+    "REFUSED_OPEN_ERROR",
     "REFUSED_OUTSIDE",
     "REFUSED_OVER_CAP",
     "SNIFF_BYTES",
@@ -52,19 +56,6 @@ __all__ = [
     "symlink_containment_enabled",
 ]
 
-
-
-def symlink_containment_enabled() -> bool:
-    """Default **ON**. Explicit ``0``/``false``/``off``/``no``/``""`` ⇒ every
-    helper is a pure pass-through (byte-identical legacy behaviour;
-    kill-switch). The truthy set mirrors the ``invariant_hooks`` convention;
-    only the ``os.environ.get`` default is ``"1"`` (unset ≡ armed)."""
-    return os.environ.get(SYMLINK_CONTAINMENT_ENV, "1").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def path_within_repo(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str) -> bool:
@@ -158,6 +149,7 @@ from wystan.analyzer.repo_reader import (  # noqa: E402  (after the switch it im
     REFUSED_BINARY,
     REFUSED_MISSING,
     REFUSED_NOT_REGULAR,
+    REFUSED_OPEN_ERROR,
     REFUSED_OUTSIDE,
     REFUSED_OVER_CAP,
     SNIFF_BYTES,

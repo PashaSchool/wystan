@@ -9,15 +9,10 @@ what a scanned repository must not make the engine open:
   default on): the path is resolved; it must resolve inside the boundary of
   the root (``repo_boundary``: the root itself, or the repository the user
   passed for a ``--subpath`` subtree; never anything above). The file is then
-  opened component by component under a descriptor of
-  the root, every component with ``O_NOFOLLOW`` (``os.open`` with
-  ``dir_fd``), so a directory or a symlink swapped in between the check and
-  the open is refused, not followed: the opened file is inside the root by
-  construction. An in-repository symlink is read as the file it resolves to.
-  Where the platform has no ``dir_fd`` support, the resolved path is opened
-  with ``O_NOFOLLOW`` and the descriptor's device and inode must equal those
-  of the checked target (a parent swapped before the check is caught; one
-  swapped and swapped back between the two ``stat`` calls is not).
+  opened beneath the boundary without following a link swapped in
+  (``repo_open``: the ``dir_fd`` path, or where the platform lacks it the
+  fallback, whose remaining race that module states). An in-repository link
+  is read as the file it resolves to.
 * Only a regular file is read: ``lstat`` refuses anything else before the
   open, the open is non-blocking (a FIFO swapped in never blocks), and
   ``fstat`` on the descriptor checks again. A device swapped in at the last
@@ -40,12 +35,14 @@ from pathlib import Path, PurePath
 from typing import Iterator
 
 from wystan.analyzer.repo_boundary import boundary_of
+from wystan.analyzer.repo_open import FILE_FLAGS, OutsideRepository, open_contained, symlink_containment_enabled
 
 __all__ = [
     "MAX_FILE_BYTES",
     "REFUSED_BINARY",
     "REFUSED_MISSING",
     "REFUSED_NOT_REGULAR",
+    "REFUSED_OPEN_ERROR",
     "REFUSED_OUTSIDE",
     "REFUSED_OVER_CAP",
     "SNIFF_BYTES",
@@ -73,11 +70,8 @@ REFUSED_OUTSIDE = "symlink_outside_repo"
 REFUSED_NOT_REGULAR = "not_regular_file"
 REFUSED_OVER_CAP = "over_read_cap"
 REFUSED_BINARY = "binary_content"
+REFUSED_OPEN_ERROR = "open_error"
 _READ_CHUNK = 1 << 20
-_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-_NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NO_FOLLOW
-_HAS_DIR_FD = os.open in os.supports_dir_fd
 
 
 @dataclass(frozen=True)
@@ -98,52 +92,6 @@ def repo_path(repo_root: os.PathLike[str] | str, rel_path: str) -> Path | None:
     return Path(repo_root) / rel
 
 
-def _resolved_parts(path: Path, repo_root: Path) -> tuple[Path, tuple[str, ...]] | None:
-    """``(resolved boundary, components of the resolved path under it)``, or
-    ``None`` when the path resolves outside the repository ``repo_root``
-    belongs to (``repo_boundary``), or loops."""
-    try:
-        real_root = Path(boundary_of(repo_root).real)
-        real = Path(os.path.realpath(path))
-        parts = real.relative_to(real_root).parts
-    except (OSError, ValueError, RuntimeError):
-        return None
-    return (real_root, parts) if parts else None
-
-
-def _open_beneath(real_root: Path, parts: tuple[str, ...]) -> int:
-    """Open ``real_root/parts...`` without following any symlink on the way;
-    raises ``OSError`` when a component is a symlink or missing."""
-    dir_fd = os.open(real_root, _DIR_FLAGS & ~_NO_FOLLOW)
-    try:
-        for name in parts[:-1]:
-            next_fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
-            os.close(dir_fd)
-            dir_fd = next_fd
-        return os.open(parts[-1], _FILE_FLAGS | _NO_FOLLOW, dir_fd=dir_fd)
-    finally:
-        os.close(dir_fd)
-
-
-def _open_checked(real: Path) -> int:
-    """No ``dir_fd``: open the resolved path and require the descriptor to
-    be the file that was checked (same device and inode)."""
-    checked = os.stat(real)
-    fd = os.open(real, _FILE_FLAGS | _NO_FOLLOW)
-    opened = os.fstat(fd)
-    if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
-        os.close(fd)
-        raise OSError("the file changed between the check and the open")
-    return fd
-
-
-def _containment_on() -> bool:
-    # Late import: ``safe_read`` re-exports this module's names at its end.
-    from wystan.analyzer.safe_read import symlink_containment_enabled
-
-    return symlink_containment_enabled()
-
-
 def _open(path: Path, repo_root: Path) -> tuple[int | None, str | None]:
     """A descriptor for a regular-looking, contained file, or the refusal."""
     try:
@@ -152,22 +100,19 @@ def _open(path: Path, repo_root: Path) -> tuple[int | None, str | None]:
         return None, REFUSED_MISSING
     if not stat.S_ISLNK(link.st_mode) and not stat.S_ISREG(link.st_mode):
         return None, REFUSED_NOT_REGULAR
-    if not _containment_on():
+    if not symlink_containment_enabled():
         try:  # the kill switch: legacy reads, file type and cap still checked
-            return os.open(path, _FILE_FLAGS), None
+            return os.open(path, FILE_FLAGS), None
         except OSError:
-            return None, REFUSED_NOT_REGULAR
-    resolved = _resolved_parts(path, repo_root)
-    if resolved is None:
-        return None, REFUSED_OUTSIDE
+            return None, REFUSED_OPEN_ERROR
     try:
-        if _HAS_DIR_FD:
-            return _open_beneath(*resolved), None
-        return _open_checked(resolved[0].joinpath(*resolved[1])), None
+        return open_contained(path, boundary_of(repo_root)), None
     except FileNotFoundError:
         return None, REFUSED_MISSING
-    except OSError:
+    except OutsideRepository:
         return None, REFUSED_OUTSIDE
+    except OSError:
+        return None, REFUSED_OPEN_ERROR
 
 
 @contextmanager
@@ -225,7 +170,7 @@ def read_repo_bytes(
                 return FileBytes(None, REFUSED_BINARY)
             return _read_rest(fd, head, cap)
     except OSError:
-        return FileBytes(None, REFUSED_NOT_REGULAR)
+        return FileBytes(None, REFUSED_OPEN_ERROR)
 
 
 # ── Drop-in text reads for call sites that read a repository file ───────
