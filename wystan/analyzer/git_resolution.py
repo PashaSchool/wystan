@@ -96,6 +96,10 @@ def _which(search_path: str) -> str | None:
     # Not shutil.which: on Windows before Python 3.12 it searches the current
     # directory first even when given an explicit path.
     for entry in search_path.split(os.pathsep):
+        # An empty or relative entry would make the lookup relative to the
+        # current directory; an empty search path therefore means "no git".
+        if not entry or not os.path.isabs(entry):
+            continue
         for name in _executable_names():
             candidate = os.path.join(entry, name)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
