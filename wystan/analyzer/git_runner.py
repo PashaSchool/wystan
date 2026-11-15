@@ -30,9 +30,10 @@ import functools
 import logging
 import os
 import re
+from typing import BinaryIO, Callable, TypeVar
 
 from wystan.analyzer.git_arguments import FORMS, refusal
-from wystan.analyzer.git_process import GitError, GitFailed, GitResult, run_bounded
+from wystan.analyzer.git_process import GitError, GitFailed, GitResult, run_bounded, run_streaming
 from wystan.analyzer.git_resolution import (
     SAFE_OPTIONS,
     UnsafeGit,
@@ -86,6 +87,7 @@ DEFAULT_MAX_OUTPUT_BYTES = 512 * 1024 * 1024
 _CONFIG_TIMEOUT_SEC = 10.0
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 _HEX_NAME = re.compile(r"[0-9a-fA-F]{4,64}")
 _FORBIDDEN_IN_REVISION = ("\0", "\n", "\r")
@@ -184,6 +186,28 @@ def _user_options(subcommand: str) -> tuple[str, ...]:
     return ("-c", f"core.excludesFile={excludes}") if excludes else ()
 
 
+def _prepared(root: str, args: tuple[str, ...], stay_inside: bool) -> tuple[str, list[str], dict[str, str]]:
+    """(subcommand, argv, environment) of an allowed command on ``root``."""
+    subcommand = _check_subcommand(args)
+    env = child_environment(root)
+    # ``stay_inside``: this path only, never an enclosing repository.
+    env.update(ceiling_environment(root, stay_inside))
+    if subcommand in _FILTERING_SUBCOMMANDS:
+        env.update(filter_environment(root))
+    argv = git_command(root, *_user_options(subcommand), subcommand, *_FORCED_FLAGS.get(subcommand, ()), *args[1:])
+    return subcommand, argv, env
+
+
+def stream_git(
+    repo_root: str | os.PathLike[str], *args: str, consume: Callable[[BinaryIO], T],
+    stdin: bytes | None = None, timeout: float = DEFAULT_TIMEOUT_SEC,
+) -> T:
+    """Like :func:`run_git`, but stdout goes to ``consume`` as a stream
+    (for output too large to hold, e.g. blob contents)."""
+    _subcommand, argv, env = _prepared(os.fspath(repo_root), args, False)
+    return run_streaming(argv, env, timeout, stdin, consume)
+
+
 def run_git(
     repo_root: str | os.PathLike[str],
     *args: str,
@@ -196,14 +220,7 @@ def run_git(
     """Run ``git <args>`` on ``repo_root`` through the hardened runner.
     Raises :class:`GitError` (``GitFailed`` for a non-zero exit when
     ``check``); ``args[0]`` must be an allowed subcommand."""
-    root = os.fspath(repo_root)
-    subcommand = _check_subcommand(args)
-    env = child_environment(root)
-    # ``stay_inside``: this path only, never an enclosing repository.
-    env.update(ceiling_environment(root, stay_inside))
-    if subcommand in _FILTERING_SUBCOMMANDS:
-        env.update(filter_environment(root))
-    argv = git_command(root, *_user_options(subcommand), subcommand, *_FORCED_FLAGS.get(subcommand, ()), *args[1:])
+    subcommand, argv, env = _prepared(os.fspath(repo_root), args, stay_inside)
     result = run_bounded(argv, env, timeout, max_output, stdin)
     if check and result.returncode != 0:
         raise GitFailed(subcommand, result)

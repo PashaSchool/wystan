@@ -12,6 +12,9 @@ import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
+from typing import BinaryIO, Callable, TypeVar
+
+T = TypeVar("T")
 
 #: Bytes read from the child per call; large enough that a big ``git log``
 #: costs few reads, small enough that the cap is overshot by little.
@@ -137,3 +140,49 @@ def run_bounded(
     if out is None:
         raise GitOutputTooLarge(f"git printed more than {max_output} bytes: {argv[-3:]!r}")
     return GitResult(returncode, out, err)
+
+
+def run_streaming(
+    argv: list[str], env: dict[str, str], timeout: float, stdin: bytes | None,
+    consume: Callable[[BinaryIO], T],
+) -> T:
+    """Run ``argv`` and hand its stdout, as a stream, to ``consume`` (which
+    bounds what it reads); kill the child at ``timeout`` seconds. A non-zero
+    exit or an exception in ``consume`` fails the call."""
+    expired = threading.Event()
+    with tempfile.TemporaryFile() as err_file:
+        try:
+            proc = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=err_file, env=env,
+            )
+        except OSError as exc:
+            raise GitError(f"cannot start git: {exc}") from exc
+        writer = None if stdin is None else _feed(proc, stdin)
+
+        def _expire() -> None:
+            expired.set()
+            proc.kill()
+
+        timer = threading.Timer(timeout, _expire)
+        timer.start()
+        try:
+            assert proc.stdout is not None
+            result = consume(proc.stdout)
+        except BaseException:
+            proc.kill()
+            raise
+        finally:
+            timer.cancel()
+            if writer is not None:
+                writer.join()
+            returncode = proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+        err_file.seek(0)
+        err = err_file.read(_STDERR_KEPT_BYTES)
+    if expired.is_set():
+        raise GitTimeout(f"git timed out after {timeout}s: {argv[-3:]!r}")
+    if returncode != 0:
+        raise GitFailed("(streamed)", GitResult(returncode, b"", err))
+    return result
