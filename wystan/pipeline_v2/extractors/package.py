@@ -74,7 +74,7 @@ from typing import TYPE_CHECKING
 from wystan.pipeline_v2.data import load_yaml
 from wystan.pipeline_v2.extractors._util import (
     posix,
-    read_text,
+    read_manifest_text,
     slugify,
 )
 from wystan.pipeline_v2.extractors.base import AnchorCandidate
@@ -250,7 +250,7 @@ def _root_project_slugs(repo_path: "Path") -> frozenset[str]:
         s = _slug_from_package_name(root_pkg.get("name"))
         if s:
             slugs.add(s)
-    py_text = read_text(repo_path / "pyproject.toml", repo_path)
+    py_text = read_manifest_text(repo_path / "pyproject.toml", repo_path)
     if py_text:
         m = re.search(r'(?m)^\s*name\s*=\s*["\']([^"\']+)["\']', py_text)
         if m:
@@ -340,7 +340,7 @@ class PackageAnchorExtractor:
                 _process_js(root_pkg, ".")
 
         # ── Python pyproject.toml ──
-        pyproject_text = read_text(ctx.repo_path / "pyproject.toml", ctx.repo_path)
+        pyproject_text = read_manifest_text(ctx.repo_path / "pyproject.toml", ctx.repo_path)
         if pyproject_text:
             py_deps = _collect_py_deps(pyproject_text)
             for slug, contributing in _match_anchors(py_deps, _PY_DEP_ANCHORS).items():

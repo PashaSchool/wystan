@@ -20,6 +20,8 @@ what a scanned repository must not make the engine open:
 * The head (``SNIFF_BYTES``) is read first; a binary file can stop there.
 * At most ``max_bytes`` are read (default ``MAX_FILE_BYTES``), checked on the
   descriptor's size and again while reading (a file that grows).
+* Every refusal (not a missing file, not a binary head) is recorded for the
+  scan's ``scan_meta.repository_reads`` (``repo_read_tally``).
 
 Not closed by any reader: a hard link inside the repository to a file
 outside it (same inode; git never creates one).
@@ -27,7 +29,6 @@ outside it (same inode; git never creates one).
 
 from __future__ import annotations
 
-import locale
 import os
 import stat
 from contextlib import contextmanager
@@ -36,6 +37,13 @@ from pathlib import Path, PurePath
 from typing import Iterator
 
 from wystan.analyzer.repo_boundary import boundary_of
+from wystan.analyzer.repo_read_tally import (
+    REASON_NOT_REGULAR,
+    REASON_OPEN_ERROR,
+    REASON_OUTSIDE,
+    REASON_OVER_CAP,
+    record_refusal,
+)
 from wystan.analyzer.repo_open import (
     FILE_FLAGS,
     NotRegularFile,
@@ -54,12 +62,7 @@ __all__ = [
     "REFUSED_OVER_CAP",
     "SNIFF_BYTES",
     "FileBytes",
-    "MANIFEST_READ_MAX_BYTES",
-    "TEXT_READ_MAX_BYTES",
     "open_repo_file",
-    "read_repo_bytes_or_raise",
-    "read_repo_head_or_raise",
-    "read_repo_text_or_raise",
     "read_repo_bytes",
     "repo_path",
 ]
@@ -129,6 +132,22 @@ def _open(path: str, repo_root: os.PathLike[str] | str) -> tuple[int | None, str
         return None, REFUSED_OPEN_ERROR
 
 
+#: Refusals the scan reports (``repo_read_tally``); a missing file and a
+#: binary head are not refusals.
+_TALLIED = {
+    REFUSED_OUTSIDE: REASON_OUTSIDE,
+    REFUSED_NOT_REGULAR: REASON_NOT_REGULAR,
+    REFUSED_OVER_CAP: REASON_OVER_CAP,
+    REFUSED_OPEN_ERROR: REASON_OPEN_ERROR,
+}
+
+
+def _tally(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, refused: str | None) -> None:
+    reason = _TALLIED.get(refused) if refused else None
+    if reason is not None:
+        record_refusal(path, repo_root, reason)
+
+
 @contextmanager
 def open_repo_file(
     path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, *, max_bytes: int | None = None,
@@ -150,6 +169,7 @@ def open_repo_file(
                 refused = REFUSED_NOT_REGULAR
             elif size > cap:
                 refused = REFUSED_OVER_CAP
+        _tally(path, repo_root, refused)
         yield (None if refused else fd), size, refused
     finally:
         if fd is not None:
@@ -184,73 +204,29 @@ def read_repo_bytes(
             head = os.read(fd, min(SNIFF_BYTES, cap + 1))
             if stop_at_binary and b"\x00" in head:
                 return FileBytes(None, REFUSED_BINARY)
-            return _read_rest(fd, head, cap)
+            read = _read_rest(fd, head, cap)
     except OSError:
-        return FileBytes(None, REFUSED_OPEN_ERROR)
+        read = FileBytes(None, REFUSED_OPEN_ERROR)
+    _tally(path, repo_root, read.refused)  # growth past the cap, a failed read
+    return read
 
 
-# ── Drop-in text reads for call sites that read a repository file ───────
-
-#: Cap of a text read whose purpose sets no tighter bound (a source file, a
-#: catalog). The same as the line counters' cap: the largest tracked text
-#: file on the corpus is 10.7 MB.
-TEXT_READ_MAX_BYTES = MAX_FILE_BYTES
-#: Cap of a manifest or config read (package.json, tsconfig, Cargo.toml,
-#: go.mod, pyproject.toml, workspace files, git config). The largest such
-#: tracked file on the 27 corpus clones is 84 KB; 4 MiB is fifty times that.
-MANIFEST_READ_MAX_BYTES = 4 * 1024 * 1024
-
-
-def _refusal_error(path: os.PathLike[str] | str, refused: str | None) -> OSError:
-    """The error ``Path.read_text`` raises for a file it cannot read, so a
-    call site that handles a missing or unreadable file handles a refused one
-    the same way."""
-    if refused == REFUSED_MISSING:
-        return FileNotFoundError(2, "No such file or directory", str(path))
-    return PermissionError(13, f"refused by the repository reader ({refused})", str(path))
+# The drop-ins live in ``repo_text_reads`` (they use the reader above); their
+# names are served from here too so call sites import one module. Resolved on
+# first use (PEP 562), so either module may be imported first.
+_TEXT_READS = frozenset({
+    "MANIFEST_READ_MAX_BYTES",
+    "TEXT_READ_MAX_BYTES",
+    "read_repo_bytes_or_raise",
+    "read_repo_head_or_raise",
+    "read_repo_text_head_or_raise",
+    "read_repo_text_or_raise",
+})
 
 
-def read_repo_text_or_raise(
-    path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, *,
-    encoding: str | None = "utf-8", errors: str | None = "strict", max_bytes: int | None = None,
-) -> str:
-    """``Path(path).read_text(encoding, errors)`` through the guarded reader:
-    the same text (universal newlines), the same ``UnicodeDecodeError``, and
-    an ``OSError`` where the file is missing or refused."""
-    read = read_repo_bytes(path, repo_root, max_bytes=TEXT_READ_MAX_BYTES if max_bytes is None else max_bytes,
-                           stop_at_binary=False)
-    if read.data is None:
-        raise _refusal_error(path, read.refused)
-    # ``read_text()`` with no encoding decodes with the locale's encoding.
-    text = read.data.decode(locale.getpreferredencoding(False) if encoding is None else encoding, errors or "strict")
-    # Universal newlines; most files have no CR, and the scan for one is
-    # cheaper than two replacing passes.
-    return text.replace("\r\n", "\n").replace("\r", "\n") if "\r" in text else text
+def __getattr__(name: str):
+    if name in _TEXT_READS:
+        from wystan.analyzer import repo_text_reads
 
-
-def read_repo_bytes_or_raise(
-    path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, *, max_bytes: int | None = None,
-) -> bytes:
-    """``Path(path).read_bytes()`` through the guarded reader; ``OSError``
-    where the file is missing or refused."""
-    read = read_repo_bytes(path, repo_root, max_bytes=TEXT_READ_MAX_BYTES if max_bytes is None else max_bytes,
-                           stop_at_binary=False)
-    if read.data is None:
-        raise _refusal_error(path, read.refused)
-    return read.data
-
-
-def read_repo_head_or_raise(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, size: int) -> bytes:
-    """The first ``size`` bytes of a regular file inside the repository
-    (``open(path, "rb").read(size)`` guarded; no size cap applies, only the
-    head is read); ``OSError`` where the file is missing or refused."""
-    import sys
-
-    with open_repo_file(path, repo_root, max_bytes=sys.maxsize) as (fd, _size, refused):
-        if fd is None:
-            raise _refusal_error(path, refused)
-        chunks, total = [], 0
-        while total < size and (chunk := os.read(fd, size - total)):
-            chunks.append(chunk)
-            total += len(chunk)
-        return b"".join(chunks)
+        return getattr(repo_text_reads, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 
-from wystan.analyzer.repo_reader import TEXT_READ_MAX_BYTES, read_repo_text_or_raise
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 
 
 @dataclass
@@ -241,9 +241,9 @@ def _resolve_globs(root: Path, patterns: list[str]) -> list[WorkspacePackage]:
 
 
 #: Largest workspace manifest read (package.json, Cargo.toml, go.work, ...):
-#: the guarded reader's text cap; a crafted ``package.json -> /dev/zero`` is
-#: refused as not a regular file before any read.
-WORKSPACE_MANIFEST_MAX_BYTES = TEXT_READ_MAX_BYTES
+#: the one manifest cap; a crafted ``package.json -> /dev/zero`` is refused
+#: as not a regular file before any read.
+WORKSPACE_MANIFEST_MAX_BYTES = MANIFEST_READ_MAX_BYTES
 
 
 def _read(path: Path, root: Path) -> str:

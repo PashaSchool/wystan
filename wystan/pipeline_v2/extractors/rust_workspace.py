@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from wystan.pipeline_v2.data import load_stack_yaml
 from wystan.pipeline_v2.extractors._util import (
     posix,
-    read_text,
+    read_manifest_text,
     slugify,
 )
 from wystan.pipeline_v2.extractors.base import AnchorCandidate
@@ -76,7 +76,7 @@ def _is_rust_workspace(ctx: "ScanContext", root_manifest: Path) -> bool:
     )
     if not is_rust:
         return False
-    text = read_text(root_manifest, ctx.repo_path)
+    text = read_manifest_text(root_manifest, ctx.repo_path)
     if not text:
         return False
     try:
@@ -141,7 +141,7 @@ def _crate_name(member_dir: str, repo_root: Path) -> str:
     or unparseable — this matches the Cargo convention.
     """
     manifest = repo_root / member_dir / "Cargo.toml"
-    text = read_text(manifest, repo_root)
+    text = read_manifest_text(manifest, repo_root)
     if text:
         try:
             data = tomllib.loads(text)
@@ -174,7 +174,7 @@ class RustWorkspaceExtractor:
         if not _is_rust_workspace(ctx, root_manifest):
             return []
 
-        text = read_text(root_manifest, ctx.repo_path)
+        text = read_manifest_text(root_manifest, ctx.repo_path)
         if not text:
             return []
         try:

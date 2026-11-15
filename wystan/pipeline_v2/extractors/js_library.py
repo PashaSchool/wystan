@@ -34,6 +34,7 @@ from wystan.pipeline_v2.data import load_stack_yaml
 from wystan.pipeline_v2.extractors._util import (
     is_noise,
     posix,
+    read_manifest_text,
     read_text,
     slugify,
 )
@@ -152,7 +153,7 @@ _APP_FRAMEWORK_DEPS = (
 
 def _read_package_json(repo_path: Path) -> dict:
     """Read root ``package.json`` if present; return ``{}`` on any error."""
-    text = read_text(repo_path / "package.json", repo_path)
+    text = read_manifest_text(repo_path / "package.json", repo_path)
     if not text:
         return {}
     try:

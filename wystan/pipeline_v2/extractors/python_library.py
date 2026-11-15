@@ -33,6 +33,7 @@ from wystan.pipeline_v2.extractors._util import (
     is_audited_stack,
     is_noise,
     posix,
+    read_manifest_text,
     read_text,
     slugify,
 )
@@ -171,7 +172,7 @@ def _discover_root_package(ctx: "ScanContext") -> str | None:
 
 
 def _read_project_name(pyproject: Path, repo_root: Path) -> str | None:
-    text = read_text(pyproject, repo_root)
+    text = read_manifest_text(pyproject, repo_root)
     if not text:
         return None
     # Use a tolerant regex — full TOML parsing would work but the
