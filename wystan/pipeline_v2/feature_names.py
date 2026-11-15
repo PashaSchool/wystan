@@ -22,12 +22,12 @@ every name stays as it is.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from typing import Any, Callable, Iterable
 
 from wystan.cache.backend import CacheKind
+from wystan.pipeline_v2.memory_key import memory_key
 from wystan.pipeline_v2.module_scope import ModuleScopes
 from wystan.pipeline_v2.ownership_moves import conservation_report, product_layer_total
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
@@ -189,7 +189,8 @@ def _cache_key(row: dict[str, Any], scope: str = REPOSITORY_ROOT) -> str:
         # A module's answer was read beside the module's features only: it is
         # kept apart from a repository feature with the same evidence.
         payload["module_scope"] = scope
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    # Any module path hashes, a byte that is not UTF-8 included.
+    return memory_key(payload)
 
 
 def _remembered(cache: Any, key: str) -> dict[str, str] | None:

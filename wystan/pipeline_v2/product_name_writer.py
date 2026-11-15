@@ -28,12 +28,12 @@ equals, see :mod:`wystan.pipeline_v2.scan_id_order`.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any, Callable
 
 from wystan.cache.backend import CacheKind
 
+from wystan.pipeline_v2.memory_key import memory_key
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
 from wystan.pipeline_v2.scan_id_order import places_among_equals
 
@@ -102,9 +102,8 @@ def _key_of(
         # it would read that answer and never be asked. Its module keeps it
         # apart; a repository item's key does not know modules exist.
         payload["module_scope"] = scope
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
+    # Any module path hashes, a byte that is not UTF-8 included.
+    return memory_key(payload)
 
 
 def _item_key(

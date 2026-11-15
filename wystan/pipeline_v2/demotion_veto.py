@@ -25,12 +25,12 @@ why.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from typing import Any, Callable, Iterable
 
 from wystan.cache.backend import CacheKind
+from wystan.pipeline_v2.memory_key import memory_key
 from wystan.pipeline_v2.module_scope import ModuleScopes
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
 from wystan.pipeline_v2.request_scopes import (
@@ -133,9 +133,8 @@ def _cache_key(row: dict[str, Any], scope: str = REPOSITORY_ROOT) -> str:
         # is never read for a repository feature with the same evidence (nor
         # the reverse). A repository feature's key is the one it always had.
         payload["module_scope"] = scope
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
+    # Any module path hashes, a byte that is not UTF-8 included.
+    return memory_key(payload)
 
 
 def _remembered(cache: Any, key: str) -> tuple[str, str] | None:
