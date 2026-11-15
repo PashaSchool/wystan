@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from wystan.analyzer.repo_boundary import declare_subtree
+from wystan.analyzer.repo_boundary import repository_of, scoped_root
 from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
@@ -175,6 +175,22 @@ class ScanContext:
     # without such rows it is empty. Captured with the stage inputs, so
     # a replayed stage measures and names as the scan did.
     module_scopes: "ModuleScopes | None" = None
+    # The top-level path the user passed when it is not ``repo_path`` (a
+    # ``--subpath`` scan): the boundary of every guarded read
+    # (``analyzer.repo_boundary``). ``None`` for an ordinary scan, and in a
+    # context captured before the field existed: reads are then bounded by
+    # ``repo_path``, the narrower reading. Kept in step with ``repo_path``,
+    # which is then a ``ScopedRoot`` naming the same repository.
+    repository_root: Path | None = None
+
+    def __post_init__(self) -> None:
+        named = repository_of(self.repo_path)
+        if self.repository_root is None and named is not None:
+            self.repository_root = named
+        elif self.repository_root is not None and named is None:
+            self.repo_path = scoped_root(self.repo_path, self.repository_root)
+        if repository_of(self.repo_path) is None:
+            self.repository_root = None  # one directory: an ordinary scan
 
     def with_shape(self, result: "ClassificationResult") -> "ScanContext":
         """Return a NEW ScanContext with the shape-classification fields populated.
@@ -788,8 +804,9 @@ def stage_0_intake(
     )
     if norm_subpath is not None:
         # Reads under the subtree stay bounded by the repository the user
-        # passed (not by the subtree, not by anything above the repository).
-        declare_subtree(effective_root, repo_path)
+        # passed (not by the subtree, not by anything above it): the root
+        # names the repository, and the context carries it.
+        effective_root = scoped_root(effective_root, repo_path)
 
     # Run-id assignment lives here (Stage 0 is the only place that
     # owns "this run started"). Import lazily to keep the stage's
