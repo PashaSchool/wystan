@@ -163,7 +163,10 @@ _TALLIED = {
 
 def _tally(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, refused: str | None) -> None:
     reason = _TALLIED.get(refused) if refused else None
-    if reason is not None:
+    # A directory where a file was expected is a probe that found nothing
+    # (``read_text`` raised there too), not a refusal: like a missing file
+    # it is not reported, so an ordinary repository's map is unchanged.
+    if reason is not None and not (reason == REASON_NOT_REGULAR and os.path.isdir(path)):
         record_refusal(path, repo_root, reason)
 
 

@@ -10,7 +10,8 @@ Counts are of distinct repository-relative paths, so a file read by several
 stages, or twice by racing threads, counts once and two runs on one input
 give the same record. At most ``PATHS_LISTED`` paths are listed per reason,
 the first in sorted order. A missing file (probes for optional manifests) and
-a binary file stopped at its head are not refusals.
+a binary file stopped at its head, and a directory where a file was expected are
+not refusals.
 
 Scope: one record per boundary (the scanned tree) per process. A scan clears
 its boundary's record when it starts (``begin_scan``); two scans of one
