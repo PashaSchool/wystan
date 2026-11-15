@@ -65,6 +65,7 @@ __all__ = [
     "open_repo_file",
     "read_repo_bytes",
     "repo_path",
+    "require_repo_root",
 ]
 
 #: Largest file a counting reader opens. The largest tracked text file on
@@ -100,6 +101,24 @@ def repo_path(repo_root: os.PathLike[str] | str, rel_path: str) -> Path | None:
     if not rel or os.path.isabs(rel) or rel.startswith("/") or ".." in parts:
         return None
     return Path(repo_root) / rel
+
+
+_roots_checked: set[str] = set()
+
+
+def require_repo_root(repo_root: os.PathLike[str] | str, signature: str) -> None:
+    """Raise ``TypeError`` unless ``repo_root`` is an existing directory.
+
+    For readers whose first argument changed meaning from a file path to the
+    repository root while keeping its position: a call written for the old
+    signature (``count_file_loc(root / rel, rel)``) would otherwise count
+    nothing, silently. Checked once per root and process."""
+    raw = os.fspath(repo_root)
+    if raw in _roots_checked:
+        return
+    if not os.path.isdir(raw):
+        raise TypeError(f"{signature}: the first argument must be the repository root directory, got {raw!r}")
+    _roots_checked.add(raw)
 
 
 def _open_uncontained(path: str) -> tuple[int | None, str | None]:

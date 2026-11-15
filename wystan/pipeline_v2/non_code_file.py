@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from wystan.analyzer.safe_read import open_repo_file, repo_path
+from wystan.analyzer.repo_reader import open_repo_file, repo_path, require_repo_root
 
 __all__ = [
     "CLASS_BUNDLED",
@@ -298,7 +298,10 @@ def classify_sample(rel_path: str, sample: FileSample) -> str | None:
 
 
 def non_code_class(repo_root: Path, rel_path: str) -> str | None:
-    """Read the bounded sample of ``rel_path`` under ``repo_root`` and classify it."""
+    """Read the bounded sample of ``rel_path`` under ``repo_root`` and classify
+    it. A first argument that is not a directory (a call written for the old
+    ``(abs_path, rel_path)`` form) raises ``TypeError``."""
+    require_repo_root(repo_root, "non_code_class(repo_root, rel_path)")
     sample = read_sample(Path(repo_root), rel_path)
     if sample is None:
         return None

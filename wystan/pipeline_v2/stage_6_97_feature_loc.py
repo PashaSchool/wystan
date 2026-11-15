@@ -70,12 +70,16 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
-from wystan.analyzer.safe_read import SNIFF_BYTES, read_repo_bytes, repo_path
+from wystan.analyzer.repo_reader import SNIFF_BYTES, read_repo_bytes, repo_path, require_repo_root
 from wystan.pipeline_v2.non_code_file import non_code_class
 from wystan.pipeline_v2.owner_oracle import elect_primary_owners
 from wystan.pipeline_v2.ownership_v2 import ownership_v2_enabled
 from wystan.pipeline_v2.stage_6_9_test_strip import is_test_path
 from wystan.pipeline_v2.stage_6_9b_generated_strip import is_generated_path
+
+#: The signature a call written for the old ``(abs_path, rel_path)`` form is
+#: told about.
+COUNT_FILE_LOC_SIGNATURE = "count_file_loc(repo_root, rel_path)"
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from wystan.models.types import Feature
@@ -210,8 +214,11 @@ def count_file_loc(repo_root: Path, rel_path: str) -> int:
     The file is read through ``analyzer.safe_read.read_repo_bytes``
     (contained in the root, regular files only, at most ``MAX_FILE_BYTES``,
     NUL sniff before the rest is read). A refused file counts 0, as an
-    unreadable one always did.
+    unreadable one always did. A first argument that is not a directory
+    (a call written for the old ``(abs_path, rel_path)`` form) raises
+    ``TypeError``.
     """
+    require_repo_root(repo_root, COUNT_FILE_LOC_SIGNATURE)
     path = repo_path(repo_root, rel_path)
     if path is None or _excluded_from_count(rel_path):
         return 0
@@ -269,6 +276,7 @@ class _PrewarmedCache(dict):
 def _file_loc_cached(repo_root: Path, rel: str, cache: dict[str, int]) -> int:
     """Per-FILE memoised line count (the scan-wide cache is keyed by the
     normalised relative file path)."""
+    require_repo_root(repo_root, "_file_loc_cached(repo_root, rel, cache)")
     if rel in cache:
         return cache[rel]
     n: int | None = None
