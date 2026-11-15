@@ -245,12 +245,12 @@ def _root_project_slugs(repo_path: "Path") -> frozenset[str]:
     (the frontend shell) and reads as product code to every ruler.
     """
     slugs: set[str] = set()
-    root_pkg = _read_json(repo_path / "package.json")
+    root_pkg = _read_json(repo_path / "package.json", repo_path)
     if isinstance(root_pkg, dict):
         s = _slug_from_package_name(root_pkg.get("name"))
         if s:
             slugs.add(s)
-    py_text = read_text(repo_path / "pyproject.toml")
+    py_text = read_text(repo_path / "pyproject.toml", repo_path)
     if py_text:
         m = re.search(r'(?m)^\s*name\s*=\s*["\']([^"\']+)["\']', py_text)
         if m:
@@ -331,16 +331,16 @@ class PackageAnchorExtractor:
             for ws in ctx.workspaces:
                 _process_js(ws.package_json, ws.path)
             # Also consider the root package.json for monorepo-level deps.
-            root_pkg = _read_json(ctx.repo_path / "package.json")
+            root_pkg = _read_json(ctx.repo_path / "package.json", ctx.repo_path)
             if root_pkg is not None:
                 _process_js(root_pkg, ".")
         else:
-            root_pkg = _read_json(ctx.repo_path / "package.json")
+            root_pkg = _read_json(ctx.repo_path / "package.json", ctx.repo_path)
             if root_pkg is not None:
                 _process_js(root_pkg, ".")
 
         # ── Python pyproject.toml ──
-        pyproject_text = read_text(ctx.repo_path / "pyproject.toml")
+        pyproject_text = read_text(ctx.repo_path / "pyproject.toml", ctx.repo_path)
         if pyproject_text:
             py_deps = _collect_py_deps(pyproject_text)
             for slug, contributing in _match_anchors(py_deps, _PY_DEP_ANCHORS).items():
@@ -421,10 +421,10 @@ class PackageAnchorExtractor:
 
 # ── private helpers (re-exported from _util for symmetry) ──────────────────
 
-def _read_json(path: Path) -> dict | None:
+def _read_json(path: Path, repo_root: Path) -> dict | None:
     """Local wrapper so callers don't have to import from _util."""
     from wystan.pipeline_v2.extractors._util import read_json
-    result = read_json(path)
+    result = read_json(path, repo_root)
     return result if isinstance(result, dict) else None
 
 

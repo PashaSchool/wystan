@@ -400,7 +400,7 @@ class _AppIndex:
                 break
             if not _is_settings_module(rel) or _is_excluded_path(rel):
                 continue
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             reads += 1
             if not text or "INSTALLED_APPS" not in text:
                 continue
@@ -604,7 +604,7 @@ def _resolve_dotted(
                 if repo_path is not None and hops > 0:
                     from pathlib import Path as _P
 
-                    text = read_text(_P(str(repo_path)) / init)
+                    text = read_text(_P(str(repo_path)) / init, repo_path)
                     if text:
                         inner = _import_map(
                             _strip_comments(text), cand.replace("/", "."),
@@ -644,7 +644,7 @@ class _UrlIndex:
         for rel in sorted(tracked):
             if not _is_urlconf_file(rel) or _is_excluded_path(rel):
                 continue
-            raw = read_text(ctx.repo_path / rel)
+            raw = read_text(ctx.repo_path / rel, ctx.repo_path)
             if not raw:
                 continue
             text = _strip_comments(raw)
@@ -910,7 +910,7 @@ class DjangoProfile:
             )
             if not is_manifest:
                 continue
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             reads += 1
             if text and _DEP_RE.search(text):
                 return True
@@ -926,7 +926,7 @@ class DjangoProfile:
             p = posix(rel)
             if _is_excluded_path(p):
                 continue
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             reads += 1
             if text:
                 fname = p.rsplit("/", 1)[-1].lower()

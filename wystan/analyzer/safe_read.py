@@ -114,21 +114,19 @@ def safe_read_text(
     errors: str = "strict",
     max_bytes: int | None = None,
 ) -> str | None:
-    """Read text from ``path`` unless a symlink escapes ``repo_root``.
+    """Read text from ``path`` unless the guarded reader refuses it.
 
-    Returns ``None`` when the path escapes containment (guard on), the read
-    fails (``OSError``), or ``max_bytes`` is set and the file exceeds it.
-    Otherwise mirrors ``Path.read_text(encoding=..., errors=...)`` exactly,
-    so callers that previously did ``try: p.read_text(...); except OSError:
-    continue`` keep byte-identical behaviour by treating ``None`` as skip.
+    Returns ``None`` when the file is missing, a symlink leaves
+    ``repo_root``, the path is not a regular file (a FIFO is never opened),
+    the read fails, or the file exceeds ``max_bytes`` (default
+    ``TEXT_READ_MAX_BYTES``). Otherwise the text ``Path.read_text(encoding,
+    errors)`` gives, so callers that treat ``None`` as "skip" behave as
+    before. A decoding error is raised, as ``read_text`` raised it.
     """
-    p = Path(path)
-    if not path_within_repo(p, repo_root):
-        return None
+    from wystan.analyzer.repo_reader import read_repo_text_or_raise  # late: re-export cycle
+
     try:
-        if max_bytes is not None and p.stat().st_size > max_bytes:
-            return None
-        return p.read_text(encoding=encoding, errors=errors)
+        return read_repo_text_or_raise(path, repo_root, encoding=encoding, errors=errors, max_bytes=max_bytes)
     except OSError:
         return None
 

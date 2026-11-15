@@ -167,7 +167,7 @@ def _is_rust_repo(ctx: "ScanContext") -> bool:
     # Fall back to a manifest probe so a Rust repo Stage 0 mislabelled
     # (or left ``None``) still activates — same defensive posture as
     # rust_workspace's ``[workspace]`` presence check.
-    return read_text(ctx.repo_path / "Cargo.toml") is not None
+    return read_text(ctx.repo_path / "Cargo.toml", ctx.repo_path) is not None
 
 
 # ── Path classification ─────────────────────────────────────────────────────

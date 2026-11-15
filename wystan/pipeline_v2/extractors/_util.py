@@ -12,6 +12,8 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wystan.analyzer.repo_reader import TEXT_READ_MAX_BYTES, read_repo_text_or_raise
+
 if TYPE_CHECKING:
     from wystan.pipeline_v2.stage_0_intake import ScanContext
 
@@ -102,18 +104,27 @@ def is_any_stack(ctx: "ScanContext", *stacks: str) -> bool:
 
 # ── manifest readers ────────────────────────────────────────────────────────
 
-def read_json(path: Path) -> dict | list | None:
-    """Read a JSON file or return ``None`` on any error."""
+#: Largest manifest or source file an extractor reads (the guarded reader's
+#: text cap; no tracked file of the corpus comes near it).
+EXTRACTOR_READ_MAX_BYTES = TEXT_READ_MAX_BYTES
+
+
+def read_json(path: Path, repo_root: Path) -> dict | list | None:
+    """Read a JSON file of the repository at ``repo_root`` or return
+    ``None`` on any error. Read through the guarded reader
+    (``analyzer.repo_reader``): a symlink out of the repository, a FIFO or
+    device, or a file over the cap is ``None``, as an unreadable file is."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return json.loads(read_repo_text_or_raise(path, repo_root, max_bytes=EXTRACTOR_READ_MAX_BYTES))
+    except (OSError, json.JSONDecodeError):  # a bad encoding still raises, as before
         return None
 
 
-def read_text(path: Path) -> str | None:
-    """Read a text file or return ``None`` on any error."""
+def read_text(path: Path, repo_root: Path) -> str | None:
+    """Read a text file of the repository at ``repo_root`` or return
+    ``None`` on any error; guarded as :func:`read_json`."""
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(path, repo_root, errors="ignore", max_bytes=EXTRACTOR_READ_MAX_BYTES)
     except OSError:
         return None
 

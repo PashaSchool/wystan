@@ -104,7 +104,7 @@ class RailsStimulusExtractor(RailsPatternExtractor):
                 # contains ``extends Controller``.
                 if content_re is None:
                     continue
-                text = read_text(ctx.repo_path / p)
+                text = read_text(ctx.repo_path / p, ctx.repo_path)
                 if not text or not content_re.search(text):
                     continue
                 # Use the basename minus .js as stem.

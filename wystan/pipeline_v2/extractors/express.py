@@ -212,7 +212,7 @@ def _is_active(ctx: "ScanContext") -> bool:
     # Root package.json (single-app repos where Stage 0 tagged a
     # different dominant framework, e.g. a Next app with an embedded
     # Express server).
-    return _has_express_dep(read_json(Path(ctx.repo_path) / "package.json"))
+    return _has_express_dep(read_json(Path(ctx.repo_path) / "package.json", ctx.repo_path))
 
 
 # ── Slug derivation ─────────────────────────────────────────────────────────

@@ -261,7 +261,7 @@ def named_export_fallback_enabled() -> bool:
 
 def default_export_symbol(repo_root, rel_path: str) -> str:  # noqa: ANN001
     """Best-effort default-export component name (else ``""``)."""
-    text = read_text(repo_root / rel_path)
+    text = read_text(repo_root / rel_path, repo_root)
     if not text:
         return ""
     m = re.search(

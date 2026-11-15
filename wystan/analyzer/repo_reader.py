@@ -216,3 +216,65 @@ def read_repo_bytes(
             return _read_rest(fd, head, cap)
     except OSError:
         return FileBytes(None, REFUSED_NOT_REGULAR)
+
+
+# ── Drop-in text reads for call sites that read a repository file ───────
+
+#: Cap of a text read whose purpose sets no tighter bound. The same as the
+#: line counters' cap: no tracked text file on the corpus comes near it.
+TEXT_READ_MAX_BYTES = MAX_FILE_BYTES
+
+
+def _refusal_error(path: os.PathLike[str] | str, refused: str | None) -> OSError:
+    """The error ``Path.read_text`` raises for a file it cannot read, so a
+    call site that handles a missing or unreadable file handles a refused one
+    the same way."""
+    if refused == REFUSED_MISSING:
+        return FileNotFoundError(2, "No such file or directory", str(path))
+    return PermissionError(13, f"refused by the repository reader ({refused})", str(path))
+
+
+def read_repo_text_or_raise(
+    path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, *,
+    encoding: str | None = "utf-8", errors: str | None = "strict", max_bytes: int | None = None,
+) -> str:
+    """``Path(path).read_text(encoding, errors)`` through the guarded reader:
+    the same text (universal newlines), the same ``UnicodeDecodeError``, and
+    an ``OSError`` where the file is missing or refused."""
+    read = read_repo_bytes(path, repo_root, max_bytes=TEXT_READ_MAX_BYTES if max_bytes is None else max_bytes,
+                           stop_at_binary=False)
+    if read.data is None:
+        raise _refusal_error(path, read.refused)
+    import locale
+
+    # ``read_text()`` with no encoding decodes with the locale's encoding.
+    text = read.data.decode(locale.getpreferredencoding(False) if encoding is None else encoding, errors or "strict")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def read_repo_bytes_or_raise(
+    path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, *, max_bytes: int | None = None,
+) -> bytes:
+    """``Path(path).read_bytes()`` through the guarded reader; ``OSError``
+    where the file is missing or refused."""
+    read = read_repo_bytes(path, repo_root, max_bytes=TEXT_READ_MAX_BYTES if max_bytes is None else max_bytes,
+                           stop_at_binary=False)
+    if read.data is None:
+        raise _refusal_error(path, read.refused)
+    return read.data
+
+
+def read_repo_head_or_raise(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, size: int) -> bytes:
+    """The first ``size`` bytes of a regular file inside the repository
+    (``open(path, "rb").read(size)`` guarded; no size cap applies, only the
+    head is read); ``OSError`` where the file is missing or refused."""
+    import sys
+
+    with open_repo_file(path, repo_root, max_bytes=sys.maxsize) as (fd, _size, refused):
+        if fd is None:
+            raise _refusal_error(path, refused)
+        chunks, total = [], 0
+        while total < size and (chunk := os.read(fd, size - total)):
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)

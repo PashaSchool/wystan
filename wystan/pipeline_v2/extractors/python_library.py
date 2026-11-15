@@ -97,7 +97,7 @@ def _is_python_library(ctx: "ScanContext") -> bool:
         if candidate in tracked or any(
             t.endswith("/" + candidate) for t in tracked
         ):
-            text = read_text(ctx.repo_path / candidate)
+            text = read_text(ctx.repo_path / candidate, ctx.repo_path)
             if text and _APP_CALL_PATTERN.search(text):
                 return False
             # Probe EVERY nested candidate, in sorted order. The old
@@ -109,7 +109,7 @@ def _is_python_library(ctx: "ScanContext") -> bool:
             # determinism point the same way.
             for t in sorted(tracked):
                 if t.endswith("/" + candidate):
-                    txt = read_text(ctx.repo_path / t)
+                    txt = read_text(ctx.repo_path / t, ctx.repo_path)
                     if txt and _APP_CALL_PATTERN.search(txt):
                         return False
 
@@ -153,7 +153,7 @@ def _discover_root_package(ctx: "ScanContext") -> str | None:
         return None
 
     # Try to align with pyproject [project].name if available.
-    proj_name = _read_project_name(ctx.repo_path / "pyproject.toml")
+    proj_name = _read_project_name(ctx.repo_path / "pyproject.toml", ctx.repo_path)
     if proj_name:
         norm = proj_name.replace("-", "_").lower()
         for d in init_present:
@@ -170,8 +170,8 @@ def _discover_root_package(ctx: "ScanContext") -> str | None:
     return ranked[0] if ranked else None
 
 
-def _read_project_name(pyproject: Path) -> str | None:
-    text = read_text(pyproject)
+def _read_project_name(pyproject: Path, repo_root: Path) -> str | None:
+    text = read_text(pyproject, repo_root)
     if not text:
         return None
     # Use a tolerant regex — full TOML parsing would work but the
@@ -281,7 +281,7 @@ class PythonLibraryExtractor:
 
         # Parse root __init__.py for declared submodules + symbols.
         init_path = ctx.repo_path / root_pkg / "__init__.py"
-        init_text = read_text(init_path) or ""
+        init_text = read_text(init_path, ctx.repo_path) or ""
         declared_subs, declared_symbols = _parse_init_exports(init_text)
 
         # Discover ACTUAL submodules from tracked files: any directory

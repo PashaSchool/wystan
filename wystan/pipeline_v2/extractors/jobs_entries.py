@@ -538,7 +538,7 @@ def _collect_manifests(ctx: "ScanContext") -> list[_Job]:
 
         # 1) Vercel crons[] — marker on an existing route, else orphan entry.
         if basename in vercel_names:
-            conf = read_json(ctx.repo_path / path)
+            conf = read_json(ctx.repo_path / path, ctx.repo_path)
             if isinstance(conf, dict):
                 crons = conf.get(str(vcfg.get("crons_key") or "crons"))
                 pkey = str(vcfg.get("path_key") or "path")
@@ -558,7 +558,7 @@ def _collect_manifests(ctx: "ScanContext") -> list[_Job]:
 
         # 2) GitHub Actions scheduled workflow -> new scheduled entry.
         if gh_dir in f"/{path}" and has_any_suffix(path, gh_exts):
-            text = read_text(ctx.repo_path / path)
+            text = read_text(ctx.repo_path / path, ctx.repo_path)
             if text and len(text) <= _MAX_BYTES:
                 for doc in _yaml_docs(text):
                     if _on_has_schedule(_workflow_on_block(doc)):
@@ -572,7 +572,7 @@ def _collect_manifests(ctx: "ScanContext") -> list[_Job]:
 
         # 3) Kubernetes CronJob -> new scheduled entry.
         if has_any_suffix(path, k_exts):
-            text = read_text(ctx.repo_path / path)
+            text = read_text(ctx.repo_path / path, ctx.repo_path)
             if not text or "CronJob" not in text or len(text) > _MAX_BYTES:
                 continue
             for doc in _yaml_docs(text):
@@ -629,7 +629,7 @@ class JobsEntryExtractor:
             active = [c for pred, c in collectors if pred(path)]
             if not active:
                 continue
-            text = read_text(ctx.repo_path / path)
+            text = read_text(ctx.repo_path / path, ctx.repo_path)
             if not text or len(text) > _MAX_BYTES:
                 continue
             for collect in active:
