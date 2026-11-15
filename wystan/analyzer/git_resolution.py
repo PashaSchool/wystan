@@ -36,6 +36,33 @@ from wystan.analyzer.git_discovery import exclusion_roots, topmost_repository_an
 from wystan.analyzer.git_process import GitError, run_bounded
 from wystan.analyzer.path_identity import is_within
 
+#: Settings that change what git prints, pinned to git's defaults (the
+#: output of a machine with no configuration), whatever the user's or the
+#: clone's config says. git 2.39 defaults, from git-config(1).
+OUTPUT_PINS = (
+    "-c", "core.quotepath=true",            # C-quoted names, as the parsers expect
+    "-c", "core.precomposeunicode=true",    # macOS only; what `git init` writes there
+    "-c", "core.autocrlf=false",            # working tree compared byte for byte
+    "-c", "diff.renames=true",              # log/diff rename detection on (default)
+    "-c", "diff.renameLimit=1000",          # default since git 2.33
+    "-c", "diff.relative=false",
+    "-c", f"diff.orderFile={os.devnull}",   # no reordering of file lists
+    "-c", "diff.noprefix=false",
+    "-c", "diff.mnemonicPrefix=false",
+    "-c", "diff.algorithm=myers",
+    "-c", "diff.context=3",
+    "-c", "diff.interHunkContext=0",
+    "-c", "diff.suppressBlankEmpty=false",
+    "-c", "log.showRoot=true",              # the root commit lists its files
+    "-c", "log.follow=false",
+    # %an is the raw name either way; nothing reads a clone-chosen mailmap.
+    "-c", "log.mailmap=false",
+    "-c", f"mailmap.file={os.devnull}",
+    "-c", "mailmap.blob=",
+    "-c", "i18n.logOutputEncoding=UTF-8",   # messages decoded as UTF-8
+    "-c", "i18n.commitEncoding=UTF-8",
+)
+
 #: Options that switch off what a clone's configuration could make git run,
 #: and pin the few settings the engine's parsers depend on.
 SAFE_OPTIONS = (
@@ -58,10 +85,8 @@ SAFE_OPTIONS = (
     "-c", "status.submoduleSummary=false",
     # A signature check runs gpg and prints into ``git log`` output.
     "-c", "log.showSignature=false",
-    # The parsers read C-quoted names (git's default); a clone setting it
-    # false would change their input.
-    "-c", "core.quotepath=true",
     "-c", "color.ui=false",
+    *OUTPUT_PINS,
 )
 
 _WINDOWS = os.name == "nt"
