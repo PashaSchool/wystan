@@ -6,10 +6,10 @@ decide whether any work is needed.
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from wystan.analyzer.git_runner import GitError, revision, run_git
 from wystan.models.types import FeatureMap
 
 
@@ -90,24 +90,26 @@ def check_freshness(
     )
 
 
+#: Freshness is a quick probe; a slow repository reads as "unknown".
+_REV_PARSE_TIMEOUT_SEC = 5.0
+_RANGE_TIMEOUT_SEC = 10.0
+
+
 def _git_rev_parse(repo_path: str) -> str:
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_path, text=True, timeout=5,
-        ).strip()
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        return run_git(repo_path, "rev-parse", "HEAD", timeout=_REV_PARSE_TIMEOUT_SEC).text.strip()
+    except GitError:
         return ""
 
 
 def _count_commits(from_sha: str, to_sha: str, repo_path: str) -> int:
     try:
-        out = subprocess.check_output(
-            ["git", "rev-list", "--count", f"{from_sha}..{to_sha}"],
-            cwd=repo_path, text=True, timeout=10,
-        ).strip()
+        out = run_git(
+            repo_path, "rev-list", "--count", f"{revision(from_sha)}..{revision(to_sha)}",
+            timeout=_RANGE_TIMEOUT_SEC,
+        ).text.strip()
         return int(out)
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, ValueError, FileNotFoundError):
+    except (GitError, ValueError):
         return 0
 
 
@@ -124,11 +126,11 @@ def _diff_files(
     metric updates.
     """
     try:
-        out = subprocess.check_output(
-            ["git", "diff", "--name-only", f"{from_sha}..{to_sha}"],
-            cwd=repo_path, text=True, timeout=10,
-        )
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        out = run_git(
+            repo_path, "diff", "--name-only", f"{revision(from_sha)}..{revision(to_sha)}",
+            timeout=_RANGE_TIMEOUT_SEC,
+        ).text
+    except GitError:
         return set(), False
 
     changed = {line.strip() for line in out.splitlines() if line.strip()}

@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from wystan.analyzer.git_runner import GitError, run_git
 from wystan.models.types import Feature, FeatureMap, Flow
 
 logger = logging.getLogger(__name__)
@@ -355,20 +355,25 @@ def refine_by_path_signal(features: list[Feature]) -> tuple[list[Feature], int]:
 
 # ── Stage 4: extract overlooked top-dirs ─────────────────────────────
 
+#: Timeouts of the two subject reads (unchanged from the direct calls).
+_SUBJECTS_TIMEOUT_SEC = 30.0
+_PREFIX_FILES_TIMEOUT_SEC = 60.0
+
+
 def _mine_commit_prefixes(repo_path: str, min_count: int = 5) -> dict[str, int]:
     """Extract domain prefixes from local git log subjects."""
     try:
-        r = subprocess.run(
-            ["git", "-C", repo_path, "log", "--pretty=%s", "--since=2 years ago"],
-            capture_output=True, text=True, timeout=30,
+        r = run_git(
+            repo_path, "log", "--pretty=%s", "--since=2 years ago",
+            timeout=_SUBJECTS_TIMEOUT_SEC, check=False,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except GitError:
         return {}
 
     pat_bare = re.compile(r"^([a-z][a-z0-9_/-]+):")
     pat_scope = re.compile(r"^[a-z]+\(([a-z][a-z0-9_/-]+)\):", re.IGNORECASE)
     counts: dict[str, int] = {}
-    for line in r.stdout.splitlines():
+    for line in r.text.splitlines():
         m = pat_scope.match(line)
         if m:
             prefix = m.group(1).lower()
@@ -454,13 +459,13 @@ def extract_overlooked_top_dirs(
 
 def _collect_files_for_commit_prefix(repo_path: str, prefix: str) -> set[str]:
     try:
-        r = subprocess.run(
-            ["git", "-C", repo_path, "log",
-             "--pretty=format:COMMIT:%s", "--name-only", "--no-renames",
-             "--since=2 years ago"],
-            capture_output=True, text=True, timeout=60,
+        r = run_git(
+            repo_path, "log",
+            "--pretty=format:COMMIT:%s", "--name-only", "--no-renames",
+            "--since=2 years ago",
+            timeout=_PREFIX_FILES_TIMEOUT_SEC, check=False,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except GitError:
         return set()
 
     pat = re.compile(
@@ -468,7 +473,7 @@ def _collect_files_for_commit_prefix(repo_path: str, prefix: str) -> set[str]:
     )
     files: set[str] = set()
     in_match = False
-    for line in r.stdout.splitlines():
+    for line in r.text.splitlines():
         if line.startswith("COMMIT:"):
             in_match = bool(pat.match(line[7:]))
         elif in_match and line.strip():

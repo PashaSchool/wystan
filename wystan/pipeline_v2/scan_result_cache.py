@@ -52,12 +52,12 @@ import json
 import logging
 import os
 import re
-import subprocess
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from wystan.analyzer.git_runner import GitError, run_git
 from wystan.cache.backend import CacheKind, _safe_component
 from wystan.cache.paths import wystan_base_dir
 
@@ -3900,20 +3900,19 @@ def engine_version() -> str:
 # ── repo content identity ────────────────────────────────────────────────
 
 
+#: The content identity is three quick reads; a repository that needs
+#: longer is keyed as "unknown" rather than holding the scan.
+_IDENTITY_GIT_TIMEOUT_SEC = 30.0
+
+
 def _git(repo_path: Path, *args: str, binary: bool = False) -> Any | None:
     """Run a git command scoped to ``repo_path``; ``None`` on any failure."""
     try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_path), *args],
-            capture_output=True,
-            check=True,
-            timeout=30,
-            text=not binary,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
+        out = run_git(repo_path, *args, timeout=_IDENTITY_GIT_TIMEOUT_SEC)
+    except GitError as exc:
         logger.debug("scan_result_cache: git %s failed (%s)", args, exc)
         return None
-    return out.stdout
+    return out.stdout if binary else out.text
 
 
 def _is_git_repo(repo_path: Path) -> bool:

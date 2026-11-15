@@ -64,13 +64,13 @@ import math
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, TypeVar
 
+from wystan.analyzer.git_runner import GitError, GitFailed, GitResult, object_name, run_git
 from wystan.analyzer.import_graph import (
     _resolve_import,
     detect_monorepo_packages,
@@ -223,14 +223,12 @@ def resolve_snapshot_budget_sec(n_snapshots: int) -> float:
     return per * max(1, n_snapshots)
 
 
-def _git(repo_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(repo_path), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=600,
-    )
+#: A worktree add or checkout of a large tree takes minutes, not more.
+_SNAPSHOT_GIT_TIMEOUT_SEC = 600.0
+
+
+def _git(repo_path: Path, *args: str) -> GitResult:
+    return run_git(repo_path, *args, timeout=_SNAPSHOT_GIT_TIMEOUT_SEC)
 
 
 def run_snapshots(
@@ -299,7 +297,7 @@ def run_snapshots(
 
     try:
         _git(repo_path, "worktree", "prune")
-    except (subprocess.SubprocessError, OSError) as exc:
+    except GitError as exc:
         # Not fatal — `worktree add` may still succeed.
         _warn(f"impact: initial `git worktree prune` failed: {exc}")
 
@@ -312,7 +310,7 @@ def run_snapshots(
             return
         try:
             _git(repo_path, "worktree", "remove", "--force", wt_dir)
-        except (subprocess.SubprocessError, OSError):
+        except GitError:
             pass
         shutil.rmtree(wt_dir, ignore_errors=True)
         wt_dir = None
@@ -337,17 +335,17 @@ def run_snapshots(
                     wt_dir = tempfile.mkdtemp(prefix="wystan-impact-")
                     _git(
                         repo_path, "worktree", "add",
-                        "--detach", "--force", wt_dir, sha,
+                        "--detach", "--force", wt_dir, object_name(sha),
                     )
                 else:
-                    _git(Path(wt_dir), "checkout", "--detach", "--force", sha)
+                    _git(Path(wt_dir), "checkout", "--detach", "--force", object_name(sha))
                 results[sha] = compute(Path(wt_dir), sha)
                 telemetry["impact_snapshots"] += 1
             except Exception as exc:  # noqa: BLE001 — never fail the scan
                 telemetry["impact_skipped_snapshots"] += 1
                 detail: object = exc
-                if isinstance(exc, subprocess.CalledProcessError):
-                    detail = (exc.stderr or "").strip() or exc
+                if isinstance(exc, GitFailed):
+                    detail = exc.stderr or exc
                 _warn(f"impact: snapshot {sha[:12]} skipped: {detail}")
                 # A failed add/checkout/compute leaves the worktree state
                 # unknown — drop it; the next sha re-creates it fresh.
@@ -356,7 +354,7 @@ def run_snapshots(
         _teardown_worktree()
         try:
             _git(repo_path, "worktree", "prune")
-        except (subprocess.SubprocessError, OSError) as exc:
+        except GitError as exc:
             _warn(f"impact: closing `git worktree prune` failed: {exc}")
     _info(
         f"impact: snapshots done ok={telemetry['impact_snapshots']} "

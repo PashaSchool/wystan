@@ -73,6 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from wystan.analyzer.git_runner import run_git
 from wystan.tools.normalize_scan import scan_digest
 
 LOCK_PATH = (
@@ -152,12 +153,7 @@ def _write_lock(lock: dict[str, Any], lock_path: Path) -> None:
 
 
 def _head_sha(repo: Path) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    return run_git(repo, "rev-parse", "HEAD").text.strip()
 
 
 def _scan_env(state_dir: Path) -> dict[str, str]:
