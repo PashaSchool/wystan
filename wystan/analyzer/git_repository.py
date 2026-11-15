@@ -14,7 +14,7 @@ import os
 from collections import deque
 from dataclasses import dataclass
 
-from wystan.analyzer.git_runner import GitError, run_git
+from wystan.analyzer.git_runner import GitError, UnsafeGit, run_git
 
 
 class NotARepository(GitError, ValueError):
@@ -23,11 +23,17 @@ class NotARepository(GitError, ValueError):
 
 @dataclass(frozen=True)
 class GitRepository:
-    """A handle on a working tree. ``working_tree_dir`` is the logical path
-    (the caller's spelling, as GitPython gave it), ``git_dir`` absolute."""
+    """A handle on a repository. ``working_tree_dir`` is the logical path
+    (the caller's spelling, as GitPython gave it) and ``None`` for a bare
+    repository; ``git_dir`` absolute."""
 
-    working_tree_dir: str
+    working_tree_dir: str | None
     git_dir: str
+
+    @property
+    def root(self) -> str:
+        """Where git runs: the working tree, else the git directory."""
+        return self.working_tree_dir or self.git_dir
 
 
 def repository_root(repo: object) -> str | None:
@@ -43,32 +49,51 @@ def open_repository(path: str | os.PathLike[str], *, search_parent_directories: 
     start = os.path.abspath(os.fspath(path))
     if not os.path.exists(start):
         raise FileNotFoundError(start)
-    try:
-        lines = run_git(start, "rev-parse", "--show-cdup", "--absolute-git-dir").text.splitlines()
-    except GitError as exc:
-        raise NotARepository(f"{start!r} is not a git working tree") from exc
-    if len(lines) != 2:
-        raise NotARepository(f"{start!r} is not a git working tree")
-    cdup, git_dir = lines
+    bare, git_dir = _git_dir_of(start)
+    if bare:
+        # GitPython loaded a bare repository too (no working tree).
+        if not search_parent_directories and os.path.realpath(git_dir) != os.path.realpath(start):
+            raise NotARepository(f"{start!r} is not the top of a git repository")
+        return GitRepository(None, git_dir)
+    cdup = _rev_parse(start, "--show-cdup")[0]
     if cdup and not search_parent_directories:
         raise NotARepository(f"{start!r} is not the top of a git working tree")
     return GitRepository(os.path.normpath(os.path.join(start, cdup)), git_dir)
 
 
+def _rev_parse(start: str, *flags: str) -> list[str]:
+    """``git rev-parse <flags>`` lines; a failure means "not a repository",
+    except when no safe git exists, which the caller must see as is."""
+    try:
+        lines = run_git(start, "rev-parse", *flags).text.splitlines()
+    except UnsafeGit:
+        raise
+    except GitError as exc:
+        raise NotARepository(f"{start!r} is not a git repository") from exc
+    if len(lines) != len(flags):
+        raise NotARepository(f"{start!r} is not a git repository")
+    return lines
+
+
+def _git_dir_of(start: str) -> tuple[bool, str]:
+    is_bare, git_dir = _rev_parse(start, "--is-bare-repository", "--absolute-git-dir")
+    return is_bare == "true", git_dir
+
+
 def has_commit(repo: GitRepository) -> bool:
     """HEAD names a commit (false on an unborn branch)."""
-    result = run_git(repo.working_tree_dir, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
+    result = run_git(repo.root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
     return result.returncode == 0
 
 
 def head_sha(repo: GitRepository) -> str:
-    return run_git(repo.working_tree_dir, "rev-parse", "HEAD").text.strip()
+    return run_git(repo.root, "rev-parse", "HEAD").text.strip()
 
 
 def origin_url(repo: GitRepository) -> str:
     """``remote.origin.url`` as configured (no ``insteadOf`` rewrite, like
     GitPython's config reader); raises when there is none."""
-    return run_git(repo.working_tree_dir, "config", "--get", "remote.origin.url").text.strip()
+    return run_git(repo.root, "config", "--get", "remote.origin.url").text.strip()
 
 
 def _children_by_directory(listing: bytes) -> dict[str, list[tuple[bytes, str]]]:

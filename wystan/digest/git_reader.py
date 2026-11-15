@@ -158,7 +158,7 @@ def get_daily_commits(
         Dict with repo info and commits list, ready for JSON serialization.
     """
     repo = open_repository(repo_path, search_parent_directories=False)
-    root = repo.working_tree_dir
+    root = repo.root
     remote_url = _get_remote_url(repo)
 
     # Resolve branch
