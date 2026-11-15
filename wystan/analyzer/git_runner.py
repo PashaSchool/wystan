@@ -4,18 +4,9 @@ Every git call of the engine goes through :func:`run_git`. Ported from
 ``wystan/index/git_runner.py`` (branch ``rebuild/p1-symbol-index``); the
 public names are the same so the index can import this module instead.
 
-``git`` is resolved to an absolute path once per search path, on the
-caller's ``PATH`` with empty, ``.`` and relative entries removed (each of
-those makes the current directory a search location, and it may be inside
-the clone) and with every absolute entry inside the scanned repository
-removed; a result that still lies inside the repository is refused. Only
-the scanned repository is untrusted: an absolute entry under the current
-directory is kept, so a service running with cwd ``/`` still finds
-``/usr/bin/git``. "Inside" is decided by file identity
-(``path_identity.is_within``), so a case variant or a linked spelling of
-the repository is inside too. On Windows
-``NoDefaultCurrentDirectoryInExePath`` keeps the system from searching the
-current directory first, and the lookup here never adds it.
+Which git runs, and the child's environment, are decided in
+``git_resolution`` (only the scanned repository's whole working tree is
+untrusted; the current directory is not).
 
 The child runs with a fixed minimal environment: no ``GIT_*`` variable of
 the caller reaches it, the user's and the system's configuration are not
@@ -41,7 +32,13 @@ import os
 import re
 
 from wystan.analyzer.git_process import GitError, GitFailed, GitResult, run_bounded
-from wystan.analyzer.path_identity import is_within
+from wystan.analyzer.git_resolution import (
+    SAFE_OPTIONS,
+    UnsafeGit,
+    child_environment,
+    git_executable,
+    safe_search_path,
+)
 
 __all__ = [
     "ALLOWED_SUBCOMMANDS", "DEFAULT_MAX_OUTPUT_BYTES", "DEFAULT_TIMEOUT_SEC",
@@ -49,30 +46,6 @@ __all__ = [
     "UnsafeGit", "child_environment", "git_command", "git_executable",
     "object_name", "revision", "run_git", "safe_search_path",
 ]
-
-#: Options that switch off what a clone's configuration could make git run,
-#: and pin the few settings the engine's parsers depend on.
-SAFE_OPTIONS = (
-    "--no-pager",
-    "-c", "core.fsmonitor=false",
-    "-c", f"core.hooksPath={os.devnull}",
-    "-c", "core.pager=cat",
-    "-c", "core.untrackedCache=false",
-    "-c", f"core.attributesFile={os.devnull}",
-    "-c", "diff.external=",
-    # The engine never fetches; a promisor remote or a submodule must not
-    # make a read command open a connection (or run core.sshCommand).
-    "-c", "protocol.allow=never",
-    "-c", "protocol.file.allow=never",
-    # A submodule's own configuration (hooks, filters) must never apply.
-    "-c", "submodule.recurse=false",
-    # A signature check runs gpg and prints into ``git log`` output.
-    "-c", "log.showSignature=false",
-    # The parsers read C-quoted names (git's default); a clone setting it
-    # false would change their input.
-    "-c", "core.quotepath=true",
-    "-c", "color.ui=false",
-)
 
 #: The built-in subcommands the engine runs, and nothing else.
 ALLOWED_SUBCOMMANDS = frozenset({
@@ -114,73 +87,12 @@ _CONFIG_TIMEOUT_SEC = 10.0
 
 logger = logging.getLogger(__name__)
 
-_WINDOWS = os.name == "nt"
 _HEX_NAME = re.compile(r"[0-9a-fA-F]{4,64}")
 _FORBIDDEN_IN_REVISION = ("\0", "\n", "\r")
 
 
-class UnsafeGit(GitError):
-    """No git outside the scanned repository was found."""
-
-
 class UnsafeArgument(GitError, ValueError):
     """A repository-controlled string would be read by git as an option."""
-
-
-def safe_search_path(repo_root: str | None = None, path: str | None = None) -> str:
-    """The search path without the entries that make the current directory
-    a search location (empty, ``.``, relative) and without any absolute
-    entry inside the scanned repository, by identity: a binary planted in
-    the clone is never a candidate."""
-    entries = (os.environ.get("PATH", os.defpath) if path is None else path).split(os.pathsep)
-    kept = [e for e in entries if e and e != "." and os.path.isabs(e)]
-    if not repo_root:
-        return os.pathsep.join(kept)
-    return os.pathsep.join(e for e in kept if not is_within(e, repo_root))
-
-
-def _executable_names() -> tuple[str, ...]:
-    if not _WINDOWS:
-        return ("git",)
-    extensions = os.environ.get("PATHEXT", ".EXE").split(os.pathsep)
-    return tuple(f"git{ext.lower()}" for ext in extensions if ext)
-
-
-@functools.lru_cache(maxsize=8)
-def _which(search_path: str) -> str | None:
-    # Not shutil.which: on Windows before Python 3.12 it searches the current
-    # directory first even when given an explicit path.
-    for entry in search_path.split(os.pathsep):
-        for name in _executable_names():
-            candidate = os.path.join(entry, name)
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return os.path.realpath(candidate)
-    return None
-
-
-def git_executable(repo_root: str | None) -> str:
-    """Absolute path of the git to run on ``repo_root``."""
-    found = _which(safe_search_path(repo_root))
-    if found is None:
-        raise UnsafeGit("git not found on the sanitised search path")
-    if repo_root and is_within(found, repo_root):
-        raise UnsafeGit(f"refusing git inside the scanned repository: {found}")
-    return found
-
-
-def child_environment(repo_root: str | None = None) -> dict[str, str]:
-    """The whole environment of the git child; nothing else is passed.
-    ``HOME`` is the null device so nothing of the user's home (XDG config,
-    ignore and attributes files, ``~`` in an include path) is read."""
-    env = {
-        "PATH": safe_search_path(repo_root), "HOME": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C",
-    }
-    if _WINDOWS:
-        env["NoDefaultCurrentDirectoryInExePath"] = "1"
-        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
-    return env
 
 
 def git_command(repo_root: str, *args: str) -> list[str]:
