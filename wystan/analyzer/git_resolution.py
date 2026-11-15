@@ -242,27 +242,30 @@ def ceiling_environment(path: str, stay_inside: bool = False) -> dict[str, str]:
     return {"GIT_CEILING_DIRECTORIES": parent}
 
 
-def safe_search_path(repo_root: str | None = None, path: str | None = None) -> str:
+def safe_search_path(repo_root: str, path: str | None = None) -> str:
     """The search path without the entries that make the current directory
     a search location and without any entry inside a location the scanned
     tree could own (see ``git_discovery``), by identity."""
     entries = _absolute_entries(path)
+    return _outside(entries, exclusion_roots(os.path.realpath(_require_root(repo_root))))
+
+
+def _require_root(repo_root: str | None) -> str:
+    # git is only ever resolved for a scanned path: without one, none of the
+    # exclusions apply and a git planted in the scanned tree could be picked.
     if not repo_root:
-        return os.pathsep.join(entries)
-    return _outside(entries, exclusion_roots(os.path.realpath(repo_root)))
+        raise UnsafeGit("git is only resolved for a scanned path")
+    return repo_root
 
 
-def git_executable(repo_root: str | None) -> str:
+def git_executable(repo_root: str) -> str:
     """Absolute path of the git to run on ``repo_root``."""
-    if not repo_root:
-        return _pick(_absolute_entries(None), ())
-    return _resolve(repo_root)[0]
+    return _resolve(_require_root(repo_root))[0]
 
 
-def child_environment(repo_root: str | None = None) -> dict[str, str]:
+def child_environment(repo_root: str) -> dict[str, str]:
     """The whole environment of the git child; nothing else is passed."""
     env = base_environment(safe_search_path(repo_root))
-    if repo_root:
-        env.update(ceiling_environment(repo_root))
+    env.update(ceiling_environment(repo_root))
     return env
 
