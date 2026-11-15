@@ -5,7 +5,13 @@ from pathlib import Path
 
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from wystan.analyzer.git_history import count_commits_since, head_commits, numstat_file_keys
+from wystan.analyzer.git_history import (
+    FIELD_END,
+    count_commits_since,
+    head_commits,
+    numstat_file_keys,
+    split_records,
+)
 from wystan.analyzer.git_repository import (
     GitRepository,
     NotARepository,
@@ -268,21 +274,11 @@ def get_commits(
     return commits
 
 
-# Field separator inside the pretty-format header. ASCII Unit Separator
-# — never appears in commit data.
-_FIELD_DELIM = "\x1f"
-# Body-end marker — we append this to the pretty format AFTER %B so we
-# know where the multiline body ends and the file list begins. Without
-# this, body lines and file paths are indistinguishable (both are
-# newline-separated when ``--name-only`` runs).
-_BODY_END = "\x1e"  # ASCII Record Separator — never appears in commit data.
-# Compiled at module load — boundary between commit records when ``-z``
-# is in effect. After a NUL, the next byte sequence ``<40hex>\x1f`` is
-# the start of the next commit's header.
-import re as _re
-_COMMIT_BOUNDARY_RE = _re.compile(r"\x00(?=[0-9a-fA-F]{40}\x1f)")
 # The single history read of a scan; past this the per-commit fallback runs.
 _LOG_TIMEOUT_SEC = 120.0
+#: ``%H %ct %an %B``, each field NUL-terminated (``git_history.split_records``).
+_FAST_FORMAT = f"%H{FIELD_END}%ct{FIELD_END}%an{FIELD_END}%B{FIELD_END}"
+_FAST_FIELDS = 4
 
 
 def _get_commits_fast(
@@ -292,22 +288,14 @@ def _get_commits_fast(
     max_commits: int,
     src: str | None = None,
 ) -> list[Commit] | None:
-    """Stream commit metadata + file lists via ``git log --name-only``.
+    """Stream commit metadata + file lists via one ``git log --name-only -z``.
 
-    Returns ``None`` on any git failure — the caller falls back
-    to the per-commit walk. Stops parsing when the per-commit
-    cutoff (``days``) is reached so we don't pay to scan deep history
-    on long-lived repos.
-
-    Output format ("``%H``" is the full SHA; we slice to 8 chars to
-    match the legacy format; ``%ct`` is committer-time as unix epoch
-    seconds; ``%an`` author name; ``%B`` raw body)::
-
-        <SHA><FD><ct><FD><an><FD><body><CD>
-        file/one.ts
-        file/two.py
-
-        <SHA><FD>...
+    Returns ``None`` on any git failure — the caller falls back to the
+    per-commit walk. Stops parsing when the per-commit cutoff (``days``)
+    is reached so we don't pay to scan deep history on long-lived repos.
+    ``-- <subpath>`` makes ``git log`` list only commits that touched the
+    subtree; ``--name-only`` still prints every file of such a commit, so
+    the list is filtered and relativized in memory.
     """
     try:
         repo_path = repository_root(repo)
@@ -315,108 +303,51 @@ def _get_commits_fast(
         return None
     if not repo_path:
         return None
-
-    pretty = (
-        f"%H{_FIELD_DELIM}%ct{_FIELD_DELIM}%an{_FIELD_DELIM}%B{_BODY_END}"
-    )
-    cmd = [
-        "log",
-        f"--max-count={max_commits}",
-        f"--since={days}.days.ago",
-        f"--pretty=format:{pretty}",
-        "--name-only",
-        "-z",  # NUL-separates commit records + filenames cleanly.
-    ]
-    # Scope to a subpath: ``-- <subpath>`` makes ``git log`` only list
-    # commits that touched the subtree. ``--name-only`` still prints
-    # ALL files in each such commit, so we additionally filter +
-    # relativize the file list in memory below. The pathspec must come
-    # last, after a ``--`` separator.
+    cmd = ["log", f"--max-count={max_commits}", f"--since={days}.days.ago",
+           f"--pretty=format:{_FAST_FORMAT}", "--name-only", "-z"]
     norm_src = normalize_subpath(src)
     if norm_src is not None:
         cmd += ["--", norm_src]
-
     try:
         result = run_git(repo_path, *cmd, timeout=_LOG_TIMEOUT_SEC, check=False)
     except GitError:
         return None
     if result.returncode != 0:
         return None
+    # Read as dev's text-mode read did (universal newlines).
+    return _commits_from_log(result.universal_text, days, norm_src)
 
-    raw = result.universal_text
-    if not raw:
-        return []
 
+def _commits_from_log(raw: str, days: int, norm_src: str | None) -> list[Commit]:
+    """Commits of a fast-path log, newest first, until the ``days`` cutoff."""
     commits: list[Commit] = []
     now = datetime.now(tz=timezone.utc)
-    cutoff = days
-
-    # Split on the NUL that PRECEDES the next commit's 40-hex SHA + FD.
-    # The first chunk has no preceding NUL (it starts directly with the
-    # first commit's SHA), and the last chunk ends without a trailing
-    # boundary — that's fine.
-    chunks = _COMMIT_BOUNDARY_RE.split(raw)
-
-    for chunk in chunks:
-        if not chunk:
-            continue
-        # Each chunk: <sha><FD><ct><FD><an><FD><body><BODY_END>\n
-        #             <file1>\n<file2>\n...
-        # The body itself may contain newlines — that's why we need
-        # the explicit BODY_END marker before files start. Files are
-        # newline-separated AFTER the body ends.
-        body_end_pos = chunk.find(_BODY_END)
-        if body_end_pos == -1:
-            # Malformed record — skip.
-            continue
-        header = chunk[:body_end_pos]
-        files_block = chunk[body_end_pos + 1:]  # +1 to skip BODY_END
-
-        parts = header.split(_FIELD_DELIM, 3)
-        if len(parts) < 4:
-            continue
-        sha, ct_raw, author, body = parts
+    for (sha, ct_raw, author, body), names in split_records(raw, _FAST_FIELDS, with_files=True):
         try:
-            ct = int(ct_raw)
+            commit_date = datetime.fromtimestamp(int(ct_raw), tz=timezone.utc)
         except ValueError:
             continue
-        commit_date = datetime.fromtimestamp(ct, tz=timezone.utc)
-        age_days = (now - commit_date).days
-        if age_days > cutoff:
-            # Newest-first ordering — once we cross the cutoff every
-            # subsequent commit is older.
-            break
-
-        # Files are NUL-separated when ``-z`` is in effect; a leading
-        # newline survives from the body's trailing newline. Split on
-        # NUL and strip residual whitespace.
-        files_changed = [
-            f.strip() for f in files_block.split("\x00")
-            if f.strip()
-        ]
+        if (now - commit_date).days > days:
+            break  # newest first: every later commit is older
+        files_changed = [f.strip() for f in names if f.strip()]
         if norm_src is not None:
             files_changed = scope_files_to_subpath(files_changed, norm_src)
             if not files_changed:
-                # ``-- <subpath>`` already ensured this commit touched the
-                # subtree, but a rename-only commit can surface with an
-                # empty in-subtree set after relativization — skip it.
+                # A rename-only commit can surface with an empty in-subtree
+                # set after relativization — skip it.
                 continue
-        msg = body.strip()
-        try:
-            commits.append(Commit(
-                sha=sha[:8],
-                message=msg,
-                author=author,
-                date=commit_date,
-                files_changed=files_changed,
-                is_bug_fix=is_bug_fix(msg),
-                pr_number=extract_pr_number(msg),
-            ))
-        except Exception:
-            # A malformed record shouldn't poison the whole list.
-            continue
-
+        commit = _commit(sha, body.strip(), author, commit_date, files_changed)
+        if commit is not None:
+            commits.append(commit)
     return commits
+
+
+def _commit(sha: str, msg: str, author: str, date: datetime, files: list[str]) -> Commit | None:
+    try:
+        return Commit(sha=sha[:8], message=msg, author=author, date=date, files_changed=files,
+                      is_bug_fix=is_bug_fix(msg), pr_number=extract_pr_number(msg))
+    except Exception:
+        return None  # a malformed record shouldn't poison the whole list
 
 
 def get_tracked_files(repo: GitRepository, src: str | None = None) -> list[str]:

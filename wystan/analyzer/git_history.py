@@ -19,11 +19,11 @@ from dataclasses import dataclass, replace
 
 from wystan.analyzer.git_runner import GitError, object_name, run_git
 
-# Field and record separators of the pretty format: ASCII unit and record
-# separators never occur in commit data (same choice as ``_get_commits_fast``).
-_FIELD = "\x1f"
-_RECORD = "\x1e"
-_RECORD_FORMAT = f"%H{_FIELD}%P{_FIELD}%ct{_FIELD}%an{_FIELD}%B{_RECORD}"
+# Every field of a pretty format ends in NUL (``%x00``) and ``-z`` puts a
+# NUL between commits: no commit field can hold a NUL, so a message with
+# any other control character (``\x1e``, ``\x1f``) is read whole.
+FIELD_END = "%x00"
+_RECORD_FORMAT = f"%H{FIELD_END}%P{FIELD_END}%ct{FIELD_END}%an{FIELD_END}%B{FIELD_END}"
 _RECORD_FIELDS = 5
 #: Objects read per ``cat-file --batch`` call: bounds what one call holds in
 #: memory (the runner's output cap applies per call).
@@ -42,18 +42,32 @@ class CommitRecord:
     shallow_boundary: bool = False
 
 
-def _parse_records(text: str) -> list[CommitRecord]:
-    records: list[CommitRecord] = []
-    for raw in text.split(_RECORD):
-        raw = raw.lstrip("\0\n")
-        if not raw:
-            continue
-        parts = raw.split(_FIELD, _RECORD_FIELDS - 1)
-        if len(parts) < _RECORD_FIELDS:
-            continue
-        sha, parents, committed, author, message = parts
-        records.append(CommitRecord(sha, tuple(parents.split()), int(committed), author, message))
+def split_records(text: str, fields: int, with_files: bool = False) -> list[tuple[list[str], list[str]]]:
+    """``git log -z --pretty=format:<fields, each ending %x00>`` output as
+    ``(fields, files)`` per commit. With ``--name-only`` the file names
+    follow the fields (the first after a newline), each NUL-terminated; an
+    empty token ends the commit."""
+    tokens = text.split("\0")
+    records: list[tuple[list[str], list[str]]] = []
+    index = 0
+    while index + fields <= len(tokens):
+        head = tokens[index:index + fields]
+        index += fields
+        files: list[str] = []
+        while with_files and index < len(tokens) and tokens[index] != "":
+            files.append(tokens[index].lstrip("\n") if not files else tokens[index])
+            index += 1
+        index += 1  # the empty token between commits
+        if head[0].lstrip("\n"):
+            records.append(([head[0].lstrip("\n"), *head[1:]], files))
     return records
+
+
+def _parse_records(text: str) -> list[CommitRecord]:
+    return [
+        CommitRecord(sha, tuple(parents.split()), int(committed), author, message)
+        for (sha, parents, committed, author, message), _files in split_records(text, _RECORD_FIELDS)
+    ]
 
 
 def _read_batch(root: str, oids: list[bytes], kind: bytes) -> list[bytes]:

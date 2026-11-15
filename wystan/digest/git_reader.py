@@ -11,14 +11,12 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from wystan.analyzer.git_history import numstat_file_keys, raw_parents
+from wystan.analyzer.git_history import FIELD_END, numstat_file_keys, raw_parents, split_records
 from wystan.analyzer.git_repository import GitRepository, open_repository, origin_url
 from wystan.analyzer.git_runner import object_name, revision, run_git
 
-# Field and record separators of the pretty format (never in commit data).
-_FIELD = "\x1f"
-_RECORD = "\x1e"
-_DIGEST_FORMAT = f"%H{_FIELD}%P{_FIELD}%an{_FIELD}%ae{_FIELD}%cI{_FIELD}%B{_RECORD}"
+# Each field NUL-terminated: no commit field can hold a NUL.
+_DIGEST_FORMAT = "".join(f"{field}{FIELD_END}" for field in ("%H", "%P", "%an", "%ae", "%cI", "%B"))
 _DIGEST_FIELDS = 6
 _DEFAULT_BRANCHES = ("main", "master")
 _HEADS_PREFIX = "refs/heads/"
@@ -97,12 +95,10 @@ def _first_parent_records(root: str, branch: str, since: datetime, until: dateti
         root, "log", "--first-parent", f"--since={since.isoformat()}", f"--until={until.isoformat()}",
         f"--pretty=format:{_DIGEST_FORMAT}", "-z", revision(branch), "--",
     ).text
-    records = []
-    for raw in out.split(_RECORD):
-        parts = raw.lstrip("\0\n").split(_FIELD, _DIGEST_FIELDS - 1)
-        if len(parts) == _DIGEST_FIELDS:
-            sha, _grafted, author, email, committed, msg = parts
-            records.append((sha, author, email, committed, msg))
+    records = [
+        (sha, author, email, committed, msg)
+        for (sha, _grafted, author, email, committed, msg), _files in split_records(out, _DIGEST_FIELDS)
+    ]
     # Parents as the commit object names them (GitPython's view), not as
     # shallow grafts rewrite them.
     parents = raw_parents(root, [r[0] for r in records])
