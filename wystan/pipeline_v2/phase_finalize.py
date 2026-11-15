@@ -3833,6 +3833,9 @@ def run_finalize_phase(
                     "keeper_on": keeper_enabled(),
                     "repo_root": ctx.repo_path,
                 },
+                # Rule S2: a journey folds only into a journey of its own
+                # module scope.
+                module_scopes=getattr(ctx, "module_scopes", None),
             )
             _gaps = _sq_tele.get("coverage_gaps")
             # KEY-PRESENCE contract: the pass returns None in off mode (key

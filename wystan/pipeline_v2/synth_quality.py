@@ -1616,6 +1616,7 @@ def run_synth_quality(
     vocab: Any | None = None,
     developer_features: list[Any] | None = None,
     rescore_ctx: Mapping[str, Any] | None = None,
+    module_scopes: Any = None,
 ) -> dict[str, Any]:
     """Both B4 passes, in order: demote the hollow system seeds first (so the
     naming collision set excludes soon-removed seeds), then reground backstop
@@ -1630,7 +1631,10 @@ def run_synth_quality(
     has those channels; both live sites (``phase_finalize`` and the replay
     registry) pass the same bundle, so the two channels cannot disagree on
     exactly the rows this fix exists for (the fixb106/R0 parity law).
-    ``None`` ⇒ the hook runs with the bundle's defaults."""
+    ``None`` ⇒ the hook runs with the bundle's defaults.
+
+    ``module_scopes`` (rule S2) reaches the journey fold: a journey folds
+    only into a journey of its own module scope."""
     if not synth_quality_enabled():
         return {"enabled": False}
     demote_tele = demote_system_flow_seeds(user_flows, flows, scan_meta)
@@ -1784,6 +1788,7 @@ def run_synth_quality(
             _verb_class_tokens(vocab or load_naming_vocab()),
             fold_exempt_ids=_fold_exempt,
             max_winner_members=_fold_bar,
+            module_scopes=module_scopes,
         )
         try:
             postmint_uf_rescore(

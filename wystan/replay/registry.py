@@ -2186,6 +2186,8 @@ def _run_naming_contract(env: ReplayEnv, state: dict[str, Any]) -> dict[str, Any
                     "keeper_on": keeper_enabled(),
                     "repo_root": repo_path,
                 },
+                # Rule S2 parity: the live site folds per module scope.
+                module_scopes=getattr(ctx, "module_scopes", None),
             )
             _gaps = _sq_tele.get("coverage_gaps")
             if _gaps is not None:
