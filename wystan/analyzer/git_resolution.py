@@ -3,19 +3,23 @@
 Only the scanned repository is untrusted, and all of it: a scan may name a
 subdirectory (``--subpath``, a workspace), so search locations are excluded
 for the whole working tree it belongs to (for exclusion, a wider root is the
-safe direction). Resolution, cached per (path, ``PATH``):
+safe direction). Resolution, cached per (path, ``PATH``, ``WYSTAN_GIT``):
 
-1. Exclusion roots without running anything: the given path, plus the
-   working tree found by walking up to the nearest ``.git`` (directory, or
-   a ``.git`` file's ``gitdir:``) and its git and common directories.
-2. git on the caller's ``PATH`` with empty, ``.`` and relative entries
-   dropped (they make the current directory a search location) and every
-   entry inside a root dropped, by file identity; a result inside a root is
-   refused.
+1. Exclusion roots without running anything (``git_discovery``): the
+   given path, every ancestor holding a ``.git`` entry of any kind, and
+   every git directory those entries name. No git runs before this set is
+   complete.
+2. git: the absolute path in ``WYSTAN_GIT`` when set (the user's explicit
+   choice; refused if relative, not an executable regular file, or inside
+   the scanned path itself), else the first git on the caller's ``PATH``
+   with empty, ``.`` and relative entries dropped (they make the current
+   directory a search location) and every entry inside a root dropped, by
+   file identity; a result inside a root is refused. When the exclusion
+   leaves no git, the error names the excluded ancestor and ``WYSTAN_GIT``.
 3. That git, with the runner's options and environment, confirms the roots
-   (``rev-parse --show-toplevel --absolute-git-dir --git-common-dir``);
-   when it names a root step 1 did not, the search is redone over the
-   union and its answer replaces the first.
+   (``rev-parse --show-toplevel --absolute-git-dir --git-common-dir``). A
+   root outside the set (git's discovery wider than step 1) is not
+   re-searched: it fails closed with ``UnsafeGit`` naming the root.
 
 An absolute entry under the current directory is kept: a service whose cwd
 is ``/`` must find ``/usr/bin/git``. On Windows
@@ -28,6 +32,7 @@ from __future__ import annotations
 import functools
 import os
 
+from wystan.analyzer.git_discovery import exclusion_roots, topmost_repository_ancestor
 from wystan.analyzer.git_process import GitError, run_bounded
 from wystan.analyzer.path_identity import is_within
 
@@ -56,9 +61,9 @@ SAFE_OPTIONS = (
 )
 
 _WINDOWS = os.name == "nt"
-#: A ``.git`` file or ``commondir`` file is one short line; read no more.
-_POINTER_FILE_BYTES = 4096
-_GITDIR_PREFIX = "gitdir:"
+#: The user's explicit git, for a machine where every git on PATH lies in
+#: an excluded ancestor (a home directory that is itself a working tree).
+EXPLICIT_GIT_ENV = "WYSTAN_GIT"
 _DISCOVERY_TIMEOUT_SEC = 10.0
 _DISCOVERY_OUTPUT_BYTES = 1 << 16
 #: Ownership is not a question for this read-only probe (every option above
@@ -68,37 +73,6 @@ _DISCOVERY_SAFE_DIRECTORY = "safe.directory=*"
 
 class UnsafeGit(GitError):
     """No git outside the scanned repository was found."""
-
-
-def _read_pointer(path: str) -> str | None:
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            return fh.read(_POINTER_FILE_BYTES).strip()
-    except OSError:
-        return None
-
-
-def _common_dir(git_dir: str) -> str:
-    pointer = _read_pointer(os.path.join(git_dir, "commondir"))
-    return os.path.normpath(os.path.join(git_dir, pointer)) if pointer else git_dir
-
-
-def discovered_roots(start: str) -> tuple[str, ...]:
-    """Working tree, git directory and common directory of the nearest
-    ``.git`` at or above ``start``, from the file system alone."""
-    current = os.path.realpath(start)
-    while True:
-        dot_git = os.path.join(current, ".git")
-        if os.path.isdir(dot_git):
-            return (current, dot_git, _common_dir(dot_git))
-        pointer = _read_pointer(dot_git) if os.path.isfile(dot_git) else None
-        if pointer and pointer.startswith(_GITDIR_PREFIX):
-            git_dir = os.path.normpath(os.path.join(current, pointer[len(_GITDIR_PREFIX):].strip()))
-            return (current, git_dir, _common_dir(git_dir))
-        parent = os.path.dirname(current)
-        if parent == current:
-            return ()
-        current = parent
 
 
 def _absolute_entries(path: str | None) -> list[str]:
@@ -147,10 +121,26 @@ def base_environment(search_path: str) -> dict[str, str]:
 def _pick(entries: list[str], roots: tuple[str, ...]) -> str:
     found = _which(_outside(entries, roots))
     if found is None:
-        raise UnsafeGit("git not found on the sanitised search path")
+        ancestor = topmost_repository_ancestor(roots[0]) if roots else None
+        where = f" (every git on PATH lies in or under the excluded {ancestor})" if ancestor else ""
+        raise UnsafeGit(f"git not found on the sanitised search path{where}; "
+                        f"set {EXPLICIT_GIT_ENV} to the absolute path of a trusted git")
     if any(is_within(found, r) for r in roots):
         raise UnsafeGit(f"refusing git inside the scanned repository: {found}")
     return found
+
+
+def _explicit_git(value: str, scanned: str) -> str:
+    """``WYSTAN_GIT``: absolute, an executable regular file, not inside the
+    scanned path (the user named it, so other excluded roots do not apply)."""
+    if not os.path.isabs(value):
+        raise UnsafeGit(f"{EXPLICIT_GIT_ENV} must be an absolute path: {value!r}")
+    real = os.path.realpath(value)
+    if not os.path.isfile(real) or not os.access(real, os.X_OK):
+        raise UnsafeGit(f"{EXPLICIT_GIT_ENV} is not an executable file: {value!r}")
+    if is_within(real, scanned):
+        raise UnsafeGit(f"refusing {EXPLICIT_GIT_ENV} inside the scanned path: {real}")
+    return real
 
 
 def _confirmed_roots(git: str, root: str, search_path: str) -> tuple[str, ...]:
@@ -167,34 +157,29 @@ def _confirmed_roots(git: str, root: str, search_path: str) -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=32)
-def _resolution(root: str, path: str | None) -> tuple[str, tuple[str, ...]]:
+def _resolution(root: str, path: str, explicit: str) -> tuple[str, tuple[str, ...]]:
     entries = _absolute_entries(path)
-    roots = tuple(dict.fromkeys((root, *discovered_roots(root))))
-    found = _pick(entries, roots)
-    confirmed = _confirmed_roots(found, root, _outside(entries, roots))
-    wider = tuple(dict.fromkeys(roots + confirmed))
-    if wider != roots:
-        return _pick(entries, wider), wider
+    roots = exclusion_roots(root)
+    found = _explicit_git(explicit, root) if explicit else _pick(entries, roots)
+    for named in _confirmed_roots(found, root, _outside(entries, roots)):
+        if not any(is_within(named, r) for r in roots):
+            raise UnsafeGit(f"git places {root} under {named}, outside the excluded locations; refusing")
     return found, roots
 
 
-def _resolve(repo_root: str | None, path: str | None = None) -> tuple[str, tuple[str, ...]]:
+def _resolve(repo_root: str, path: str | None = None) -> tuple[str, tuple[str, ...]]:
     current = os.environ.get("PATH", os.defpath) if path is None else path
-    return _resolution(os.path.realpath(repo_root), current)
+    return _resolution(os.path.realpath(repo_root), current, os.environ.get(EXPLICIT_GIT_ENV, ""))
 
 
 def safe_search_path(repo_root: str | None = None, path: str | None = None) -> str:
     """The search path without the entries that make the current directory
-    a search location and without any entry inside the scanned repository's
-    working tree or git directories, by identity."""
+    a search location and without any entry inside a location the scanned
+    tree could own (see ``git_discovery``), by identity."""
     entries = _absolute_entries(path)
     if not repo_root:
         return os.pathsep.join(entries)
-    try:
-        roots = _resolve(repo_root, path)[1]
-    except UnsafeGit:
-        roots = tuple(dict.fromkeys((os.path.realpath(repo_root), *discovered_roots(repo_root))))
-    return _outside(entries, roots)
+    return _outside(entries, exclusion_roots(os.path.realpath(repo_root)))
 
 
 def git_executable(repo_root: str | None) -> str:
