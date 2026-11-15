@@ -5733,7 +5733,9 @@ def run_finalize_phase(
             run_orphan_uf_path_attach,
         )
         _oup_tele = run_orphan_uf_path_attach(
-            product_features, features, user_flows, list(bipartite.flows))
+            product_features, features, user_flows, list(bipartite.flows),
+            # Rule S2: only owners of the journey's own module scope vote.
+            module_scopes=getattr(ctx, "module_scopes", None))
         if _oup_tele is not None:
             scan_meta["orphan_uf_path_attach"] = _oup_tele
     except Exception as exc:  # noqa: BLE001 — attach never breaks a scan
@@ -6302,7 +6304,9 @@ def run_finalize_phase(
     try:
         from wystan.pipeline_v2.orphan_uf_path_attach import run_orphan_uf_owner_attach
         scan_meta["orphan_uf_owner_attach"] = run_orphan_uf_owner_attach(
-            product_features, features, user_flows, list(bipartite.flows))
+            product_features, features, user_flows, list(bipartite.flows),
+            # Rule S2: only owners of the journey's own module scope count.
+            module_scopes=getattr(ctx, "module_scopes", None))
     except Exception as exc:  # noqa: BLE001 — attach never breaks a scan
         scan_meta.setdefault("warnings", []).append(
             f"orphan-uf owner-attach failed ({exc}); orphans left"
