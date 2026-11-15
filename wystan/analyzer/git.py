@@ -2,10 +2,20 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from git import Repo, InvalidGitRepositoryError
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from wystan.models.types import Commit, FileBlame
+from wystan.analyzer.git_history import count_commits_since, head_commits, numstat_file_keys
+from wystan.analyzer.git_repository import (
+    GitRepository,
+    NotARepository,
+    has_commit,
+    head_blob_paths,
+    open_repository,
+    origin_url,
+    repository_root,
+)
+from wystan.analyzer.git_runner import GitError, run_git
+from wystan.models.types import Commit
 
 # Regex to extract PR numbers from commit messages.
 # Handles two common GitHub merge strategies:
@@ -68,13 +78,13 @@ def extract_pr_number(message: str) -> int | None:
     return None
 
 
-def get_remote_url(repo: Repo) -> str:
+def get_remote_url(repo: GitRepository) -> str:
     """
     Returns the GitHub base URL for the repo (without .git suffix), or empty string.
     Normalizes SSH remotes to HTTPS: git@github.com:org/repo.git → https://github.com/org/repo
     """
     try:
-        url = repo.remotes.origin.url
+        url = _origin_url(repo)
         if url.startswith("git@"):
             url = re.sub(r"^git@([^:]+):", r"https://\1/", url)
         url = url.rstrip("/")
@@ -83,6 +93,14 @@ def get_remote_url(repo: Repo) -> str:
         return url
     except Exception:
         return ""
+
+
+def _origin_url(repo) -> str:
+    if isinstance(repo, GitRepository):
+        return origin_url(repo)
+    # Any other handle (a caller's GitPython Repo) answers from its parsed
+    # config; no git runs.
+    return repo.remotes.origin.url
 
 
 def normalize_subpath(src: str | None) -> str | None:
@@ -124,18 +142,14 @@ def scope_files_to_subpath(
     return out
 
 
-def load_repo(path: str) -> Repo:
+def load_repo(path: str) -> GitRepository:
+    """The working tree containing ``path``, through the hardened runner."""
     try:
-        repo = Repo(path, search_parent_directories=True)
-    except InvalidGitRepositoryError:
+        repo = open_repository(path, search_parent_directories=True)
+    except NotARepository:
         raise ValueError(f"'{path}' is not a git repository")
 
-    if repo.head.is_detached:
-        return repo
-
-    try:
-        repo.head.commit
-    except ValueError:
+    if not has_commit(repo):
         raise ValueError(
             f"Repository at '{path}' has no commits yet. "
             "Make at least one commit before running analysis."
@@ -144,15 +158,14 @@ def load_repo(path: str) -> Repo:
     return repo
 
 
-def estimate_commits(repo: Repo, days: int, max_commits: int = DEFAULT_MAX_COMMITS) -> int:
+def estimate_commits(repo: GitRepository, days: int, max_commits: int = DEFAULT_MAX_COMMITS) -> int:
     """
     Quickly estimates the number of commits in the date range.
     Uses git rev-list --count which is near-instant regardless of repo size.
     """
-    since = f"--since={days} days ago"
     try:
-        count = repo.git.rev_list("--count", since, "HEAD")
-        return min(int(count), max_commits)
+        count = count_commits_since(repository_root(repo), f"{days} days ago")
+        return min(count, max_commits)
     except Exception:
         return 0
 
@@ -175,7 +188,7 @@ def estimate_duration(commit_count: int, use_llm: bool = False, use_flows: bool 
 
 
 def get_commits(
-    repo: Repo,
+    repo: GitRepository,
     days: int = 365,
     max_commits: int = DEFAULT_MAX_COMMITS,
     src: str | None = None,
@@ -186,8 +199,8 @@ def get_commits(
     ``commit.stats.files.keys()`` walk (4586 git subprocess calls on
     supabase, 240s wall) with a single ``git log --name-only`` invocation
     that streams all commits + their changed files in one pass (~6s on
-    the same repo, ~40× speedup). Falls back to the GitPython walk on
-    any subprocess failure so unusual repo states (shallow clones,
+    the same repo, ~40× speedup). Falls back to the per-commit walk on
+    any git failure so unusual repo states (shallow clones,
     detached HEADs, custom worktrees) still work.
 
     Args:
@@ -214,15 +227,16 @@ def get_commits(
     ) as progress:
         progress.add_task("Reading git history (fallback)...", total=None)
 
-        for commit in repo.iter_commits(max_count=max_commits):
+        root = repository_root(repo)
+        for commit in head_commits(root, max_commits):
             commit_date = datetime.fromtimestamp(
-                commit.committed_date, tz=timezone.utc
+                commit.committed, tz=timezone.utc
             )
             age_days = (datetime.now(tz=timezone.utc) - commit_date).days
             if age_days > days:
                 break
 
-            files_changed = list(commit.stats.files.keys())
+            files_changed = numstat_file_keys(root, commit.sha, commit.parents)
             if src is not None:
                 files_changed = scope_files_to_subpath(files_changed, src)
                 if not files_changed:
@@ -231,9 +245,9 @@ def get_commits(
                     continue
             msg = commit.message.strip()
             commits.append(Commit(
-                sha=commit.hexsha[:8],
+                sha=commit.sha[:8],
                 message=msg,
-                author=str(commit.author.name),
+                author=commit.author,
                 date=commit_date,
                 files_changed=files_changed,
                 is_bug_fix=is_bug_fix(msg),
@@ -256,10 +270,12 @@ _BODY_END = "\x1e"  # ASCII Record Separator — never appears in commit data.
 # the start of the next commit's header.
 import re as _re
 _COMMIT_BOUNDARY_RE = _re.compile(r"\x00(?=[0-9a-fA-F]{40}\x1f)")
+# The single history read of a scan; past this the per-commit fallback runs.
+_LOG_TIMEOUT_SEC = 120.0
 
 
 def _get_commits_fast(
-    repo: Repo,
+    repo: GitRepository,
     *,
     days: int,
     max_commits: int,
@@ -267,8 +283,8 @@ def _get_commits_fast(
 ) -> list[Commit] | None:
     """Stream commit metadata + file lists via ``git log --name-only``.
 
-    Returns ``None`` on any subprocess failure — the caller falls back
-    to the per-commit GitPython walk. Stops parsing when the per-commit
+    Returns ``None`` on any git failure — the caller falls back
+    to the per-commit walk. Stops parsing when the per-commit
     cutoff (``days``) is reached so we don't pay to scan deep history
     on long-lived repos.
 
@@ -282,10 +298,8 @@ def _get_commits_fast(
 
         <SHA><FD>...
     """
-    import subprocess
-
     try:
-        repo_path = repo.working_tree_dir or repo.git_dir
+        repo_path = repository_root(repo)
     except Exception:
         return None
     if not repo_path:
@@ -295,7 +309,7 @@ def _get_commits_fast(
         f"%H{_FIELD_DELIM}%ct{_FIELD_DELIM}%an{_FIELD_DELIM}%B{_BODY_END}"
     )
     cmd = [
-        "git", "log",
+        "log",
         f"--max-count={max_commits}",
         f"--since={days}.days.ago",
         f"--pretty=format:{pretty}",
@@ -312,22 +326,13 @@ def _get_commits_fast(
         cmd += ["--", norm_src]
 
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=120.0,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        result = run_git(repo_path, *cmd, timeout=_LOG_TIMEOUT_SEC, check=False)
+    except GitError:
         return None
     if result.returncode != 0:
         return None
 
-    raw = result.stdout
+    raw = result.text
     if not raw:
         return []
 
@@ -403,37 +408,13 @@ def _get_commits_fast(
     return commits
 
 
-def get_file_blame(repo: Repo, file_path: str) -> FileBlame | None:
-    """Returns blame information for a file."""
-    try:
-        blame = repo.blame("HEAD", file_path)
-        authors = set()
-        latest_date = None
-
-        for blame_commit, _ in blame:
-            authors.add(str(blame_commit.author.name))
-            commit_date = datetime.fromtimestamp(
-                blame_commit.committed_date, tz=timezone.utc
-            )
-            if latest_date is None or commit_date > latest_date:
-                latest_date = commit_date
-
-        return FileBlame(
-            path=file_path,
-            authors=list(authors),
-            last_modified=latest_date or datetime.now(tz=timezone.utc),
-            total_commits=len(blame),
-        )
-    except Exception:
-        return None
-
-
-def get_tracked_files(repo: Repo, src: str | None = None) -> list[str]:
+def get_tracked_files(repo: GitRepository, src: str | None = None) -> list[str]:
     """
     Returns all tracked files in the repository.
 
     Args:
-        repo: GitPython Repo instance.
+        repo: the repository handle from ``load_repo`` (any object with
+            ``working_tree_dir`` is accepted; only its path is read).
         src: Optional subdirectory to restrict analysis to (e.g. 'src/').
              Files outside this path are excluded.
     """
@@ -471,11 +452,8 @@ def get_tracked_files(repo: Repo, src: str | None = None) -> list[str]:
     src_prefix = Path(src) if src else None
 
     files = []
-    for item in repo.tree().traverse():
-        if item.type != "blob":
-            continue
-
-        path = Path(item.path)
+    for item_path in head_blob_paths(repository_root(repo)):
+        path = Path(item_path)
 
         # Filter to subdirectory if --src is specified
         if src_prefix and not path.is_relative_to(src_prefix):
@@ -488,6 +466,6 @@ def get_tracked_files(repo: Repo, src: str | None = None) -> list[str]:
         if path.name in skip_filenames:
             continue
 
-        files.append(item.path)
+        files.append(item_path)
 
     return files
