@@ -4023,6 +4023,9 @@ def run_finalize_phase(
             try:
                 _hag_tele = apply_home_affinity_gate(
                     user_flows, features, product_features,
+                    # Rule S2: better homes only inside a journey's own
+                    # module scope.
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 _orphan_gap_rows, _og_tele = build_orphan_flow_gaps(
                     user_flows, features, product_features,

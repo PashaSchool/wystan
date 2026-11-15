@@ -741,10 +741,33 @@ def _better_home(
     return None
 
 
+def _affinity_targets_by_scope(
+    pf_tokens: dict[str, set[str]],
+    pf_paths: dict[str, set[str]],
+    pf_scope: dict[str, str],
+) -> dict[str, tuple[Any, Any]]:
+    """Rule S2: ``{scope: (name tokens, paths)}`` of the candidate homes of
+    each module scope, so a journey is weighed only against the features
+    of its own scope (a repository journey exactly as if no nested module
+    had been read). One scope (always so without a nested module) gives
+    the full maps themselves."""
+    from wystan.pipeline_v2.rehome_scopes import REPOSITORY_ROOT, targets_in_scope
+
+    scope_of = lambda key: pf_scope.get(key, REPOSITORY_ROOT)  # noqa: E731
+    return {
+        scope: (
+            targets_in_scope(pf_tokens, scope_of, scope),
+            targets_in_scope(pf_paths, scope_of, scope),
+        )
+        for scope in sorted(set(pf_scope.values()) | {REPOSITORY_ROOT})
+    }
+
+
 def apply_home_affinity_gate(
     user_flows: list["UserFlow"],
     developer_features: list["Feature"],
     product_features: list["Feature"],
+    module_scopes: Any = None,
 ) -> dict[str, Any]:
     """B78 Seg B — re-home ``tok0`` journeys that carry a deterministic
     better home, via an S3 arbiter proposal (rung ``affinity-rehome``).
@@ -756,7 +779,13 @@ def apply_home_affinity_gate(
     keeps 'cases'); a shared / container / facet home or such a target is
     refused; the source PF's LAST journey is never stripped (no-orphan, the
     B77 law); a synthesized backstop journey is skipped (conservation-clean
-    by construction)."""
+    by construction).
+
+    ``module_scopes`` is the scan's record of nested modules (rule S2,
+    :mod:`rehome_scopes`): a journey's better home is sought among the
+    product features of its own module scope only, and the no-orphan guard
+    counts the journeys of that scope. ``None`` or an empty record: one
+    scope, the gate as it was."""
     tele: dict[str, Any] = {
         "enabled": home_affinity_gate_enabled(), "checked": 0,
         "proposed": 0, "tok0": 0, "orphan_guarded": 0, "moves": [],
@@ -818,11 +847,29 @@ def apply_home_affinity_gate(
                 if k and k not in flow_by_id:
                     flow_by_id[k] = fl
 
-    uf_count: dict[str, int] = {}
+    from wystan.pipeline_v2.rehome_scopes import (
+        REPOSITORY_ROOT,
+        journey_scopes,
+        product_feature_scopes,
+    )
+    # Rule S2: the scope of every journey and of every candidate home.
+    uf_scope = journey_scopes(user_flows, flow_by_id, module_scopes)
+    by_name = product_feature_scopes(
+        product_features, developer_features, module_scopes,
+    )
+    targets_by_scope = _affinity_targets_by_scope(pf_tokens, pf_paths, {
+        _pf_key(pf): by_name.get(getattr(pf, "name", ""), REPOSITORY_ROOT)
+        for pf in product_features if _pf_key(pf) in pf_tokens
+    })
+
+    # Journeys per (scope, home): the no-orphan guard counts a home's
+    # journeys of the moved journey's own scope (one scope without modules).
+    uf_count: dict[tuple[str, str], int] = {}
     for uf in user_flows:
         h = str(getattr(uf, "product_feature_id", None) or "")
         if h:
-            uf_count[h] = uf_count.get(h, 0) + 1
+            key = (uf_scope[id(uf)], h)
+            uf_count[key] = uf_count.get(key, 0) + 1
 
     from wystan.pipeline_v2.overturn_ledger import propose_pf_now
     from wystan.pipeline_v2.segb_landing_binding import record_segb_landing
@@ -850,10 +897,17 @@ def apply_home_affinity_gate(
                 if e not in seen:
                     seen.add(e)
                     entries.append(e)
-        target = _better_home(uf_ct, home, entries, pf_tokens, pf_paths)
+        scope = uf_scope[id(uf)]
+        # A scope with no candidate home of its own: nothing to move to.
+        tokens_here, paths_here = targets_by_scope.get(scope, ({}, {}))
+        if home not in paths_here:
+            # A home of another scope (placed there before this gate): its
+            # own entry share still weighs, it is never a target anyway.
+            paths_here = {**paths_here, home: pf_paths[home]}
+        target = _better_home(uf_ct, home, entries, tokens_here, paths_here)
         if target is None or target == home:
             continue
-        if uf_count.get(home, 0) <= 1:
+        if uf_count.get((scope, home), 0) <= 1:
             tele["orphan_guarded"] += 1
             continue  # no-orphan (B77) — never strip a PF's last journey
         propose_pf_now(uf, target, rung="affinity-rehome")
@@ -862,8 +916,8 @@ def apply_home_affinity_gate(
         # this registry: tier2 abstains (case "a"), the rest is classified by
         # the emit-time landing audit (case "b"). Flag fixb118 OFF ⇒ no-op.
         record_segb_landing(uf, target)
-        uf_count[home] -= 1
-        uf_count[target] = uf_count.get(target, 0) + 1
+        uf_count[(scope, home)] -= 1
+        uf_count[(scope, target)] = uf_count.get((scope, target), 0) + 1
         tele["proposed"] += 1
         if len(tele["moves"]) < 40:
             tele["moves"].append({
