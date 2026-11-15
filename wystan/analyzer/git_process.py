@@ -71,18 +71,39 @@ def _read_capped(proc: subprocess.Popen[bytes], max_output: int) -> bytes | None
         chunks.append(chunk)
 
 
-def run_bounded(argv: list[str], env: dict[str, str], timeout: float, max_output: int) -> GitResult:
-    """Run ``argv`` with ``env`` only; kill it at ``timeout`` seconds or
-    past ``max_output`` bytes of stdout."""
+def _feed(proc: subprocess.Popen[bytes], data: bytes) -> threading.Thread:
+    """Write ``data`` to the child's stdin from a thread, so a child that
+    prints while it reads cannot deadlock against us."""
+
+    def _write() -> None:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(data)
+        except (BrokenPipeError, OSError):
+            pass  # the child exited or was killed; its exit status says why
+        finally:
+            proc.stdin.close()
+
+    writer = threading.Thread(target=_write, daemon=True)
+    writer.start()
+    return writer
+
+
+def run_bounded(
+    argv: list[str], env: dict[str, str], timeout: float, max_output: int, stdin: bytes | None = None,
+) -> GitResult:
+    """Run ``argv`` with ``env`` only, ``stdin`` (if any) as its input; kill
+    it at ``timeout`` seconds or past ``max_output`` bytes of stdout."""
     expired = threading.Event()
     with tempfile.TemporaryFile() as err_file:
         try:
             proc = subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=err_file, env=env,
+                argv, stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=err_file, env=env,
             )
         except OSError as exc:
             raise GitError(f"cannot start git: {exc}") from exc
+        writer = None if stdin is None else _feed(proc, stdin)
 
         def _expire() -> None:
             expired.set()
@@ -97,6 +118,8 @@ def run_bounded(argv: list[str], env: dict[str, str], timeout: float, max_output
             returncode = proc.wait()
         finally:
             timer.cancel()
+            if writer is not None:
+                writer.join()
             if proc.stdout is not None:
                 proc.stdout.close()
         err_file.seek(0)

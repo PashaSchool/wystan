@@ -20,12 +20,20 @@ read, and everything in the clone's own configuration that runs a program
 (hooks, the fsmonitor, pagers, external diff and textconv drivers, clean
 and smudge filters, transports) is switched off on the command line. Only
 an allowlist of built-in subcommands runs (git never lets an alias shadow a
-built-in), each with a timeout and an output cap.
+built-in), each with a timeout and an output cap. Nothing in the allowlist
+checks out or writes the scanned clone: file contents at a commit are read
+as raw blobs (``cat-file --batch`` applies no filter or conversion).
+
+Nothing derived from the clone is spliced into a ``-c`` argument: the
+clean/smudge filters a clone defines are emptied through
+``GIT_CONFIG_COUNT`` (key and value passed apart), and a driver name that is
+not a plain token makes the command refuse instead of run.
 """
 
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import re
 
@@ -52,6 +60,9 @@ SAFE_OPTIONS = (
     # The engine never fetches; a promisor remote or a submodule must not
     # make a read command open a connection (or run core.sshCommand).
     "-c", "protocol.allow=never",
+    "-c", "protocol.file.allow=never",
+    # A submodule's own configuration (hooks, filters) must never apply.
+    "-c", "submodule.recurse=false",
     # A signature check runs gpg and prints into ``git log`` output.
     "-c", "log.showSignature=false",
     # The parsers read C-quoted names (git's default); a clone setting it
@@ -62,24 +73,33 @@ SAFE_OPTIONS = (
 
 #: The built-in subcommands the engine runs, and nothing else.
 ALLOWED_SUBCOMMANDS = frozenset({
-    "checkout", "config", "diff", "diff-tree", "log", "ls-files", "ls-tree",
-    "rev-list", "rev-parse", "status", "symbolic-ref", "worktree",
+    "cat-file", "config", "diff", "diff-tree", "log", "ls-files", "ls-tree",
+    "rev-list", "rev-parse", "status", "symbolic-ref",
 })
-#: Subcommands that write or change state may only run these actions.
+#: Subcommands with several modes may only run these (read-only) ones.
 _RESTRICTED_ACTIONS = {
+    "cat-file": frozenset({"--batch"}),
     "config": frozenset({"--get", "--get-regexp"}),
-    "worktree": frozenset({"add", "remove", "prune"}),
 }
-#: Diff-producing commands never run an external diff or textconv driver.
+#: Diff-producing commands never run an external diff or textconv driver;
+#: commands that look at the working tree never descend into a submodule's
+#: (its own configuration and filters would apply there).
 _FORCED_FLAGS = {
-    "diff": ("--no-ext-diff", "--no-textconv"),
+    "diff": ("--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty"),
     "diff-tree": ("--no-ext-diff", "--no-textconv"),
     "log": ("--no-ext-diff", "--no-textconv"),
+    "status": ("--ignore-submodules=dirty",),
 }
-#: Commands that read or write working-tree content, where git runs the
-#: clean/smudge filters the clone's configuration defines.
-_FILTERING_SUBCOMMANDS = frozenset({"checkout", "diff", "status", "worktree"})
+#: Commands that hash working-tree files, where git runs the clean filters
+#: the clone's configuration defines.
+_FILTERING_SUBCOMMANDS = frozenset({"diff", "status"})
 _FILTER_KEYS = ("clean", "smudge", "process")
+#: A filter driver name the engine will neutralise; anything else refuses.
+_PLAIN_DRIVER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+#: ``GIT_CONFIG_COUNT`` (configuration through the environment) exists from
+#: git 2.31; an older git cannot have its filters emptied and refuses.
+_ENV_CONFIG_SINCE = (2, 31)
+_VERSION = re.compile(r"git version (\d+)\.(\d+)")
 
 #: Longest a git call may run; a repository that needs longer is treated as
 #: a failed call (every caller already has a fallback for that).
@@ -88,6 +108,8 @@ DEFAULT_TIMEOUT_SEC = 120.0
 #: (see .claude/lab/experiments/hardened-git-calls.md).
 DEFAULT_MAX_OUTPUT_BYTES = 512 * 1024 * 1024
 _CONFIG_TIMEOUT_SEC = 10.0
+
+logger = logging.getLogger(__name__)
 
 _WINDOWS = os.name == "nt"
 _HEX_NAME = re.compile(r"[0-9a-fA-F]{4,64}")
@@ -191,29 +213,49 @@ def _check_subcommand(args: tuple[str, ...]) -> str:
         raise UnsafeArgument(f"git subcommand not allowed: {args[:1]!r}")
     subcommand = args[0]
     allowed = _RESTRICTED_ACTIONS.get(subcommand)
-    if allowed is not None and not allowed.intersection(args[1:2] if subcommand == "worktree" else args[1:]):
+    if allowed is not None and not allowed.intersection(args[1:]):
         raise UnsafeArgument(f"git {subcommand} action not allowed: {args[1:]!r}")
     return subcommand
 
 
-def _filter_overrides(repo_root: str) -> list[str]:
-    """``-c`` options that empty every clean/smudge/process filter the
-    clone's configuration (with its includes) defines."""
+@functools.lru_cache(maxsize=8)
+def _git_version(executable: str) -> tuple[int, int]:
+    found = _VERSION.search(run_bounded([executable, "version"], {}, _CONFIG_TIMEOUT_SEC, 1 << 10).text)
+    return (int(found.group(1)), int(found.group(2))) if found else (0, 0)
+
+
+def _defined_filter_drivers(repo_root: str) -> list[str]:
+    """Filter driver names the clone's configuration (with its includes, in
+    this working tree's own context) defines, sorted."""
     listing = run_bounded(
         git_command(repo_root, "config", "--null", "--name-only", "--get-regexp", r"^filter\."),
         child_environment(repo_root), _CONFIG_TIMEOUT_SEC, DEFAULT_MAX_OUTPUT_BYTES,
     )
-    drivers = sorted({
+    return sorted({
         name[len("filter."):name.rindex(".")]
         for name in listing.text.split("\0")
         if name.count(".") >= 2
     })
-    overrides: list[str] = []
-    for driver in drivers:
-        for key in _FILTER_KEYS:
-            overrides += ["-c", f"filter.{driver}.{key}="]
-        overrides += ["-c", f"filter.{driver}.required=false"]
-    return overrides
+
+
+def filter_environment(repo_root: str) -> dict[str, str]:
+    """``GIT_CONFIG_*`` entries emptying every clean/smudge/process filter
+    the clone defines. Refuses (``UnsafeArgument``) a driver name that is not
+    a plain token, or a git too old to take configuration this way."""
+    drivers = _defined_filter_drivers(repo_root)
+    if not drivers:
+        return {}
+    odd = [d for d in drivers if not _PLAIN_DRIVER.fullmatch(d)]
+    if odd or _git_version(git_executable(repo_root)) < _ENV_CONFIG_SINCE:
+        logger.warning("git: refusing a working-tree read of %s (filter drivers %r)", repo_root, drivers)
+        raise UnsafeArgument(f"cannot neutralise filter drivers {drivers!r}")
+    entries = [(f"filter.{d}.{key}", "") for d in drivers for key in _FILTER_KEYS]
+    entries += [(f"filter.{d}.required", "false") for d in drivers]
+    env = {"GIT_CONFIG_COUNT": str(len(entries))}
+    for index, (key, value) in enumerate(entries):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
 
 
 def run_git(
@@ -222,15 +264,18 @@ def run_git(
     timeout: float = DEFAULT_TIMEOUT_SEC,
     max_output: int = DEFAULT_MAX_OUTPUT_BYTES,
     check: bool = True,
+    stdin: bytes | None = None,
 ) -> GitResult:
     """Run ``git <args>`` on ``repo_root`` through the hardened runner.
     Raises :class:`GitError` (``GitFailed`` for a non-zero exit when
     ``check``); ``args[0]`` must be an allowed subcommand."""
     root = os.fspath(repo_root)
     subcommand = _check_subcommand(args)
-    overrides = _filter_overrides(root) if subcommand in _FILTERING_SUBCOMMANDS else []
-    argv = git_command(root, *overrides, subcommand, *_FORCED_FLAGS.get(subcommand, ()), *args[1:])
-    result = run_bounded(argv, child_environment(root), timeout, max_output)
+    env = child_environment(root)
+    if subcommand in _FILTERING_SUBCOMMANDS:
+        env.update(filter_environment(root))
+    argv = git_command(root, subcommand, *_FORCED_FLAGS.get(subcommand, ()), *args[1:])
+    result = run_bounded(argv, env, timeout, max_output, stdin)
     if check and result.returncode != 0:
         raise GitFailed(subcommand, result)
     return result
