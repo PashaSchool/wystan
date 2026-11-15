@@ -199,19 +199,28 @@ def _confirmed_roots(git: str, root: str, search_path: str) -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=32)
-def _resolution(root: str, path: str, explicit: str) -> tuple[str, tuple[str, ...]]:
+def _resolution(root: str, path: str, explicit: str) -> tuple[str, tuple[str, ...], str]:
+    """(git, exclusion roots, the working tree's top level, else ``root``)."""
     entries = _absolute_entries(path)
     roots = exclusion_roots(root)
     found = _explicit_git(explicit, root) if explicit else _pick(entries, roots)
-    for named in _confirmed_roots(found, root, _outside(entries, roots)):
+    confirmed = _confirmed_roots(found, root, _outside(entries, roots))
+    for named in confirmed:
         if not any(is_within(named, r) for r in roots):
             raise UnsafeGit(f"git places {root} under {named}, outside the excluded locations; refusing")
-    return found, roots
+    return found, roots, (confirmed[0] if confirmed else root)
 
 
-def _resolve(repo_root: str, path: str | None = None) -> tuple[str, tuple[str, ...]]:
+def _resolve(repo_root: str, path: str | None = None) -> tuple[str, tuple[str, ...], str]:
     current = os.environ.get("PATH", os.defpath) if path is None else path
     return _resolution(os.path.realpath(repo_root), current, os.environ.get(EXPLICIT_GIT_ENV, ""))
+
+
+def trusted_directory(repo_root: str) -> str:
+    """The ``safe.directory`` to name for ``repo_root``: the top level of
+    its working tree (git checks ownership there, so a subdirectory scan of
+    another user's clone needs the top), else the path itself."""
+    return _resolve(repo_root)[2]
 
 
 def safe_search_path(repo_root: str | None = None, path: str | None = None) -> str:

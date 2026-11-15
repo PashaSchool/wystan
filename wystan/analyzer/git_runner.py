@@ -39,6 +39,7 @@ from wystan.analyzer.git_resolution import (
     child_environment,
     git_executable,
     safe_search_path,
+    trusted_directory,
 )
 
 __all__ = [
@@ -93,10 +94,10 @@ class UnsafeArgument(GitError, ValueError):
 
 def git_command(repo_root: str, *args: str) -> list[str]:
     """``argv`` of a git command on ``repo_root``, ``argv[0]`` absolute.
-    ``safe.directory`` names this repository only (command-line scope is
-    honoured for it), so a clone owned by another user still scans without
-    the user's global configuration."""
-    trusted = os.path.realpath(repo_root)
+    ``safe.directory`` names this repository's top level only (command-line
+    scope is honoured for it), so a clone owned by another user still scans,
+    from its top or a subdirectory, without the user's global configuration."""
+    trusted = trusted_directory(repo_root)
     return [
         git_executable(repo_root), *SAFE_OPTIONS, "-c", f"safe.directory={trusted}",
         "-C", repo_root, *args,
