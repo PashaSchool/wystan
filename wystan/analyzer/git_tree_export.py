@@ -8,10 +8,12 @@ list computed for the main tree covers. Here nothing is checked out: the
 tree is listed (``ls-tree``), sizes are asked first (``cat-file
 --batch-check``), and each blob the caller wants is streamed raw to disk
 (``cat-file --batch`` applies no filter, textconv or end-of-line
-conversion). Every other file is a sparse placeholder of the blob's size,
-so a walk or a size check sees the tree as a checkout would without its
-bytes being read or written. A blob that is not in the object store (a
-partial clone) fails the export with :class:`MissingObjects`.
+conversion). Every other file is an EMPTY placeholder, so a walk lists the
+tree as a checkout would; its real size is kept in the report, not on
+disk. No file the export writes is larger than the bytes fetched for it,
+and the bytes written are capped (``MAX_TREE_BYTES``), as is the number of
+entries. A blob that is not in the object store (a partial clone) fails
+the export with :class:`MissingObjects`.
 
 Tree entry names come from the untrusted repository: names a checkout on
 this platform would refuse are skipped and recorded (:func:`refusal_reason`;
@@ -86,7 +88,8 @@ class MissingObjects(GitError):
 @dataclass
 class ExportReport:
     written: int = 0
-    placeholders: int = 0
+    #: path -> the blob's real size, for files written empty.
+    placeholder_sizes: dict[str, int] = field(default_factory=dict)
     refused: list[tuple[str, str]] = field(default_factory=list)
     symlinks_skipped: list[str] = field(default_factory=list)
     submodules_skipped: list[str] = field(default_factory=list)
@@ -263,11 +266,8 @@ def _write_placeholders(placeholders: list, writer: _ContainedWriter, report: Ex
     for (mode, _oid, path), size in placeholders:
         fd = _open_or_refuse(writer, path, mode == _EXECUTABLE_MODE, report)
         if fd is not None:
-            try:
-                os.ftruncate(fd, size)  # sparse: the size is right, no byte is written
-                report.placeholders += 1
-            finally:
-                os.close(fd)
+            os.close(fd)  # empty: listed like the real file, never sized like it
+            report.placeholder_sizes[path] = size
 
 
 def export_tree(
@@ -276,7 +276,8 @@ def export_tree(
 ) -> ExportReport:
     """Write ``sha``'s tree under ``dest`` (an empty directory the engine
     created): the bytes of each blob ``wants_content(path, size)`` accepts
-    (all, by default), a sparse placeholder of the right size for the rest."""
+    (all, by default), an empty placeholder for the rest (real size in the
+    report)."""
     root, base = os.fspath(repo_root), Path(dest)
     if any(base.iterdir()):
         raise OSError(f"export destination is not empty: {base}")

@@ -227,9 +227,10 @@ def resolve_snapshot_budget_sec(n_snapshots: int) -> float:
 #: Files whose bytes the snapshot readers use: the import index reads
 #: TS/JS/Python sources up to the reverse-import size cap; the alias and
 #: workspace readers read tsconfig/jsconfig (and their ``extends`` targets),
-#: package.json and pnpm-workspace.yaml. Every other file is exported as a
-#: same-size sparse placeholder (listed and sized as in a checkout, never
-#: read).
+#: package.json and pnpm-workspace.yaml. Every other file is exported as an
+#: empty placeholder: listed as in a checkout (``list_snapshot_files``), and
+#: never read for content. A source over the cap reads as empty, which gives
+#: the import index what the size skip gave on a checkout: no imports.
 _MANIFEST_SUFFIXES = frozenset({".json", ".jsonc", ".yaml", ".yml"})
 
 
