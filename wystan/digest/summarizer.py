@@ -12,6 +12,7 @@ import os
 logger = logging.getLogger(__name__)
 from wystan.llm.cost import response_text
 from wystan.llm.model_gateway import resolve_model as gateway_model
+from wystan.llm.client import build_client
 
 _MODEL = "claude-haiku-4-5-20251001"
 
@@ -95,7 +96,7 @@ def summarize_with_llm(
     prompt = _format_digest_prompt(digest_data)
 
     try:
-        client = anthropic.Anthropic(api_key=key)
+        client = build_client(key)
         response = client.messages.create(
             model=gateway_model(_MODEL),
             max_tokens=2048,

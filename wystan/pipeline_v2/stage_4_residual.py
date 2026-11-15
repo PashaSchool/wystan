@@ -66,6 +66,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
 from wystan.pipeline_v2.llm_health import LlmHealth
+from wystan.llm.client import build_client
 
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
@@ -271,13 +272,13 @@ def _residual_cache_key(
 
 def _default_client_factory() -> Any | None:  # pragma: no cover - IO
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         return None
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
-    return Anthropic(api_key=api_key)
+    return build_client(api_key)
 
 
 def _call_haiku(

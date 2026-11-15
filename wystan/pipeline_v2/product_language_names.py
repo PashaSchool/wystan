@@ -34,11 +34,13 @@ from wystan.pipeline_v2.authored_names import (
     page_rows,
     top_page,
 )
+from wystan.pipeline_v2.entry_points.page_reach import reach_coverage
 from wystan.pipeline_v2.naming_contract import _verb_class_tokens, load_naming_vocab
 from wystan.pipeline_v2.naming_validator import EvidenceBundle, tokenize_name, validate_name
 from wystan.pipeline_v2.product_name_laws import (
     KIND_FEATURE,
     KIND_FLOW,
+    LAW_PROTOCOL_STEP,
     LawContext,
     product_name_violations,
 )
@@ -48,11 +50,15 @@ from wystan.pipeline_v2.spine_anchors import load_spine_vocab
 from wystan.pipeline_v2.ui_text import UiLabel, UiTextIndex, collect_ui_text
 
 __all__ = [
+    "EVIDENCE_NONE",
     "EVIDENCE_UI_TEXT",
     "JOINS_PREFIX",
     "UNNAMEABLE_PREFIX",
     "NameTarget",
+    "REACH_COVERAGE_FLOOR",
     "build_ui_index",
+    "cap_confidence_by_evidence",
+    "feature_name_judges",
     "is_unnameable",
     "name_product_layer",
     "route_files_without_ui",
@@ -62,9 +68,24 @@ __all__ = [
 EVIDENCE_UI_TEXT = "ui-text"
 EVIDENCE_UI_LABEL = "ui-label"
 EVIDENCE_NOT_AUTHORED = "not-authored"
+EVIDENCE_NONE = "not-evidenced"
+# The name is the feature's own slug written as words: nobody stated it.
+EVIDENCE_IDENTITY = "identity"
+# Evidence that the product itself states the name. Only these earn "high".
+_STATED_PREFIX = "authored:"
+_STATED_EVIDENCE = frozenset({"cli-declared"})
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 UNNAMEABLE_PREFIX = "unnameable:"
 NO_USER_SURFACE = "no_user_surface"
 JOINS_PREFIX = "joins:"
+
+# Page reach is evidence only when it works. Measured on seven corpus
+# clones: where the import graph followed the pages, 72 % to 100 % of them
+# reached other files; where it could not read the page files at all, 0 % did and
+# every pageless feature was judged to have no surface. Half is midway
+# between a broken graph and the weakest working one. Pages that import
+# none of the repository's code are left out of the share.
+REACH_COVERAGE_FLOOR = 0.5
 
 _MAX_PROMPT_LABELS = 30
 _MAX_PROMPT_ROUTES = 8
@@ -193,6 +214,7 @@ class _Namer:
         self._writer = writer
         self._taken: dict[str, set[str]] = {}
         self._current: dict[tuple[str, str], str] = {}
+        self._slug_owner: dict[str, str] = {}
         self.telemetry = {
             "total": 0, "written": 0, "kept": 0, "from_label": 0,
             "unnameable": 0, "declined_by_writer": 0, "rejected_proposals": 0,
@@ -276,6 +298,30 @@ class _Namer:
         text = " ".join(part.capitalize() for part in re.split(r"[-_\s]+", target.slug) if part)
         return text if text and self._rejection(target, text) is None else None
 
+    def _is_anothers_slug(self, target: NameTarget, name: str) -> bool:
+        """True when ``name`` is the slug of a different feature, written as
+        words: that feature is the one the name belongs to."""
+        owner = self._slug_owner.get(name.lower())
+        return owner is not None and owner != target.key
+
+    def _is_second_holder(self, target: NameTarget) -> bool:
+        if target.kind != KIND_FEATURE:
+            return False
+        holder = self._current.get((target.group, target.current.lower()))
+        return holder is not None and holder != target.key
+
+    def _slug_name(self, target: NameTarget) -> str | None:
+        """The feature's slug as words, when it passes the laws and no
+        sibling has it. Unlike ``_identity_candidate`` it asks for no other
+        evidence: the slug is the anchor's own word for the feature."""
+        text = " ".join(part.capitalize() for part in re.split(r"[-_\s]+", target.slug) if part)
+        if not text or self._violations(target, text):
+            return None
+        if text.lower() in self._taken.get(target.group, set()):
+            return None
+        holder = self._current.get((target.group, text.lower()))
+        return text if holder in (None, target.key) else None
+
     def _propose(self, targets: list[NameTarget], parents: dict[str, str]) -> dict[str, str]:
         """Accepted writer proposals by target key, after one retry."""
         accepted: dict[str, str] = {}
@@ -292,6 +338,17 @@ class _Namer:
                 if not name:
                     if attempt == 0:
                         self.telemetry["declined_by_writer"] += 1
+                        broken = [] if target.url_name else self._violations(target, target.current)
+                        if broken:
+                            # Silence here removes the item: its current
+                            # name cannot stay. The writer is told so once,
+                            # as it is told why a proposal was rejected.
+                            self.telemetry["declined_asked_again"] = (
+                                self.telemetry.get("declined_asked_again", 0) + 1)
+                            notes[target.key] = (
+                                f'"{target.current}" breaks: ' + ", ".join(broken)
+                                + "; it cannot be kept")
+                            retry.append(target)
                     continue
                 reason = self._rejection(target, name)
                 if reason is None:
@@ -312,6 +369,15 @@ class _Namer:
             target.apply(target.url_name, "low", [SOURCE_URL, "bare-verb"])
             return
         broken = self._violations(target, target.current)
+        if not broken and self._is_second_holder(target):
+            # Two features wear this name. The first by slug keeps it; this
+            # one takes its own slug when that is a lawful, free name.
+            own = self._slug_name(target)
+            if own is not None and own.lower() != target.current.lower():
+                self.telemetry["renamed_duplicate"] = self.telemetry.get("renamed_duplicate", 0) + 1
+                self._take(target, own)
+                target.apply(own, "low", [EVIDENCE_IDENTITY])
+                return
         if not broken:
             self.telemetry["kept"] += 1
             self._take(target, target.current)
@@ -347,6 +413,17 @@ class _Namer:
         for candidate in target.authored:
             if product_name_violations(candidate.text, KIND_FEATURE, self._ctx, is_shown=True):
                 continue
+            # A word taken from the URL was not written by the product as a
+            # title: the exemption for a protocol word the product itself
+            # shows ("Callbacks") does not cover it.
+            if candidate.source == SOURCE_URL and self._is_anothers_slug(target, candidate.text):
+                # "/admin/bots" does not make the admin feature "Bots" when a
+                # feature whose own slug is "bots" exists.
+                continue
+            if candidate.source == SOURCE_URL and LAW_PROTOCOL_STEP in product_name_violations(
+                candidate.text, KIND_FEATURE, self._ctx, is_shown=False,
+            ):
+                continue
             if candidate.text.lower() in self._taken.get(target.group, set()):
                 continue
             if candidate.source == SOURCE_URL and self._reads_as_fragment(target, candidate.text):
@@ -364,6 +441,16 @@ class _Namer:
             # The page gave no name that is free: without one this is a
             # package some pages import, not a feature.
             target.has_no_surface = True
+        if (not target.has_no_surface and not self._violations(target, target.current)
+                and (self._is_second_holder(target) or self._is_anothers_slug(target, target.current))):
+            # Its name is another feature's: it takes its own slug instead,
+            # when that is a lawful, free name.
+            own = self._slug_name(target)
+            if own is not None and own.lower() != target.current.lower():
+                self.telemetry["renamed_duplicate"] = self.telemetry.get("renamed_duplicate", 0) + 1
+                self._take(target, own)
+                target.apply(own, "low", [EVIDENCE_IDENTITY])
+                return True
         if not target.has_no_surface and not self._violations(target, target.current):
             # It has a page; the product just does not label it. The current
             # name stands, marked as not authored.
@@ -371,6 +458,16 @@ class _Namer:
             self.telemetry["kept"] += 1
             target.apply(target.current, "low", [EVIDENCE_NOT_AUTHORED])
             return True
+        if not target.has_no_surface:
+            # The page's own words all break a law ("Edit" from /x/:id/edit,
+            # "Callback"). The feature is still what its anchor says it is:
+            # its slug, written as words, names it when that passes the laws.
+            identity = self._slug_name(target)
+            if identity is not None:
+                self._take(target, identity)
+                self.telemetry["from_identity"] = self.telemetry.get("from_identity", 0) + 1
+                target.apply(identity, "low", [EVIDENCE_IDENTITY])
+                return True
         law = NO_USER_SURFACE if target.has_no_surface else "no_lawful_page_name"
         self.telemetry["unnameable"] += 1
         by_law = self.telemetry["unnameable_by_law"]
@@ -388,6 +485,9 @@ class _Namer:
         # into it.
         for target in ordered:
             self._current.setdefault((target.group, target.current.lower()), target.key)
+            if target.kind == KIND_FEATURE and target.slug:
+                words = " ".join(part for part in re.split(r"[-_\s]+", target.slug.lower()) if part)
+                self._slug_owner.setdefault(words, target.key)
         # Features with a stated name first, so a URL word is judged against
         # the names its siblings really have.
         ordered.sort(key=lambda t: (not any(c.source != SOURCE_URL for c in t.authored), t.key))
@@ -453,6 +553,22 @@ def _flow_target(
     )
 
 
+def _operations_in(paths: Iterable[str], operations_by_file: dict[str, set[str]]) -> set[str]:
+    """API operations served by the files in ``paths``."""
+    return set().union(*(operations_by_file.get(path, set()) for path in paths))
+
+
+def _owned_paths(product_features: list[Any], developer_features: Iterable[Any]) -> dict[str, list[str]]:
+    """Every file a product feature owns: its own list and the files of the
+    developer features that belong to it, own list first."""
+    owned: dict[str, list[str]] = {f.name: list(f.paths or []) for f in product_features}
+    for dev in sorted(developer_features, key=lambda d: str(d.name)):
+        home = getattr(dev, "product_feature_id", None)
+        if home in owned:
+            owned[home].extend(dev.paths or [])
+    return {name: list(dict.fromkeys(paths)) for name, paths in owned.items()}
+
+
 def _paths_shared_between_user_flows(flows_of: dict[str, list[Any]]) -> frozenset[str]:
     owners: dict[str, set[str]] = {}
     for user_flow_id, members in flows_of.items():
@@ -474,9 +590,13 @@ def run_product_language_names(
     nav_pairs: Iterable[tuple[str, str | None]] = (),
     files_without_ui: Iterable[str] = (),
     page_reach: dict[str, frozenset[str]] | None = None,
+    pages_without_imports: Iterable[str] = (),
     writer: NameWriter | None = None,
 ) -> dict[str, Any]:
-    """Rename product features and user flows in place; returns telemetry."""
+    """Rename product features and user flows in place; returns telemetry.
+
+    ``pages_without_imports`` are pages that import no code of the
+    repository: their empty reach does not count against reach coverage."""
     nav_pairs = list(nav_pairs)
     page_reach = page_reach or {}
     # A name the author wrote (a command's description) is not ours to judge
@@ -498,14 +618,34 @@ def run_product_language_names(
     for row in routes_index:
         if row.get("method") != "PAGE" and row.get("file") and row.get("pattern"):
             operations_by_file.setdefault(str(row["file"]), set()).add(str(row["pattern"]))
+    coverage = reach_coverage(page_reach, (p.file for p in pages), pages_without_imports)
+    # Below the floor "no page shows this code" is not a finding: we could
+    # not look. Nothing is judged surfaceless or joined to a page then.
+    # With no page to follow at all there is nothing we failed to see.
+    reach_is_evidence = coverage["coverage"] is None or coverage["coverage"] >= REACH_COVERAGE_FLOOR
+    coverage.update(floor=REACH_COVERAGE_FLOOR, abstained=not reach_is_evidence, features_not_judged=[])
+    owned_paths = _owned_paths(product_features, developer_features)
+    surface_from_owned_code: list[str] = []
     for target, feature in zip(feature_targets, product_features):
         page = top_page(feature.paths or [], target.identity_words, pages)
+        owned = owned_paths[feature.name]
+        if page is None:
+            # The feature's own list is the anchor's files. Its surface is
+            # in everything it owns: a page or the API operations may sit in
+            # a developer feature that belongs to it.
+            page = top_page(owned, target.identity_words, pages)
+            operations = _operations_in(owned, operations_by_file)
+            own_operations = _operations_in(feature.paths or [], operations_by_file)
+            if page is not None or len(own_operations) < _MIN_GROUP_ENTRIES <= len(operations):
+                surface_from_owned_code.append(feature.name)
+        if page is None and not reach_is_evidence:
+            coverage["features_not_judged"].append(feature.name)
+            continue
         if page is None:
             # No page. The feature still has a surface when its own code
             # serves a group of API operations: an API is something a user
             # addresses too. One lone endpoint is a leaf, not a feature. In a
             # product with no pages at all the lack of a page says nothing.
-            operations = set().union(*(operations_by_file.get(p, set()) for p in feature.paths or []))
             target.has_no_surface = bool(pages) and len(operations) < _MIN_GROUP_ENTRIES
             shown_on, only_there = (
                 _page_that_shows(feature, pages, page_reach, scope_words)
@@ -534,7 +674,8 @@ def run_product_language_names(
         )
         # Evidence for the writer is the feature's own pages, not every
         # shared component its code reaches.
-        page_files = {p.file for p in pages} & set(feature.paths or [])
+        own_files = set(feature.paths or [])
+        page_files = {p.file for p in pages} & (own_files if page.file in own_files else set(owned))
         target.labels = index.labels_for(page_files)
         target.routes = sorted({p.pattern for p in pages if p.file in page_files})
     members_of: dict[str, list[str]] = {}
@@ -547,6 +688,7 @@ def run_product_language_names(
     feature_namer = _Namer(ctx, writer)
     feature_namer.reserve("pf", (f.display_name or f.name for f in authored_features))
     feature_namer.run(feature_targets, {})
+    coverage["features_not_judged"].sort()
 
     flows_of: dict[str, list[Any]] = {}
     for flow in flows:
@@ -568,6 +710,8 @@ def run_product_language_names(
         "ui_text_files": len(index.by_file),
         "product_features": feature_namer.telemetry,
         "user_flows": flow_namer.telemetry,
+        "entry_reach_coverage": coverage,
+        "surface_from_owned_code": sorted(surface_from_owned_code),
     }
 
 
@@ -609,22 +753,82 @@ def name_product_layer(
 
     index = build_ui_index(features, product_features, flows, ctx)
     developer = [f for f in features if getattr(f, "layer", None) != "product"]
+    page_reach, quiet_pages = _page_reach(ctx, routes_index)
     telemetry = run_product_language_names(
         product_features, user_flows if name_flows else [], flows,
         index=index, routes_index=routes_index, developer_features=developer,
         brand_words=_brand_words(ctx.repo_path), nav_pairs=_nav_pairs(ctx, index),
         files_without_ui=route_files_without_ui(ctx.repo_path, routes_index),
-        page_reach=_page_reach(ctx, routes_index),
+        page_reach=page_reach, pages_without_imports=quiet_pages,
         writer=build_name_writer(**llm),
     )
     telemetry["entry_points"] = _entry_point_report(ctx, routes_index, index)
+    # A second opinion on the features about to be removed: some are
+    # capabilities that live in server code or behind another screen.
+    telemetry["demotion_veto"] = _veto(product_features, developer, user_flows, index, ctx, llm)
     # What has no product-language name is not shown as product.
     telemetry["features_removed"] = demote_unnameable_features(
         product_features, developer, user_flows, flows,
     )
     if name_flows:
         telemetry["flows_removed"] = drop_unnameable_flows(user_flows, flows)
+        # Last pass before output: nothing reads the confidence after this.
+        telemetry["feature_confidence"] = cap_confidence_by_evidence(product_features)
     return telemetry
+
+
+def _veto(
+    product_features: list[Any], developer: list[Any], user_flows: list[Any],
+    index: UiTextIndex, ctx: Any, llm: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the demotion veto; it never stops the naming pass."""
+    from wystan.pipeline_v2.demotion_veto import run_demotion_veto
+
+    laws = build_law_context(index, _brand_words(ctx.repo_path))
+    try:
+        return run_demotion_veto(
+            product_features, developer, user_flows,
+            is_candidate=is_unnameable,
+            violations=lambda name: product_name_violations(name, KIND_FEATURE, laws),
+            joins_prefix=JOINS_PREFIX,
+            llm={key: llm.get(key) for key in ("cost_tracker", "cache", "llm_health")},
+        )
+    except Exception as exc:  # noqa: BLE001 - without a verdict the removal goes ahead as before
+        return {"applied": False, "reason": f"failed: {exc}"[:200]}
+
+
+def _evidence_ceiling(evidence: Iterable[str]) -> str:
+    """The highest confidence ``evidence`` can carry: "high" when the product
+    states the name, "low" when there is none, "medium" for everything
+    inferred (a URL segment, user-visible text, the shape of the code)."""
+    notes = [str(note) for note in evidence]
+    if not notes:
+        return "low"
+    if any(note.startswith(_STATED_PREFIX) or note in _STATED_EVIDENCE for note in notes):
+        return "high"
+    return "medium"
+
+
+def cap_confidence_by_evidence(product_features: list[Any]) -> dict[str, int]:
+    """Lower each product feature's ``name_confidence`` to what its
+    ``name_evidence`` supports; never raise it.
+
+    A name kept because it merely passes the laws records no evidence, and the
+    model's default confidence is "high": without this a name nobody wrote
+    reads as the most trusted one. Such a name becomes "low" with the note
+    ``not-evidenced``. Returns the count of features per final level."""
+    counts = {"high": 0, "medium": 0, "low": 0, "lowered": 0}
+    for feature in product_features:
+        evidence = list(getattr(feature, "name_evidence", None) or [])
+        ceiling = _evidence_ceiling(evidence)
+        current = str(getattr(feature, "name_confidence", "") or "high")
+        if _CONFIDENCE_RANK.get(current, 2) > _CONFIDENCE_RANK[ceiling]:
+            feature.name_confidence = ceiling
+            counts["lowered"] += 1
+        if not evidence:
+            feature.name_evidence = [EVIDENCE_NONE]
+        counts[str(feature.name_confidence)] = counts.get(str(feature.name_confidence), 0) + 1
+    return counts
 
 
 def build_ui_index(
@@ -639,6 +843,35 @@ def build_ui_index(
         if flow.entry_point_file:
             candidates.add(flow.entry_point_file)
     return collect_ui_text(ctx.repo_path, candidates, ctx.tracked_files)
+
+
+def feature_name_judges(
+    features: list[Any], product_features: list[Any], flows: list[Any], ctx: Any,
+) -> tuple[Callable[[str], list[str]], Callable[[], frozenset[str]]]:
+    """For a pass that mints product features outside the ladder: the laws
+    a feature name breaks, and the names the product itself shows as a title
+    or heading (lower-cased). The user-visible text is read on first use, so
+    a caller that mints nothing pays nothing."""
+    state: dict[str, Any] = {}
+
+    def index() -> UiTextIndex:
+        if "index" not in state:
+            state["index"] = build_ui_index(features, product_features, flows, ctx)
+            state["laws"] = build_law_context(state["index"], _brand_words(ctx.repo_path))
+        return state["index"]
+
+    def violations(name: str, subject: frozenset[str] = frozenset()) -> list[str]:
+        index()
+        return product_name_violations(name, KIND_FEATURE, state["laws"], subject=subject)
+
+    def stated() -> frozenset[str]:
+        return frozenset(
+            label.text.lower()
+            for labels in index().by_file.values() for label in labels
+            if label.kind in _FEATURE_LABEL_KINDS
+        )
+
+    return violations, stated
 
 
 def is_unnameable(item: Any) -> bool:
@@ -699,7 +932,17 @@ def route_files_without_ui(repo_path: Any, routes_index: list[dict[str, Any]]) -
     return silent
 
 
-_AUTHOR_EVIDENCE = frozenset({"authored:description", "authored:schema", "cli-declared"})
+# ``model:capability-split``: a feature the capability split minted from a
+# group of journeys. Its name was validated against the laws when it was
+# minted and it has no page to be judged by: this pass leaves it alone.
+_AUTHOR_EVIDENCE = frozenset({
+    "authored:description", "authored:schema", "cli-declared", "model:capability-split",
+    # A feature the demotion veto kept: judged once, not removed by a later call.
+    "model:capability",
+    # A name the name-or-reject pass gave: checked against the laws and the
+    # feature's own evidence when it was given.
+    "model:name",
+})
 
 
 def _is_author_named(item: Any) -> bool:
@@ -742,19 +985,29 @@ def _entry_point_report(ctx: Any, routes_index: list[dict[str, Any]], index: UiT
     return entry_report(entries, errors)
 
 
-def _page_reach(ctx: Any, routes_index: list[dict[str, Any]]) -> dict[str, frozenset[str]]:
-    """Files each page imports. Empty when the unit has no pages or the
-    import graph cannot be built."""
+def _page_reach(
+    ctx: Any, routes_index: list[dict[str, Any]],
+) -> tuple[dict[str, frozenset[str]], frozenset[str]]:
+    """Files each page imports, and the pages that import nothing of the
+    repository. Both empty when the unit has no pages or the import graph
+    cannot be built; the caller then reads the reach as missing."""
     page_files = {str(r["file"]) for r in routes_index if r.get("method") == "PAGE" and r.get("file")}
     if not page_files:
-        return {}
+        return {}, frozenset()
     try:
-        from wystan.pipeline_v2.entry_points.page_reach import files_reached_from
+        from wystan.pipeline_v2.entry_points.page_reach import (
+            files_reached_from,
+            pages_with_nothing_to_follow,
+        )
         from wystan.pipeline_v2.flow_reach import build_reach_context
 
-        return files_reached_from(build_reach_context(ctx), page_files)
+        reach_context = build_reach_context(ctx)
+        return (
+            files_reached_from(reach_context, page_files),
+            pages_with_nothing_to_follow(reach_context, page_files),
+        )
     except Exception:  # noqa: BLE001 — reach is evidence, never a requirement
-        return {}
+        return {}, frozenset()
 
 
 def _page_that_shows(

@@ -604,3 +604,68 @@ product_name_implementation_verbs:
   - insert
   - redeem
   - enforce
+
+# Verbs that say nothing without an object. "Search" or "Export" name a
+# capability on their own; "Create" or "Edit" name a step of some other
+# capability and are what a route segment (/create, /edit) leaves behind.
+# A product feature may not be one of these words alone, even when a page
+# is titled so.
+product_name_object_verbs:
+  - add
+  - change
+  - complete
+  - configure
+  - confirm
+  - create
+  - delete
+  - edit
+  - get
+  - list
+  - manage
+  - new
+  - open
+  - remove
+  - save
+  - select
+  - set
+  - show
+  - submit
+  - update
+  - view
+
+# Words that say something went wrong. A name made only of these and of the
+# filler below is an error screen, not a capability ("Error", "Access
+# Denied"); "Error Tracking" has a word of its own and stands.
+product_name_error_words:
+  - crash
+  - denied
+  - error
+  - errors
+  - exception
+  - failed
+  - failure
+  - forbidden
+  - offline
+  - oops
+  - unauthorized
+  - unavailable
+product_name_error_filler:
+  - access
+  - code
+  - found
+  - not
+  - page
+  - status
+
+# Steps of a protocol between systems, not pages a user visits: what the
+# path of a return or health endpoint leaves behind. A product that titles a
+# page with one of these words itself ("Callbacks") keeps it.
+product_name_protocol_words:
+  - ack
+  - callback
+  - callbacks
+  - healthz
+  - heartbeat
+  - ping
+  - redirect
+  - redirects

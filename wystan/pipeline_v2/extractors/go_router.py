@@ -309,6 +309,9 @@ class GoRouterExtractor(PatternExtractor):
     """
 
     name = "go-router"
+    #: Each route tuple is ``(pattern, method, file, line, handler token)``:
+    #: ``file`` + ``line`` locate the router call itself, in ``file``.
+    route_site = "registration"
 
     def load_config(self) -> dict:
         return _load_config()

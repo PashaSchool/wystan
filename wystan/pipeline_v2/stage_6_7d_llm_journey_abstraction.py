@@ -74,6 +74,7 @@ from wystan.pipeline_v2.nav_taxonomy import aggregate_product_feature
 from wystan.pipeline_v2.stage_6_7c_uf_splitter import (
     residual_citability_enabled as _residual_citability_enabled,
 )
+from wystan.llm.client import build_client
 
 if TYPE_CHECKING:
     from wystan.cache.backend import CacheBackend
@@ -267,13 +268,13 @@ def _default_client_factory() -> Any | None:  # pragma: no cover - IO
     """Lazy Anthropic client. ``None`` when SDK / key absent → the stage
     degrades to the deterministic inputs without erroring."""
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         return None
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
-    return Anthropic(api_key=api_key)
+    return build_client(api_key)
 
 
 def is_enabled() -> bool:
@@ -622,11 +623,18 @@ _SPLIT_MARKER = "sub-domain"
 _SPLIT_PARENT_RE = re.compile(r"of feature '([^']+)'\s*$")
 
 
-def _split_parent_name(f: "Feature") -> str | None:
+def _split_parent_name(
+    f: "Feature", born_rows: frozenset[str] = frozenset(),
+) -> str | None:
     """The parent feature NAME a Stage 8.9/8.9.5 subfeature was split from,
-    or ``None`` when *f* is not a split subfeature."""
+    or ``None`` when *f* is not a split subfeature. *born_rows*: names of
+    the rows the route-group split bore (Stage 8.9's record)."""
     desc = getattr(f, "description", None) or ""
     if _SPLIT_MARKER not in desc.lower():
+        return None
+    # A route-group row that holds flows is a capability with behaviour of
+    # its own, not a grain choice inside a container: it is not folded back.
+    if f.name in born_rows and getattr(f, "flows", None):
         return None
     m = _SPLIT_PARENT_RE.search(desc)
     return m.group(1) if m else None
@@ -638,9 +646,11 @@ def _dev_key(f: Any) -> str:
 
 def _rollup_split_view(
     developer_features: list["Feature"],
+    born_rows: frozenset[str] = frozenset(),
 ) -> tuple[list[Any], dict[str, str]]:
     """Abstraction-input view with split-minted subfeatures FOLDED back into
-    their parents. Returns ``(view, sub_to_parent_key)``.
+    their parents. Returns ``(view, sub_to_parent_key)``. A row the
+    route-group split bore (*born_rows*) that holds flows stands alone.
 
     The DF layer decomposes physical containers (Stage 8.9 deterministic +
     8.9.5 LLM splits, 19-67 thin subfeatures on a monorepo) — but that grain
@@ -672,7 +682,7 @@ def _rollup_split_view(
         seen: set[int] = set()
         cur = sub
         while True:
-            parent_name = _split_parent_name(cur)
+            parent_name = _split_parent_name(cur, born_rows)
             if parent_name is None:
                 return cur  # reached a non-sub feature = the root
             if id(cur) in seen:
@@ -688,7 +698,7 @@ def _rollup_split_view(
     sub_to_parent: dict[str, str] = {}
     folded: dict[int, list["Feature"]] = defaultdict(list)
     for f in developer_features:
-        if _split_parent_name(f) is None:
+        if _split_parent_name(f, born_rows) is None:
             continue
         root = _root_ancestor(f)
         if root is None or root is f:
@@ -822,6 +832,38 @@ def _hygienic_page_route(r: dict[str, Any]) -> bool:
     return True
 
 
+def _digest_dev_order(developer_features: list[Any]) -> list[Any]:
+    """The digest's row order; the first ``MAX_DEV_FEATURES_DIGEST`` are
+    the rows the model sees."""
+    # Secondary key (name) breaks commit-count ties deterministically — else
+    # equal-commit modules keep input order (nondeterministic) and the digest
+    # JSON varies run-to-run, defeating the content-hash cache (byte-identical
+    # re-scan). Same reason for the UF + re-attribution sorts below.
+    return sorted(
+        developer_features, key=lambda f: (-(f.total_commits or 0), f.name or ""))
+
+
+def _digest_truncation(
+    dev_view: list[Any], developer_features: list[Any],
+    born_rows: frozenset[str] = frozenset(),
+) -> dict[str, int] | None:
+    """How many rows the digest cap leaves out, and how many of those are
+    route-group rows born at Stage 8.9 (they stand alone in the view when
+    they hold flows, so they can crowd the cap). ``None`` when nothing is
+    left out, or when the scan has no route-group row: the cap is not
+    changed, and a scan the route-group rule did not touch keeps its
+    telemetry byte for byte."""
+    dropped = _digest_dev_order(dev_view)[MAX_DEV_FEATURES_DIGEST:]
+    if not dropped or not any(f.name in born_rows for f in developer_features):
+        return None
+    return {
+        "rows": len(dev_view),
+        "kept": MAX_DEV_FEATURES_DIGEST,
+        "dropped": len(dropped),
+        "dropped_born": sum(1 for f in dropped if f.name in born_rows),
+    }
+
+
 def _build_digest(
     developer_features: list["Feature"],
     product_features: list["Feature"],
@@ -831,11 +873,7 @@ def _build_digest(
     stratified: bool = False,
     page_anchored: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    # Secondary key (name) breaks commit-count ties deterministically — else
-    # equal-commit modules keep input order (nondeterministic) and the digest
-    # JSON varies run-to-run, defeating the content-hash cache (byte-identical
-    # re-scan). Same reason for the UF + re-attribution sorts below.
-    devf = sorted(developer_features, key=lambda f: (-(f.total_commits or 0), f.name or ""))
+    devf = _digest_dev_order(developer_features)
     dev_lines = [
         {"name": f.display_name or f.name, "where": _top_dirs(_paths_of(f)),
          "what": _short(f.description, 90)}
@@ -3818,6 +3856,7 @@ def run_journey_abstraction(
     anchored: bool = False,
     interior_evidence: dict[str, Any] | None = None,
     _client_factory: Callable[[], Any | None] = _default_client_factory,
+    born_rows: frozenset[str] = frozenset(),
 ) -> tuple[list["UserFlow"], list["Feature"], dict[str, tuple[str, ...]] | None, dict[str, Any]]:
     """Rewrite user_flows[] + product_features[] at journey/capability grain.
 
@@ -3907,7 +3946,7 @@ def run_journey_abstraction(
 
     non_facet_devs = [f for f in developer_features if not _is_facet(f)]
     tele["facet_devs_excluded"] = len(developer_features) - len(non_facet_devs)
-    dev_view, sub_to_parent = _rollup_split_view(non_facet_devs)
+    dev_view, sub_to_parent = _rollup_split_view(non_facet_devs, born_rows)
     # S5b Seg H — digest stratification (default OFF): the page-anchor walk
     # runs over the ORIGINAL feature list (rollup views carry no flows) and
     # only when armed, so the unset/``0`` digest is byte-identical.
@@ -3920,6 +3959,9 @@ def run_journey_abstraction(
         dev_view, product_features, user_flows, routes_index,
         stratified=_strat, page_anchored=_strat_page_ids,
     )
+    truncation = _digest_truncation(dev_view, non_facet_devs, born_rows)
+    if truncation:
+        tele["digest_dev_truncated"] = truncation
     if _strat:
         # telemetry key only on fire (openstatus inertness law).
         tele["digest_stratification"] = {

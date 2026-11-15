@@ -83,6 +83,7 @@ from wystan.pipeline_v2.stage_8_9_anchor_subdecompose import (
     _OVERSIZED_SHARE,
 )
 from wystan.pipeline_v2.profiles._flow_lines import resolve_handler_line
+from wystan.llm.client import build_client
 
 if TYPE_CHECKING:
     from wystan.pipeline_v2.profiles.base import FrameworkProfile
@@ -921,13 +922,13 @@ def _validate_and_attach_lines(
 
 def _default_client_factory() -> Any | None:  # pragma: no cover — IO
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except ImportError:
         return None
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
-    return Anthropic(api_key=api_key)
+    return build_client(api_key)
 
 
 def _call_haiku(

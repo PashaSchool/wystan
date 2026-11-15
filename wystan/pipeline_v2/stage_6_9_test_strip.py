@@ -33,11 +33,12 @@ scan)
   ``mocks`` / ``checks-csp-login-spec`` are 100 %% test-backed and map
   to no truth entry).
 * Flows that become **file/attribution-empty** are dropped.
-* A flow whose ``entry_point_file`` is a test path has its entry
-  recomputed to the first surviving non-test participant — preferring
-  the earliest ``loc_nodes`` entry with ``role == "entry"`` that
-  survives, else the top remaining file. If no non-test file survives
-  the flow is empty and is dropped.
+* A flow whose ``entry_point_file`` is a test path is dropped. It starts
+  in a test: it is the test exercising product code, not something the
+  product does. Until 2026-11-11 its entry was re-pointed at the first
+  surviving product file and the flow was kept, so the map carried test
+  scenarios as product flows under names like ``…-tests-config-test-flow``
+  (langflow: 139 of 1,102 flows; 76 of the 211 flows of one feature).
 
 Disable via ``WYSTAN_STAGE_6_9_TEST_STRIP=0`` (default ON).
 
@@ -245,52 +246,10 @@ def _flow_is_empty(flow: Any) -> bool:
     return True
 
 
-def _recompute_entry(flow: Any) -> bool:
-    """If ``entry_point_file`` is a test path, point it at the first
-    surviving non-test file: prefer the earliest surviving ``loc_nodes``
-    entry with ``role == "entry"``, else the top remaining ``paths``
-    file. Returns ``True`` if the entry was recomputed.
-
-    Caller drops the flow afterwards if it is empty (no non-test file)."""
-    epf = getattr(flow, "entry_point_file", None)
-    if not (epf and is_test_path(epf)):
-        return False
-
-    new_entry: str | None = None
-    # Prefer a surviving loc_node with role == entry.
-    for node in getattr(flow, "loc_nodes", None) or []:
-        role = node.get("role") if isinstance(node, dict) else getattr(node, "role", None)
-        npath = _path_of(node)
-        if role == "entry" and npath and not is_test_path(npath):
-            new_entry = npath
-            break
-    # Else any surviving non-test loc_node.
-    if new_entry is None:
-        for node in getattr(flow, "loc_nodes", None) or []:
-            npath = _path_of(node)
-            if npath and not is_test_path(npath):
-                new_entry = npath
-                break
-    # Else top remaining path.
-    if new_entry is None:
-        for p in getattr(flow, "paths", None) or []:
-            if isinstance(p, str) and not is_test_path(p):
-                new_entry = p
-                break
-
-    if new_entry is not None:
-        flow.entry_point_file = new_entry
-        # The richer FlowEntryPoint mirror, if present, should not point
-        # at a stripped file either.
-        ep = getattr(flow, "entry_point", None)
-        if ep is not None:
-            ep_path = getattr(ep, "path", None)
-            if ep_path and is_test_path(ep_path):
-                ep.path = new_entry
-        return True
-    # No surviving non-test entry — leave entry_point_file as-is; the
-    # flow will be dropped by the empty check.
-    return False
+def _starts_in_test(flow: Any) -> bool:
+    """True when the flow's entry point is a test file."""
+    entry = getattr(flow, "entry_point_file", None)
+    return bool(entry and is_test_path(entry))
 
 
 def _strip_flow(flow: Any, stats: dict[str, int]) -> None:
@@ -324,19 +283,21 @@ def strip_test_paths(features: list[Any], flows: list[Any]) -> dict[str, int]:
 
     Mutates ``features`` and ``flows`` (and any ``Feature.flows``
     containment lists) IN PLACE, dropping features / flows that become
-    empty and recomputing test entry points. NEVER touches metric
-    scalars.
+    empty or start in a test. NEVER touches metric scalars.
 
     Returns telemetry::
 
         {paths_removed, features_dropped, flows_dropped,
-         flow_entries_recomputed}
+         flows_dropped_test_entry}
+
+    ``flows_dropped`` counts every dropped flow; ``flows_dropped_test_entry``
+    is the part of it dropped for starting in a test.
     """
     stats = {
         "paths_removed": 0,
         "features_dropped": 0,
         "flows_dropped": 0,
-        "flow_entries_recomputed": 0,
+        "flows_dropped_test_entry": 0,
     }
 
     features = features if isinstance(features, list) else []
@@ -347,13 +308,14 @@ def strip_test_paths(features: list[Any], flows: list[Any]) -> dict[str, int]:
         list(flows)
         + [fl for f in features for fl in (getattr(f, "flows", None) or [])]
     )
+    # Read the entry before stripping: the strip removes the test paths.
+    test_entry_ids = {id(fl) for fl in flow_objs if _starts_in_test(fl)}
+    stats["flows_dropped_test_entry"] = len(test_entry_ids)
     for fl in flow_objs:
         _strip_flow(fl, stats)
-        if _recompute_entry(fl):
-            stats["flow_entries_recomputed"] += 1
 
-    # ── 2. Decide which flows to drop (empty after strip) ─────────────
-    drop_flow_ids = {id(fl) for fl in flow_objs if _flow_is_empty(fl)}
+    # ── 2. Decide which flows to drop (start in a test, or empty) ─────
+    drop_flow_ids = test_entry_ids | {id(fl) for fl in flow_objs if _flow_is_empty(fl)}
     stats["flows_dropped"] = len(drop_flow_ids)
 
     if drop_flow_ids:

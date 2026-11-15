@@ -34,6 +34,7 @@ from wystan.models.types import FeatureMap, Feature, Flow
 
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
+from wystan.llm.client import build_client
 
 _MODEL = "claude-sonnet-5-5"
 _MAX_RETRIES = 2
@@ -474,7 +475,7 @@ def evolve_with_llm(
     # First apply simple changes (matched files, deletions)
     evolved = apply_simple_delta(feature_map, delta)
 
-    client = anthropic.Anthropic(api_key=key)
+    client = build_client(key)
 
     # Format existing features with their flows
     feat_lines = []

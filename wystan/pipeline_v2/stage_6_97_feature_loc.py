@@ -70,6 +70,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
+from wystan.pipeline_v2.non_code_file import non_code_class
 from wystan.pipeline_v2.owner_oracle import elect_primary_owners
 from wystan.pipeline_v2.ownership_v2 import ownership_v2_enabled
 from wystan.pipeline_v2.stage_6_9_test_strip import is_test_path
@@ -675,6 +676,12 @@ def apply_feature_loc(
             "files_by_dev": _files_by_dev,
             "art_enabled": art_enabled,
             "devs_without_uuid": _no_uuid,
+            # Owned files that are unmistakably not code. Nothing here acts
+            # on it: ``loc`` is stamped as always, so every pass that reads
+            # it decides as before. ``code_lines`` reads this once, when
+            # the map is about to be written.
+            "non_code": _non_code_owned(
+                root, _owner_by_file, _art_of if art_enabled else (lambda rel: None)),
         })
 
     # ── Product-Spine §4.5 — conservation flow accounting (on-flow ≤ 1) ─
@@ -798,6 +805,22 @@ def apply_feature_loc(
             "samples": sorted(art_samples),
         }
     return result
+
+
+def _non_code_owned(
+    root: Path, owner_by_file: dict[str, str], ink_class_of: Any,
+) -> dict[str, str]:
+    """``path -> class`` of the owned files that are not code by their own
+    properties. A file a path convention of the ink drain already names is
+    not asked: its lines have left ``loc`` already. One bounded read each."""
+    found: dict[str, str] = {}
+    for rel in sorted(owner_by_file):
+        if ink_class_of(rel):
+            continue
+        cls = non_code_class(root / rel, rel)
+        if cls is not None:
+            found[rel] = cls
+    return found
 
 
 def _merged_span_len(intervals: list[tuple[int, int]]) -> int:

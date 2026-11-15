@@ -503,7 +503,7 @@ def run_finalize_phase(
         "paths_removed": 0,
         "features_dropped": 0,
         "flows_dropped": 0,
-        "flow_entries_recomputed": 0,
+        "flows_dropped_test_entry": 0,
     }
     write_stage_input(run_dir, 6, "test_strip", {
         "features": features,
@@ -515,12 +515,12 @@ def run_finalize_phase(
             test_strip_telemetry = strip_test_paths(features, bipartite.flows)
             log6_9.info(
                 "test_strip: paths_removed=%d features_dropped=%d "
-                "flows_dropped=%d flow_entries_recomputed=%d"
+                "flows_dropped=%d flows_dropped_test_entry=%d"
                 % (
                     test_strip_telemetry["paths_removed"],
                     test_strip_telemetry["features_dropped"],
                     test_strip_telemetry["flows_dropped"],
-                    test_strip_telemetry["flow_entries_recomputed"],
+                    test_strip_telemetry["flows_dropped_test_entry"],
                 ),
             )
         else:
@@ -662,6 +662,7 @@ def run_finalize_phase(
     # 2026-07-06: the Shared Platform PF no longer exists on this path).
     # Deterministic, $0 LLM. Kill-switch WYSTAN_SPINE_ANCHORED_MINT=0
     # restores the old path byte-identically.
+    from wystan.pipeline_v2.route_group_split import born_route_groups
     from wystan.pipeline_v2.stage_6_86_anchored_mint import (
         anchored_mint_enabled,
         run_anchored_mint,
@@ -752,6 +753,7 @@ def run_finalize_phase(
                     # WYSTAN_MINT_EMPTY_HONEST on an empty mint.
                     repo_class=getattr(
                         repo_class_result, "repo_class", None),
+                    born_route_groups=born_route_groups(scan_meta),
                 )
                 # B69-v2 — pop the anchor-registry side-channel BEFORE the
                 # tele reaches scan_meta / the stage artifact (live
@@ -1088,6 +1090,7 @@ def run_finalize_phase(
                     tracker=tracker,
                     llm_health=llm_health,
                     log=log_frd,
+                    born_rows=frozenset(born_route_groups(scan_meta)),
                 )
                 if frd_tele is not None:
                     scan_meta["flow_rederive"] = frd_tele
@@ -1451,6 +1454,7 @@ def run_finalize_phase(
                 # Call-2, the per-item membership oracle (RC1), retires.
                 anchored=anchored_mint_applied,
                 interior_evidence=_s67d_interior,
+                born_rows=frozenset(born_route_groups(scan_meta)),
             )
             # Re-stamp dev features' product_feature_id so the bipartite /
             # output linkage stays coherent with the rewritten product layer.
@@ -4778,6 +4782,129 @@ def run_finalize_phase(
                     feature=None,
                 )
 
+    # ── Features with no product-language name, judged before the split ──
+    # The naming pass removes the features it cannot name, after a model's
+    # second opinion (demotion veto). Run here, before the capability split,
+    # so that in this same scan the split sees the product layer as it will
+    # be: a feature the veto keeps is a feature, and the journeys of a
+    # removed one are parentless and can be grouped. The two later calls
+    # stay where they were and judge what the passes in between produce.
+    if anchored_mint_applied and not uf_suppressed:
+        try:
+            from wystan.pipeline_v2.product_language_names import (
+                name_product_layer as _name_features_first,
+            )
+            _nf_tele = _name_features_first(
+                features, product_features, user_flows, list(bipartite.flows),
+                ctx=ctx, routes_index=lineage_result.routes_index, name_flows=False,
+                llm={
+                    "model_id": model_id, "cost_tracker": tracker,
+                    "cache": getattr(ctx, "cache_backend", None),
+                    "llm_health": llm_health,
+                },
+            )
+            scan_meta["unnameable_features_removed"] = _nf_tele["features_removed"]
+            scan_meta["demotion_veto"] = _nf_tele.get("demotion_veto")
+            scan_meta["entry_reach_coverage"] = _nf_tele.get("entry_reach_coverage")
+        except Exception as exc:  # noqa: BLE001 — never break a scan
+            scan_meta.setdefault("warnings", []).append(
+                f"early unnameable-feature removal failed ({exc}); none removed"
+            )
+
+    # ── Capability split ────────────────────────────────────────────────
+    # A product feature that holds most of the product's journeys is split
+    # into the capabilities inside it (one model call per such feature and
+    # one for the parentless journeys on unowned code). Here: after the last
+    # structural pass that sets a journey's parent or a developer feature's
+    # owner before anything is counted, and before the metric and line-count
+    # passes, so nothing is counted on the unsplit layer and nothing has to
+    # run twice (order checked in finalize_passes.py).
+    if anchored_mint_applied and not uf_suppressed:
+        with StageLogger(run_dir, 6, "capability_split") as log_cs:
+            try:
+                from wystan.pipeline_v2.capability_split import (
+                    product_name_of,
+                    run_capability_split,
+                )
+                from wystan.pipeline_v2.product_language_names import (
+                    feature_name_judges,
+                )
+                _cs_laws, _cs_stated = feature_name_judges(
+                    features, product_features, list(bipartite.flows), ctx)
+                _cs_tele = run_capability_split(
+                    product_features, user_flows, features,
+                    list(bipartite.flows), list(bipartite.edges),
+                    product=product_name_of(ctx.repo_path),
+                    violations=_cs_laws, stated_names=_cs_stated,
+                    loc_ledger=_pf_loc_ledger,
+                    llm={
+                        "cost_tracker": tracker,
+                        "cache": getattr(ctx, "cache_backend", None),
+                        "llm_health": llm_health,
+                    },
+                )
+                scan_meta["capability_split"] = _cs_tele
+                log_cs.info(
+                    "capability_split: applied=%s reason=%s pools=%d minted=%d "
+                    "journeys_moved=%d files_carved=%d" % (
+                        _cs_tele["applied"], _cs_tele["reason"], len(_cs_tele["pools"]),
+                        _cs_tele["features_minted"], _cs_tele["journeys_moved"],
+                        _cs_tele["files_carved"],
+                    ),
+                    feature=None,
+                )
+            except Exception as exc:  # noqa: BLE001 — never break a scan
+                scan_meta["capability_split"] = {"applied": False, "reason": f"failed: {exc}"[:200]}
+                scan_meta.setdefault("warnings", []).append(
+                    f"capability split failed ({exc}); product layer left as it was"
+                )
+                log_cs.info(f"capability_split: FAILED ({exc}) — continuing", feature=None)
+
+    # ── Name or reject ──────────────────────────────────────────────────
+    # A product owner's reading of the features the product did not name:
+    # keep, rename from the feature's own evidence, or not a capability.
+    # After the veto and the split (their features are judged too), before
+    # the metric passes and before the later naming calls, which apply the
+    # laws and the confidence cap to what is left.
+    if anchored_mint_applied and not uf_suppressed:
+        with StageLogger(run_dir, 6, "feature_names") as log_fn:
+            try:
+                from wystan.pipeline_v2.capability_split import product_name_of as _product_name
+                from wystan.pipeline_v2.feature_names import run_feature_names
+                from wystan.pipeline_v2.product_language_names import (
+                    JOINS_PREFIX as _joins_prefix,
+                    feature_name_judges as _name_judges,
+                )
+                _fn_laws, _ = _name_judges(features, product_features, list(bipartite.flows), ctx)
+                _fn_tele = run_feature_names(
+                    product_features,
+                    [f for f in features if getattr(f, "layer", None) != "product"],
+                    user_flows, list(bipartite.flows),
+                    product=_product_name(ctx.repo_path),
+                    violations=_fn_laws, joins_prefix=_joins_prefix,
+                    llm={
+                        "cost_tracker": tracker,
+                        "cache": getattr(ctx, "cache_backend", None),
+                        "llm_health": llm_health,
+                    },
+                )
+                scan_meta["feature_names"] = _fn_tele
+                log_fn.info(
+                    "feature_names: candidates=%d renamed=%d not_a_capability=%d "
+                    "too_large=%d disagreed=%d" % (
+                        _fn_tele["candidates"], len(_fn_tele["renamed"]),
+                        len(_fn_tele["not_a_capability"]), len(_fn_tele["too_large_to_reject"]),
+                        len(_fn_tele["disagreed"]),
+                    ),
+                    feature=None,
+                )
+            except Exception as exc:  # noqa: BLE001 — never break a scan
+                scan_meta["feature_names"] = {"applied": False, "reason": f"failed: {exc}"[:200]}
+                scan_meta.setdefault("warnings", []).append(
+                    f"feature name-or-reject failed ({exc}); names left as they were"
+                )
+                log_fn.info(f"feature_names: FAILED ({exc}) — continuing", feature=None)
+
     # ── Stage 6.998 — B76 metrics recompute-on-emission ────────────────
     # Stage 6 stamped commit metrics ONCE, before the whole Layer-2
     # surgery; every post-Stage-6 mint (8.9 subdecompose / 6.87
@@ -5143,10 +5270,12 @@ def run_finalize_phase(
     if flow_name_v2_enabled():
         with StageLogger(run_dir, 7, "flow_name_v2") as log_fnv2:
             try:
+                from wystan.pipeline_v2.capability_split import carved_from
                 _fnv2_tele = apply_flow_name_v2(
                     list(bipartite.flows),
                     routes_index=lineage_result.routes_index,
                     repo_path=ctx.repo_path,
+                    naming_owner=carved_from(features),
                 )
                 log_fnv2.info(
                     "flow_name_v2: renamed %d/%d flows (route=%d symbol=%d "
@@ -5668,7 +5797,15 @@ def run_finalize_phase(
                 "llm_health": llm_health,
             },
         )
-        scan_meta["unnameable_features_removed"] = _unf_tele["features_removed"]
+        from wystan.pipeline_v2.demotion_veto import merge_counts as _merge_counts
+        scan_meta["unnameable_features_removed"] = _merge_counts(
+            scan_meta.get("unnameable_features_removed"), _unf_tele["features_removed"])
+        scan_meta["demotion_veto"] = _merge_counts(
+            scan_meta.get("demotion_veto"), _unf_tele.get("demotion_veto"))
+        # Which features this pass removes depends on page reach; record
+        # how much of it there was (below the floor nothing is removed for
+        # having no surface).
+        scan_meta["entry_reach_coverage"] = _unf_tele.get("entry_reach_coverage")
     except Exception as exc:  # noqa: BLE001 — never break a scan
         scan_meta.setdefault("warnings", []).append(
             f"unnameable-feature removal failed ({exc}); none removed"
@@ -6116,6 +6253,12 @@ def run_finalize_phase(
                 },
             )
             scan_meta["entry_points"] = pln_tele.pop("entry_points", None)
+            from wystan.pipeline_v2.demotion_veto import merge_counts as _merge_veto
+            scan_meta["demotion_veto"] = _merge_veto(
+                scan_meta.get("demotion_veto"), pln_tele.pop("demotion_veto", None))
+            scan_meta["entry_reach_coverage"] = pln_tele.pop(
+                "entry_reach_coverage", scan_meta.get("entry_reach_coverage"))
+            scan_meta["agents"] = _agent_units_report(ctx)
             scan_meta["product_language_names"] = pln_tele
             # The writer's calls happen after the full-bill refresh above.
             scan_meta["cost_usd"] = round(tracker.total_cost_usd, 4)
@@ -6135,6 +6278,58 @@ def run_finalize_phase(
                 f"product-language-names failed ({exc}); names left as-is"
             )
             log_pln.info(f"product_language_names: FAILED ({exc})", feature=None)
+
+    # ── Orphan journeys, last look ──────────────────────────────────────
+    # The path-attach runs mid-finalize. Passes after it still move code
+    # between product features and dissolve containers, and the naming pass
+    # just above is the last of them (a feature with no page of its own joins
+    # the feature whose pages show it). That leaves real journeys with no
+    # parent although one feature now owns their code (langflow: 14 journeys
+    # beside a feature showing one). Ownership is final only here, so each
+    # parentless journey is judged once more, by the product feature that
+    # owns its member flows.
+    try:
+        from wystan.pipeline_v2.orphan_uf_path_attach import run_orphan_uf_owner_attach
+        scan_meta["orphan_uf_owner_attach"] = run_orphan_uf_owner_attach(
+            product_features, features, user_flows, list(bipartite.flows))
+    except Exception as exc:  # noqa: BLE001 — attach never breaks a scan
+        scan_meta.setdefault("warnings", []).append(
+            f"orphan-uf owner-attach failed ({exc}); orphans left"
+        )
+
+    # The platform lane was written mid-phase. Developer features that gave
+    # files to a carved one, or gained an owner, since then are brought up to
+    # date, so no line is in the lane and under a product feature at once.
+    try:
+        from wystan.pipeline_v2.ownership_moves import product_layer_total, sync_lane_rows
+        scan_meta["lane_sync"] = sync_lane_rows(platform_infrastructure, features, product_features)
+        scan_meta["product_layer_lines"] = product_layer_total(
+            product_features, [f for f in features if getattr(f, "layer", None) != "product"])
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
+        scan_meta.setdefault("warnings", []).append(f"lane sync failed ({exc}); lane rows left")
+
+    # Lines of code are reported as code. Until here ``loc`` held every
+    # counted line, so that no pass above decided differently because a
+    # feature's file is a vocabulary or a bundle; ownership is final now and
+    # only the map's readers are left. After the lane sync, so the sync
+    # compares and counts the lines every pass above saw; the settle then
+    # moves on a lane row the lines it moves on that row's developer row.
+    try:
+        from wystan.pipeline_v2.code_lines import settle_code_lines
+        _code_lines_tele = settle_code_lines(
+            features, product_features, _pf_loc_ledger,
+            lineage_result.path_index, scan_meta.get("loc_accounting"),
+            lane_rows=platform_infrastructure)
+        if _code_lines_tele is not None:
+            scan_meta["code_lines"] = _code_lines_tele
+            # The product layer's total was taken by the lane sync above,
+            # on the lines before the settle; it reports code lines too.
+            from wystan.pipeline_v2.ownership_moves import product_layer_total
+            scan_meta["product_layer_lines"] = product_layer_total(
+                product_features, [f for f in features if getattr(f, "layer", None) != "product"])
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
+        scan_meta.setdefault("warnings", []).append(
+            f"code-lines settle failed ({exc}); loc includes non-code files")
 
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import
@@ -6184,3 +6379,17 @@ def run_finalize_phase(
 __all__ = [
     "run_finalize_phase",
 ]
+
+
+def _agent_units_report(ctx: Any) -> dict[str, Any] | None:
+    """Agents, tools, skills and MCP servers the repository declares, by kind.
+
+    A report only (``scan_meta.agents``): nothing here changes features or
+    flows. ``None`` when the collection fails, so it never stops a scan."""
+    try:
+        from wystan.pipeline_v2.agents import agent_report, collect_agent_units
+
+        units, facts = collect_agent_units(ctx)
+        return agent_report(units, facts)
+    except Exception:  # noqa: BLE001 — a report, never a requirement
+        return None

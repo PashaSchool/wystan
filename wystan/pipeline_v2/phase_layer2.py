@@ -13,7 +13,7 @@ artifact filenames, same telemetry keys.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,7 @@ from wystan.pipeline_v2.stage_8_6_5_scaffold_filter import (
 from wystan.pipeline_v2.stage_8_6_7_di_attribution import (
     attribute_di_services,
 )
+from wystan.pipeline_v2.route_group_split import RouteSplitInput
 from wystan.pipeline_v2.stage_8_7_anchor_desink import (
     desink_workspace_anchors,
 )
@@ -93,6 +94,9 @@ class Layer2Result:
     stage_8_9_5_telemetry: dict[str, Any]
     stage_8_9_6_telemetry: dict[str, Any]
     stage_8_9_7_telemetry: dict[str, Any]
+    #: ``{old flow id: FlowMove}`` of flows Stage 8.9 moved onto a
+    #: route-group row (``route_group_split.FlowMove``).
+    stage_8_9_flow_moves: dict[str, Any] = field(default_factory=dict)
 
 
 def run_layer2_phase(
@@ -109,6 +113,7 @@ def run_layer2_phase(
     incremental_layer2_noop: bool,
     incremental_base_scan: dict[str, Any] | None,
     llm_health: LlmHealth | None = None,
+    route_sites: list[dict[str, Any]] | None = None,
 ) -> Layer2Result:
     """Run Stage 8 → rollup → 8.5 → 8.6 over the enriched feature set.
 
@@ -570,10 +575,23 @@ def run_layer2_phase(
     # sub-features inherit the anchor's product_feature_id so product paths
     # are byte-stable. Deterministic, no LLM, scale-invariant (grain floor =
     # repo median feature size). Default ON; WYSTAN_STAGE_8_9_SUBDECOMPOSE=0.
-    write_stage_input(run_dir, 8, "anchor_subdecompose", {"features": features})
+    # A flat oversized row has no directory to split along; the route sites
+    # let 8.9 group its files by the route group they handle instead.
+    # The capture carries them only where an extractor declared route sites,
+    # so every other repository's capture is what it was.
+    route_sites = list(route_sites or [])
+    stage_8_9_input: dict[str, Any] = {"features": features}
+    if route_sites:
+        stage_8_9_input["route_sites"] = route_sites
+        stage_8_9_input["repo_path"] = str(ctx.repo_path)
+    write_stage_input(run_dir, 8, "anchor_subdecompose", stage_8_9_input)
     with StageLogger(run_dir, 8, "anchor_subdecompose") as log8_9:
-        subdecompose_result = subdecompose_workspace_anchors(features)
+        subdecompose_result = subdecompose_workspace_anchors(
+            features,
+            route_split=RouteSplitInput(route_sites, Path(ctx.repo_path)),
+        )
         stage_8_9_telemetry = subdecompose_result.as_telemetry()
+        stage_8_9_flow_moves = dict(subdecompose_result.flow_moves)
         log8_9.info(
             f"anchor_subdecompose enabled={subdecompose_result.enabled} "
             f"anchors={subdecompose_result.anchors_total} "
@@ -804,6 +822,7 @@ def run_layer2_phase(
         stage_8_9_5_telemetry=stage_8_9_5_telemetry,
         stage_8_9_6_telemetry=stage_8_9_6_telemetry,
         stage_8_9_7_telemetry=stage_8_9_7_telemetry,
+        stage_8_9_flow_moves=stage_8_9_flow_moves,
     )
 
 

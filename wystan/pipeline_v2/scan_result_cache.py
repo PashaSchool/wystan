@@ -3703,7 +3703,81 @@ ENV_OUTPUT_FLAGS = (
 #: KS92-95 (2026-11-10): a page-less feature whose code is imported by the
 #: pages of one part of the product takes that page's name, or joins the
 #: feature that owns the page when no other part imports it.
-KEY_SCHEMA_VERSION = 97
+#: KS98 (2026-11-11): ``scan_meta.agents`` reports the agents, tools, skills
+#: and MCP servers a repository declares.
+#: KS99 (2026-11-11): a product feature's name confidence is capped by its
+#: evidence; a name with none is "low" and says ``not-evidenced``.
+#: KS100 (2026-11-11): parentless journeys are attached a second time, by
+#: the same ownership rule, once code ownership is final.
+#: KS101-104 (2026-11-11): a flow that starts in a test file is dropped instead of
+#: re-pointed; a screen-sized flow no journey claimed joins the journey of
+#: its same-directory neighbours.
+#: KS105 (2026-11-11): a flow above the adoption ceiling is a module and is
+#: not adopted into a journey.
+#: KS106 (2026-11-11): page reach reads files that have no signature (single-file
+#: components, re-export modules) and sigil aliases; below the reach coverage
+#: floor no product feature is judged to have no user surface.
+#: KS107 (2026-11-11): the adoption of journey-less flows by directory is
+#: withdrawn: a shared directory is not evidence that a flow belongs to a
+#: journey (one journey grew from 3 to 82 members).
+#: KS108 (2026-11-11): the name writer's answer is remembered per item, so an
+#: item whose evidence did not change is not asked about again; an item the
+#: writer declined whose current name breaks a law is asked about once more.
+#: KS109 (2026-11-11): a product feature's user surface is judged on all the
+#: code it owns (its developer features' pages and API operations), not on
+#: the anchor's own file list; a journey follows a joined feature only when
+#: its code went there.
+#: KS110 (2026-11-11): a product feature may not be named as an error screen,
+#: a lone object verb or a protocol step; a feature whose page words all break
+#: a law takes its own slug before it is given up.
+#: KS111 (2026-11-11): a product feature that holds most of the product's
+#: journeys, and the parentless journeys on unowned code, are split into
+#: capabilities by one model call per pool; a split-out feature owns the
+#: flows of its journeys and the files only they use.
+#: KS112 (2026-11-11): a product feature about to be removed for having no
+#: name gets a model's verdict first (capability: kept; part of another
+#: feature: joined; plumbing: removed); features are judged a first time
+#: before the capability split.
+#: KS113 (2026-11-11): the capability split moves the lines of the files it
+#: carves (a carved feature no longer carries its donor's line count), leaves
+#: flow ids and names alone, asks again for an unreadable reply and remembers
+#: one that stays unreadable, and no longer counts lines under a removed
+#: parent in a feature's share.
+#: KS114 (2026-11-11): a carved feature's lines are read from the line-count
+#: ledger by developer-feature uuid (they were 0); journeys of features judged
+#: plumbing leave the journey layer; a removed feature's code no longer joins
+#: a feature whose slug only starts with its directory's name; joined code is
+#: counted in its target; a wrong "existing feature" drops one group, not the
+#: reply; a protocol word from a URL is not a shown name; two features do not
+#: keep one name.
+#: KS115 (2026-11-11): product features the product did not name are read by
+#: a model twice (keep, rename from the feature's own evidence, not a
+#: capability); only an answer given both times is applied, and only a small
+#: feature can be rejected.
+#: KS116 (2026-11-11): no late pass deletes a journey (a journey that is not
+#: a product journey stays, parentless and marked); lines move through one
+#: shared rule and the platform lane is brought up to date before output; a
+#: carved feature takes only files its donor is credited with; a URL word
+#: that is another feature's slug is not taken as a name.
+#: KS117 (2026-11-12): ``developer_features`` is written as the ids of the
+#: developer rows of ``features`` instead of a second copy of them (D5).
+#: KS122 (2026-11-12): the journey refiner and the name writer remember an
+#: answer under a key without the scan ordinals (the question sent to the
+#: model is unchanged; the refiner's answer is stored by local id and mapped
+#: back); 118-121 are other branches'.
+#: KS125 (2026-11-13): Stage 8.9 splits a flat oversized row by the route
+#: group its files handle when it has no directory to split along; 123 and
+#: 124 are other branches'.
+#: KS126 (2026-11-13): the map reports lines of code as code; a file that is
+#: unmistakably data, generated, bundled or minified keeps its owner and its
+#: lines are reported as ink (123, 124, 125 are taken by maps).
+#: KS127 (2026-11-13): the route-group split (KS125) merged with KS126; moves
+#: compose, qualified references keep their qualifier, access tiers are not
+#: names.
+#: KS128 (2026-11-13): born-row record and anchor rule changed the map.
+#: KS129 (2026-11-13): a split's residual parent seeds no lattice journey.
+#: KS130 (2026-11-13): the KS129 rule is withdrawn; maps of 129 are not this engine's.
+KEY_SCHEMA_VERSION = 130
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.

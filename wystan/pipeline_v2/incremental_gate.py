@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from wystan.models.types import developer_layer
 from wystan.pipeline_v2.incremental import changed_files_since
 
 if TYPE_CHECKING:
@@ -149,11 +150,8 @@ def base_features_by_name(base_scan: dict[str, Any]) -> dict[str, dict[str, Any]
     the FIRST occurrence wins (Stage 5 slugify already de-collides names
     with ``-2`` suffixes, so duplicates are not expected).
     """
-    base_feats = (
-        base_scan.get("developer_features")
-        or base_scan.get("features")
-        or []
-    )
+    # KS117: ``developer_features`` holds ids; ``features`` holds the rows.
+    base_feats = developer_layer(base_scan)
     out: dict[str, dict[str, Any]] = {}
     for bf in base_feats:
         name = bf.get("name")
@@ -298,11 +296,7 @@ def rehydrate_base_product_features(
                 pf.get("name"), exc,
             )
     dev_map: dict[str, tuple[str, ...]] = {}
-    base_devs = (
-        base_scan.get("developer_features")
-        or base_scan.get("features")
-        or []
-    )
+    base_devs = developer_layer(base_scan)
     for df in base_devs:
         if not isinstance(df, dict):
             continue

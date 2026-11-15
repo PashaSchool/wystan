@@ -10,9 +10,11 @@ built. This pass removes it from what a product owner is shown:
     developer features joins the surviving product feature its code lives
     under by name (``packages/ee/server-only/signing`` joins ``signing``), or
     becomes unowned. When the feature's code is what another feature's pages
-    render, all of it joins that feature. Its user flows follow their developer feature, else the
-    product feature that owns the pages they start on, else lose their
-    parent.
+    render, all of it joins that feature. A user flow goes with the join only
+    when its own code went there: the strong share of its member flows must
+    belong to developer features that now have that home. Otherwise it
+    follows its developer feature, else the product feature that owns the
+    pages it starts on, else it loses its parent.
   * an unnameable **user flow** leaves ``user_flows``. Its member code flows
     stay in the flow layer without a ``user_flow_id``.
 
@@ -24,20 +26,31 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from wystan.pipeline_v2.ownership_moves import credit_lines, mark_not_product
 from wystan.pipeline_v2.product_language_names import JOINS_PREFIX, is_unnameable
 
 __all__ = ["SHARED_REASON", "demote_unnameable_features", "drop_unnameable_flows"]
 
 SHARED_REASON = "unnameable_product_feature"
+# Left on a feature the demotion veto judged to be plumbing: its code goes to
+# the platform lane and its journeys are not product journeys.
+PLUMBING_NOTE = "model:plumbing"
 _MIN_STEM = 4
+# A journey belongs where this share of its member flows is owned: the same
+# share the owner attach uses (orphan_uf_path_attach).
+_STRONG_SHARE = 0.6
 
 
 def _same_stem(left: str, right: str) -> bool:
     if left == right:
         return True
-    return min(len(left), len(right)) >= _MIN_STEM and (
-        left.startswith(right) or right.startswith(left)
-    )
+    if min(len(left), len(right)) < _MIN_STEM:
+        return False
+    shorter, longer = sorted((left, right), key=len)
+    # The same word in another form ("auth", "authentication"), not the first
+    # word of a longer name: a directory called after the product is not the
+    # stem of every feature whose slug starts with the product's name.
+    return longer.startswith(shorter) and longer[len(shorter)].isalnum()
 
 
 def _home_for(dev: Any, survivors: list[str]) -> str | None:
@@ -72,6 +85,34 @@ def _flow_home(user_flow: Any, flows: list[Any], owner_of: dict[str, str]) -> st
     return ranked[0][0]
 
 
+def _code_went_to(
+    user_flow: Any, target: str, flows: list[Any], owner_of_dev: dict[str, str | None],
+) -> bool:
+    """True when the strong share of a user flow's member flows belongs to
+    developer features whose product feature is now ``target``."""
+    members = [flow for flow in flows if flow.user_flow_id == user_flow.id]
+    if not members:
+        return False
+    there = sum(
+        1 for flow in members
+        if owner_of_dev.get(str(getattr(flow, "primary_feature", "") or "")) == target
+    )
+    return there / len(members) >= _STRONG_SHARE
+
+
+def _credit_lines(dev: Any, home: str | None, by_slug: dict[str, Any]) -> None:
+    """A developer feature that moves takes its lines along: the feature it
+    joins is credited with them at once."""
+    credit_lines(int(getattr(dev, "loc", None) or 0), None, by_slug.get(home or ""))
+
+
+def _mark_not_product(not_product: list[Any]) -> list[dict[str, str]]:
+    """Journeys of plumbing that found no product feature are not product
+    journeys. They are not deleted: they stay in the journey layer with no
+    parent and a mark that keeps them out of the capability split."""
+    return [mark_not_product(journey) for journey in sorted(not_product, key=lambda j: str(j.id))]
+
+
 def _joined_feature(feature: Any, survivors: list[str]) -> str | None:
     """The surviving feature whose page shows this one's code, when the
     naming pass recorded one."""
@@ -95,11 +136,18 @@ def demote_unnameable_features(
     telemetry: dict[str, Any] = {"demoted": [], "devs_rehomed": 0, "devs_unowned": 0}
     joins = {pf.name: _joined_feature(pf, survivors) for pf in demoted}
     telemetry["joined"] = {name: target for name, target in joins.items() if target}
+    plumbing = {pf.name for pf in demoted if PLUMBING_NOTE in (pf.name_evidence or [])}
+    by_slug = {pf.name: pf for pf in product_features}
     new_home: dict[str, str | None] = {}
+    moved_from: dict[str, list[str]] = {}
     for dev in sorted(developer_features, key=lambda d: d.name):
         if dev.product_feature_id not in gone:
             continue
-        home = joins.get(dev.product_feature_id) or _home_for(dev, survivors)
+        # Plumbing has no home by resemblance: only a stated join moves it.
+        by_name = None if dev.product_feature_id in plumbing else _home_for(dev, survivors)
+        home = joins.get(dev.product_feature_id) or by_name
+        moved_from.setdefault(dev.product_feature_id, []).append(dev.name)
+        _credit_lines(dev, home, by_slug)
         new_home[dev.name] = home
         dev.product_feature_id = home
         if home is None:
@@ -113,19 +161,45 @@ def demote_unnameable_features(
         for path in pf.paths or []
     }
     telemetry["flows_rehomed"] = telemetry["flows_unparented"] = 0
+    telemetry["flows_not_following_join"] = 0
+    owner_of_dev = {dev.name: dev.product_feature_id for dev in developer_features}
+    journeys_of: Counter[str] = Counter()
+    all_flows = list(flows)
+    not_product: list[Any] = []
     for user_flow in user_flows:
         if user_flow.product_feature_id not in gone:
             continue
-        home = joins.get(user_flow.product_feature_id) or new_home.get(
-            str(getattr(user_flow, "domain", "") or ""))
-        user_flow.product_feature_id = home or _flow_home(user_flow, list(flows), owner_of)
+        journeys_of[user_flow.product_feature_id] += 1
+        joined = joins.get(user_flow.product_feature_id)
+        if joined and not _code_went_to(user_flow, joined, all_flows, owner_of_dev):
+            # The feature joined another one; this journey's code did not.
+            telemetry["flows_not_following_join"] += 1
+            joined = None
+        home = joined or new_home.get(str(getattr(user_flow, "domain", "") or ""))
+        was_plumbing = user_flow.product_feature_id in plumbing
+        user_flow.product_feature_id = home or _flow_home(user_flow, all_flows, owner_of)
+        if was_plumbing and not user_flow.product_feature_id:
+            not_product.append(user_flow)
+            continue
         key = "flows_rehomed" if user_flow.product_feature_id else "flows_unparented"
         telemetry[key] += 1
     for pf in demoted:
         product_features.remove(pf)
         telemetry["demoted"].append({
             "pf": pf.name, "name": pf.display_name, "laws": list(pf.name_evidence or []),
+            "journeys": journeys_of.get(pf.name, 0),
         })
+    # How much of the journey layer sat on features that were removed.
+    telemetry["journeys_on_demoted"] = sum(journeys_of.values())
+    telemetry["plumbing_journeys"] = _mark_not_product(not_product)
+    # A removed feature's own line count leaves with it; what its developer
+    # features carry stays. The difference is the part of any change in the
+    # layer's total that this removal explains.
+    telemetry["ruler_gap"] = sum(
+        sum(int(getattr(d, "loc", None) or 0) for d in developer_features if d.name in moved_from.get(pf.name, ()))
+        - int(getattr(pf, "loc", None) or 0)
+        for pf in demoted if getattr(pf, "loc", None) is not None
+    )
     return telemetry
 
 

@@ -188,10 +188,25 @@ import os
 import re
 import statistics
 import uuid as _uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from wystan.pipeline_v2.route_group_ledger import RouteSplitLedger
+from wystan.pipeline_v2.route_group_split import (
+    BORN_ROWS_KEY,
+    ROUTE_GROUP_DOMAIN_PREFIX,
+    SKIP_DANGLING_REFERENCE,
+    SKIP_MOVE_CYCLE,
+    FlowMove,
+    MoveKey,
+    RoutePlan,
+    RouteSplitInput,
+    has_flow_identity,
+    move_key,
+    plan_route_group_split,
+)
+from wystan.pipeline_v2.stage_5_5_bipartite import _flow_id
 from wystan.pipeline_v2.stage_8_7_anchor_desink import _FILE_KEYED_SURFACES
 
 if TYPE_CHECKING:
@@ -479,7 +494,10 @@ class SubdecomposeResult:
     subfeatures_created: int = 0
     paths_moved: int = 0             # owned files relocated to sub-features
     members_deowned: int = 0         # residual member files flipped to shared
-    iterations: int = 0              # fixed-point recursion levels actually run
+    # Fixed-point recursion levels actually run. It counts attempts: a level
+    # run for rows a split bore is counted even when that split is later
+    # undone (route-group undo takes back every other count, not this one).
+    iterations: int = 0
     depth_cap_hit: bool = False      # safety cap reached (should never happen)
     floor_by_feature: dict[str, int] = field(default_factory=dict)
     split_sample: list[dict[str, Any]] = field(default_factory=list)
@@ -489,6 +507,24 @@ class SubdecomposeResult:
     husks_kept_residual: int = 0     # husks kept as de-duped 0-owned shared bucket
     husk_members_deduped: int = 0    # double-count shared members removed from husks
     husk_files_conserved: int = 0    # distinct sole-held files kept (never dropped)
+    # Rows split by route group because they had no directory to split along.
+    route_group_splits: int = 0
+    # Route groups the anti-shatter cap left in their parent's residual.
+    route_group_capped: int = 0
+    # ``{row name: route group key}`` of the rows the route-group split bore:
+    # the stage's record of them, read by later stages through scan_meta.
+    route_group_born: dict[str, str] = field(default_factory=dict)
+    # Flows that entered a born row's file but stayed with the parent: another
+    # flow of the row shares both their id and their entry file.
+    route_group_flows_unmoved: int = 0
+    # Rows the route-group planner was consulted for and stopped on a bound:
+    # ``{"row", "reason", "files", "route_sites"}`` (names and counts only).
+    route_group_skipped: list[dict[str, Any]] = field(default_factory=list)
+    # ``{(old flow id, entry file): FlowMove}`` of flows that followed their
+    # entry file onto a route-group row, closed: each old id maps to the row and id the flow
+    # holds at the end of the stage. Not telemetry: the orchestrator reads it
+    # to rewrite the edges and copies that still name a moved flow's old id.
+    flow_moves: dict[MoveKey, FlowMove] = field(default_factory=dict)
 
     # Back-compat aliases (older telemetry consumers / tests expect these).
     @property
@@ -500,6 +536,22 @@ class SubdecomposeResult:
         return self.features_split
 
     def as_telemetry(self) -> dict[str, Any]:
+        telemetry = self._base_telemetry()
+        # Present only when the route-group planner fired, so the artifact of
+        # every other scan is byte-identical to the one before the planner.
+        if self.route_group_splits:
+            telemetry["route_group_splits"] = self.route_group_splits
+        if self.route_group_capped:
+            telemetry["route_group_capped"] = self.route_group_capped
+        if self.route_group_flows_unmoved:
+            telemetry["route_group_flows_unmoved"] = self.route_group_flows_unmoved
+        if self.route_group_born:
+            telemetry[BORN_ROWS_KEY] = dict(self.route_group_born)
+        if self.route_group_skipped:
+            telemetry["route_group_skipped"] = list(self.route_group_skipped)
+        return telemetry
+
+    def _base_telemetry(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "features_total": self.features_total,
@@ -525,6 +577,17 @@ def _is_enabled() -> bool:
 
 
 # ── Owned-file model (mirrors eval/cold_eval._owned_file_set) ────────────────
+
+
+def _member_owned_paths(feature: "Feature") -> list[str]:
+    """The files *feature* owns by its members (``primary`` or an owning
+    role), without :func:`_owned_paths`' fallback to ``paths``."""
+    return [
+        m.path for m in (getattr(feature, "member_files", None) or [])
+        if isinstance(getattr(m, "path", None), str)
+        and (getattr(m, "primary", False)
+             or getattr(m, "role", None) in ("anchor", "owner"))
+    ]
 
 
 def _owned_paths(feature: "Feature") -> list[str]:
@@ -1392,6 +1455,9 @@ def _split_one_feature(
     max_domains: int,
     used_names: set[str],
     result: SubdecomposeResult,
+    route_split: RouteSplitInput | None = None,
+    rows_owned: dict[int, list[str]] | None = None,
+    ledger: RouteSplitLedger | None = None,
 ) -> list["Feature"] | None:
     """Decompose ONE oversized feature into per-domain sub-features.
 
@@ -1407,6 +1473,14 @@ def _split_one_feature(
     ``cut`` is judged oversized by the SAME standard as a top-level feature.
     This is what makes the fixed point scale-invariant: every level is measured
     against one stable repo-grain ruler, not a per-level drifting one.
+
+    *route_split* (route sites + repository root) arms the second planner: a
+    row with NO directory plan whose files sit in one directory is grouped by
+    the route group its files handle (:mod:`route_group_split`). ``None``
+    leaves the directory planner alone. *rows_owned* (``id(row) -> owned
+    files`` of the stage-start rows) is the ruler of a route-group row's
+    size: the other rows' median lines. *ledger* keeps the route-group
+    splits and their flow moves for the end of the stage.
     """
     owned = _owned_paths(source)
     if len(owned) <= cut:
@@ -1422,6 +1496,23 @@ def _split_one_feature(
     path_only = [p for p in (getattr(source, "paths", None) or []) if p not in owned]
 
     domains, residual = _plan_split(owned, floor, max_domains=max_domains)
+    # Route-group rows arrive already named (the URL segment); a directory
+    # domain is named from its leaf by ``_slug`` below.
+    is_route_plan = False
+    # The route-group plan sees only the files the row owns by its members,
+    # never the ``paths`` fallback: a row owning none is no source of it.
+    route_owned = _member_owned_paths(source)
+    if not domains and route_split is not None and len(route_owned) > cut:
+        plan = plan_route_group_split(
+            route_owned, route_split, parent_name=source.name,
+            used_names=used_names,
+            other_rows=_other_rows(source, rows_owned or {}),
+            max_domains=max_domains,
+        )
+        domains, residual = plan.domains, plan.residual
+        is_route_plan = bool(domains)
+        if not is_route_plan:
+            _record_route_plan(source, plan, route_split, result)
     if not domains:
         return None  # no decomposable domain structure → fixed point
 
@@ -1432,8 +1523,16 @@ def _split_one_feature(
     if not residual:
         smallest = min(domains, key=lambda k: len(domains[k]))
         residual = domains.pop(smallest)
+        if is_route_plan:
+            used_names.discard(smallest)  # the name was reserved, not minted
         if len(domains) < 1:
             return None
+
+    if is_route_plan:
+        return _mint_route_group_rows(
+            source, plan._replace(domains=domains, residual=residual),
+            _RouteSplitContext(route_split, used_names, ledger or RouteSplitLedger(),
+                               result))
 
     minted: list["Feature"] = []
     moved_files: set[str] = set()
@@ -1461,8 +1560,200 @@ def _split_one_feature(
     return minted
 
 
+def _record_route_plan(
+    source: "Feature", plan: RoutePlan, route_split: RouteSplitInput,
+    result: SubdecomposeResult,
+) -> None:
+    """Telemetry of one route-group plan: the groups the cap left behind
+    when the row split, and the bound that stopped it when it did not (a
+    cap is never silent)."""
+    if plan.domains:
+        result.route_group_capped += plan.groups_capped
+    if plan.skip_reason:
+        result.route_group_skipped.append({
+            "row": source.name,
+            "reason": plan.skip_reason,
+            "files": len(plan.residual),
+            "route_sites": len(route_split.route_sites or ()),
+        })
+
+
+def _other_rows(
+    source: "Feature", rows_owned: dict[int, list[str]],
+) -> list[list[str]]:
+    """Owned files of every stage-start row except *source*, the row being
+    split (its own size must not set the ruler it is measured by)."""
+    return [paths for key, paths in rows_owned.items()
+            if key != id(source) and paths]
+
+
+@dataclass(frozen=True)
+class _RouteSplitContext:
+    """What minting a route-group split reads and writes beside the row."""
+
+    route_split: RouteSplitInput
+    used_names: set[str]
+    ledger: RouteSplitLedger
+    result: SubdecomposeResult
+
+
+def _mint_route_group_rows(
+    source: "Feature", plan: RoutePlan, ctx: _RouteSplitContext,
+) -> list["Feature"] | None:
+    """Mint one row per route group of *source* and leave the rest with it.
+
+    Unlike a directory split, the source is NOT de-owned: it keeps its name,
+    its identity and every file no group took, as their owner. A flat row has
+    no scaffold to disown; what stays is real code (helpers, the entry point,
+    handlers of a single route) and must keep a primary row. Each flow follows
+    the file its entry point lives in, with its name unchanged and its id
+    derived from its new row, so a born row is homed by its own flows
+    and not by the parent's. ``None`` (the row stays whole, recorded) when
+    the moves would lead back to an id they started from."""
+    domains, result = plan.domains, ctx.result
+    planned, unmoved = _planned_flow_moves(source, domains)
+    route_sites = len(ctx.route_split.route_sites or ())
+    refusal = _refusal(source, planned, ctx.ledger)
+    if refusal:
+        ctx.used_names.difference_update(domains)  # reserved, never minted
+        result.route_group_skipped.append({
+            "row": source.name, "reason": refusal,
+            "files": len(_owned_paths(source)), "route_sites": route_sites,
+        })
+        return None
+    _record_route_plan(source, plan, ctx.route_split, result)
+    split = ctx.ledger.open_split(
+        source, files=len(_owned_paths(source)), route_sites=route_sites)
+    minted: list["Feature"] = []
+    moved_files: set[str] = set()
+    for name, files in domains.items():
+        # the domain key is the route group, as a directory row's is its
+        # directory; the ledger records it for later stages
+        group = (plan.groups or {}).get(name, name)
+        row = _make_subfeature(
+            source, ROUTE_GROUP_DOMAIN_PREFIX + group, files, name)
+        ctx.ledger.record_born(split, row, group)
+        minted.append(row)
+        moved_files.update(files)
+    _release_moved_files(source, moved_files)
+    flow_moves = _move_flows_to_entry_rows(source, minted, planned)
+    ctx.ledger.record_moves(split, flow_moves)
+    result.features_split += 1
+    result.subfeatures_created += len(minted)
+    result.paths_moved += len(moved_files)
+    result.route_group_splits += 1
+    result.route_group_flows_unmoved += unmoved
+    if len(result.split_sample) < 20:
+        sample = {
+            "feature": source.name,
+            "domains": len(minted),
+            "moved": len(moved_files),
+            "residual": len(_owned_paths(source)),
+            "names": sorted(domains)[:25],
+            "plan": "route-group",
+            "flows_moved": len(flow_moves),
+        }
+        if unmoved:
+            sample["flows_unmoved"] = unmoved
+        result.split_sample.append(sample)
+    return minted
+
+
+def _refusal(
+    source: "Feature", planned: list[tuple[Any, FlowMove]],
+    ledger: RouteSplitLedger,
+) -> str | None:
+    """Why the split must not be made, decided before anything is minted:
+    its moves would lead back to an id they started from, or an id that
+    flows sharing it would leave for two rows, with none staying, so its
+    edges could follow neither (the end-of-stage invariant would undo the
+    split, after later rows were named around it)."""
+    if ledger.would_cycle([move for _flow, move in planned]):
+        return SKIP_MOVE_CYCLE
+    moving = {id(flow) for flow, _move in planned}
+    staying = {getattr(f, "id", None) for f in getattr(source, "flows", None) or []
+               if id(f) not in moving}
+    ends: dict[str, set[str]] = defaultdict(set)
+    for _flow, move in planned:
+        ends[move.old_id].add(move.new_id)
+    if any(len(end) > 1 and old_id not in staying for old_id, end in ends.items()):
+        return SKIP_DANGLING_REFERENCE
+    return None
+
+
+def _release_moved_files(source: "Feature", moved: set[str]) -> None:
+    """Take *moved* out of the source's ledgers; everything else it had stays
+    exactly as it was (same role, same primary mark)."""
+    source.member_files = [
+        m for m in (getattr(source, "member_files", None) or [])
+        if getattr(m, "path", None) not in moved
+    ]
+    source.paths = [p for p in (getattr(source, "paths", None) or []) if p not in moved]
+    for attr, file_field in _FILE_KEYED_SURFACES:
+        items = getattr(source, attr, None)
+        if items:
+            setattr(source, attr, [
+                it for it in items if getattr(it, file_field, None) not in moved])
+
+
+def _planned_flow_moves(
+    source: "Feature", domains: dict[str, list[str]],
+) -> tuple[list[tuple[Any, FlowMove]], int]:
+    """The flows of *source* whose entry file a group takes, each with the
+    move it would make, and how many such flows stay because another flow of
+    the row shares both their id and their entry file (the two cannot be
+    told apart, so neither is moved). Nothing changes here: the moves are
+    checked for a cycle before any row is minted."""
+    row_of_file = {p: name for name, files in domains.items() for p in files}
+    twins = Counter(
+        move_key(flow) for flow in getattr(source, "flows", None) or []
+        if has_flow_identity(flow))
+    planned: list[tuple[Any, FlowMove]] = []
+    unmoved = 0
+    for flow in getattr(source, "flows", None) or []:
+        old_id, entry = move_key(flow)
+        row = row_of_file.get(entry)
+        if row is None or not has_flow_identity(flow):
+            continue
+        if twins[(old_id, entry)] > 1:
+            unmoved += 1
+            continue
+        planned.append(
+            (flow, FlowMove(row, old_id, _flow_id(row, flow.name), entry)))
+    return planned, unmoved
+
+
+def _move_flows_to_entry_rows(
+    source: "Feature", minted: list["Feature"],
+    planned: list[tuple[Any, FlowMove]],
+) -> list[FlowMove]:
+    """Move each *planned* flow of *source* onto the born row its entry file
+    went to. Returns the moves; the stage closes them and the orchestrator
+    rewrites every edge and copy that names a moved flow's old id.
+
+    ``id`` and ``primary_feature`` are derived from the holding row, so both
+    are re-derived here, in the step that moves the flow: a later
+    reprojection (twin merge) re-stamps ids from the holding row and must
+    find nothing to change. ``name`` is not touched, and no flow has a
+    ``uuid`` yet (Stage 6.8 stamps it after this stage, from the name). A
+    flow without an id stays where it is."""
+    row_by_name = {row.name: row for row in minted}
+    moving = {id(flow) for flow, _move in planned}
+    for flow, move in planned:
+        flow.primary_feature = move.row
+        flow.id = move.new_id
+        row_by_name[move.row].flows.append(flow)
+    source.flows = [
+        flow for flow in getattr(source, "flows", None) or []
+        if id(flow) not in moving
+    ]
+    return [move for _flow, move in planned]
+
+
 def subdecompose_oversized_features(
     features: list["Feature"],
+    *,
+    route_split: RouteSplitInput | None = None,
 ) -> SubdecomposeResult:
     """Split OVERSIZED developer features into per-domain sub-features along
     the repo's own directory tree — RECURSIVELY, to a fixed point.
@@ -1568,6 +1859,8 @@ def subdecompose_oversized_features(
     # (rule-stage-8-fixes-must-be-additive).
     split_sources: list["Feature"] = []
     split_source_ids: set[int] = set()
+    # Route-group splits and their flow moves, settled at the end.
+    ledger = RouteSplitLedger(features)
     # Seed the worklist with eligible (non-prior-output) developer features.
     worklist: list["Feature"] = [f for f in devs if not _is_prior_subdomain(f)]
 
@@ -1576,12 +1869,16 @@ def subdecompose_oversized_features(
         iteration += 1
         next_round: list["Feature"] = []
         for source in worklist:
-            minted = _split_one_feature(
-                source,
-                floor=floor, cut=cut, max_domains=max_domains,
-                used_names=used_names, result=result,
-            )
+            with ledger.evaluating(source, result):
+                minted = _split_one_feature(
+                    source,
+                    floor=floor, cut=cut, max_domains=max_domains,
+                    used_names=used_names, result=result,
+                    route_split=route_split, rows_owned=owned_by_feature,
+                    ledger=ledger,
+                )
             if minted:
+                ledger.note_children(source, minted)
                 all_new.extend(minted)
                 if id(source) not in split_source_ids:
                     split_source_ids.add(id(source))
@@ -1607,13 +1904,24 @@ def subdecompose_oversized_features(
     # ACTING on the split sources. Conserves every file. Must run after
     # ``features.extend(all_new)`` so the conservation/claim test sees the full
     # post-stage feature set.
-    _cleanup_husks(features, split_sources, cut=cut, result=result)
+    # A route-group parent keeps the files no group took and its flows: it
+    # is never a husk to drop while it holds any (an undo must find it).
+    _cleanup_husks(
+        features, [s for s in split_sources if not ledger.is_held_parent(s)],
+        cut=cut, result=result)
+    # The flow moves, closed (a born row that split again moved its flows
+    # twice) and checked: every final id is held by a flow, or the split
+    # that broke it is undone whole. Only then do the edges follow them.
+    result.flow_moves = ledger.settle(features, result, used_names)
+    result.route_group_born = ledger.born_groups(features)
     return result
 
 
 # Back-compat alias — phase_layer2 + older callers import this name.
 def subdecompose_workspace_anchors(
     features: list["Feature"],
+    *,
+    route_split: RouteSplitInput | None = None,
 ) -> SubdecomposeResult:
     """Deprecated name retained for the pipeline wiring + existing imports.
 
@@ -1622,7 +1930,7 @@ def subdecompose_workspace_anchors(
     workspace anchors); it now decomposes ANY oversized feature. See
     :func:`subdecompose_oversized_features`.
     """
-    return subdecompose_oversized_features(features)
+    return subdecompose_oversized_features(features, route_split=route_split)
 
 
 __all__ = [

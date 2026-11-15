@@ -53,6 +53,7 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
+from wystan.models.types import developer_layer
 from wystan.pipeline_v2.stage_6_9b_generated_strip import is_generated_path
 
 # ── Language table ──────────────────────────────────────────────────
@@ -265,7 +266,8 @@ def _audit_attribution(
     total_loc: int,
 ) -> dict[str, Any]:
     attributed_paths: set[str] = set()
-    for feat in scan.get("developer_features") or []:
+    # KS117: ``developer_features`` holds ids; the rows live in ``features``.
+    for feat in developer_layer(scan):
         for p in feat.get("paths") or []:
             attributed_paths.add(str(p).replace(os.sep, "/"))
     file_set = set(files)

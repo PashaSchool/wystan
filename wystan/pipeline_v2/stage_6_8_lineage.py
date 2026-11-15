@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from wystan.models.types import Feature, Flow
+from wystan.models.types import Feature, Flow, developer_layer
 from wystan.pipeline_v2.indexes import (
     build_path_index,
     build_routes_index,
@@ -102,11 +102,8 @@ def run_stage_6_8(
         :class:`LineageResult` with the indexes + telemetry.
     """
     # ── Lineage: features ───────────────────────────────────────────
-    base_features = (
-        (base_scan or {}).get("developer_features")
-        or (base_scan or {}).get("features")
-        or []
-    )
+    # KS117: ``developer_features`` holds ids; ``features`` holds the rows.
+    base_features = developer_layer(base_scan or {})
     new_feat_dicts = [_feature_to_dict(f) for f in features]
     feat_records, feat_stats = assign_feature_lineage(
         new_feat_dicts,

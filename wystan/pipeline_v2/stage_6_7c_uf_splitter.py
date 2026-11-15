@@ -46,6 +46,7 @@ from wystan.cache.backend import CacheKind
 from wystan.llm.cost import CostTracker, deterministic_params, estimate_call_cost
 from wystan.pipeline_v2.llm_health import LlmHealth
 from wystan.llm.model_gateway import resolve_model as gateway_model
+from wystan.llm.client import build_client
 
 if TYPE_CHECKING:
     from wystan.cache.backend import CacheBackend
@@ -235,11 +236,11 @@ def _flow_key(flow: "Flow") -> str:
 
 def _default_client_factory() -> Any | None:  # pragma: no cover - IO
     try:
-        from anthropic import Anthropic
+        import anthropic  # noqa: F401 - the SDK must be importable; build_client makes the client
     except Exception:  # noqa: BLE001
         return None
     try:
-        return Anthropic()
+        return build_client()
     except Exception:  # noqa: BLE001
         return None
 

@@ -14,8 +14,9 @@ Pure functions, no IO, no LLM.
 from __future__ import annotations
 
 import re
+from http import HTTPStatus
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 __all__ = ["KIND_FEATURE", "KIND_FLOW", "LawContext", "product_name_violations"]
 
@@ -34,6 +35,8 @@ LAW_VERB_LED = "verb_led"
 LAW_NO_OBJECT = "no_object"
 LAW_NOT_VERB_FIRST = "not_verb_first"
 LAW_IMPLEMENTATION_VERB = "implementation_verb"
+LAW_ERROR_PAGE = "error_page"
+LAW_PROTOCOL_STEP = "protocol_step"
 
 _ROUTE_GLYPHS = re.compile(r"[$:{}\[\]_+/\\]|\.\w")
 _EDGE_PUNCTUATION = " .,;:-–—!?"
@@ -46,6 +49,16 @@ _MIN_STEM = 4
 _ARTICLES = frozenset({"the", "a", "an", "my", "your", "our"})
 # Lead words of a state or an outcome, not of something the user does.
 _OUTCOME_LEADS = frozenset({"unable", "failed", "invalid", "error", "no", "not", "success"})
+_SUBJECT_WORD = re.compile(r"[a-z][a-z0-9]*")
+_NUMBER = re.compile(r"(?<![\w.])\d{3}(?![\w.])")
+# Client and server errors: the statuses a product shows a page for.
+_FIRST_ERROR_STATUS = 400
+_ERROR_STATUS_CODES = frozenset(
+    str(status.value) for status in HTTPStatus if status.value >= _FIRST_ERROR_STATUS
+)
+_ERROR_STATUS_PHRASES = frozenset(
+    status.phrase.lower() for status in HTTPStatus if status.value >= _FIRST_ERROR_STATUS
+)
 
 
 @dataclass(frozen=True)
@@ -127,7 +140,39 @@ def _shared_violations(name: str, words: list[str], ctx: LawContext) -> list[str
     return found
 
 
-def _feature_violations(words: list[str], ctx: LawContext, is_shown: bool) -> list[str]:
+def _is_error_page(name: str, words: list[str], ctx: LawContext) -> bool:
+    """True for the name of an error screen: an HTTP error status code, its
+    standard reason phrase, or nothing but words for "something went wrong"."""
+    if any(code in _ERROR_STATUS_CODES for code in _NUMBER.findall(name)):
+        return True
+    # One-word reason phrases ("Conflict", "Locked") are ordinary product
+    # words; only the error words below reject a single word.
+    error_words = ctx.listed("product_name_error_words")
+    allowed = error_words | ctx.listed("product_name_error_filler")
+    text = " ".join(words)
+    for phrase in _ERROR_STATUS_PHRASES:
+        if " " in phrase and f" {phrase} " in f" {text} ":
+            rest = f" {text} ".replace(f" {phrase} ", " ").split()
+            if all(word in allowed for word in rest):
+                return True
+    return any(word in error_words for word in words) and all(word in allowed for word in words)
+
+
+def _feature_violations(
+    name: str, words: list[str], ctx: LawContext, is_shown: bool,
+) -> list[str]:
+    # An error screen is what the product shows when a capability fails; a
+    # page titled "404" is still not one.
+    if _is_error_page(name, words, ctx):
+        return [LAW_ERROR_PAGE]
+    # A verb that needs an object names a step ("Create", "Edit"), whatever
+    # the page is titled.
+    if len(words) == 1 and words[0] in ctx.listed("product_name_object_verbs"):
+        return [LAW_BARE_VERB]
+    # A protocol step is an endpoint between systems, unless the product
+    # itself presents it under that word.
+    if not is_shown and all(word in ctx.listed("product_name_protocol_words") for word in words):
+        return [LAW_PROTOCOL_STEP]
     # A one-word user-goal verb is how products label a capability ("Share",
     # "Search", "Export"); a one-word implementation verb is not.
     verbs = ctx.listed("product_name_implementation_verbs")
@@ -157,6 +202,32 @@ def _flow_violations(words: list[str], ctx: LawContext, subject: frozenset[str])
     return []
 
 
+def feature_subject(resources: Iterable[str]) -> frozenset[str]:
+    """The nouns a feature's journeys are about, singular and plural: what
+    ``subject`` means for a product feature. The engine and the name gate
+    both build it here, so they cannot judge one name differently."""
+    words: set[str] = set()
+    for resource in resources:
+        for word in _SUBJECT_WORD.findall(str(resource or "").lower()):
+            words.update({word, word + "s", word.rstrip("s")})
+    return frozenset(words)
+
+
+def _is_subject_noun(law: str, words: list[str], subject: frozenset[str]) -> bool:
+    """Two feature laws judge a word by a list: verb-led (the first word is
+    also a verb: "Access Tokens", "Read Replicas") and container (the word
+    is also a layer: "Models"). When that word is what the feature's own
+    journeys are about, it is the capability's noun and the law does not
+    apply."""
+    if not subject or not words:
+        return False
+    if law == LAW_VERB_LED:
+        return words[0] in subject
+    if law == LAW_CONTAINER_NAME:
+        return all(word in subject for word in words)
+    return False
+
+
 def product_name_violations(
     name: str,
     kind: str,
@@ -170,14 +241,18 @@ def product_name_violations(
     ``is_shown`` says the product itself uses this exact text as a page title
     or heading, which lets a one-word feature name that is also a verb stand
     ("Support", "Share"). ``subject`` holds the words for the thing a flow
-    is about; a flow name that starts with one of them is not verb-first."""
+    is about; a flow name that starts with one of them is not verb-first.
+    For a feature it holds the nouns its journeys are about, which excuses a
+    word that is only by a list a verb or a layer."""
     text = (name or "").strip()
     words = [word.lower() for word in _WORD.findall(text)]
     if not words:
-        return [LAW_CONTAINER_NAME]
+        is_status = kind == KIND_FEATURE and _is_error_page(text, words, ctx)
+        return [LAW_ERROR_PAGE if is_status else LAW_CONTAINER_NAME]
     found = _shared_violations(text, words, ctx)
     if kind == KIND_FLOW:
         found += _flow_violations(words, ctx, subject)
     else:
-        found += _feature_violations(words, ctx, is_shown)
+        found += _feature_violations(text, words, ctx, is_shown)
+        found = [law for law in found if not _is_subject_noun(law, words, subject)]
     return found
