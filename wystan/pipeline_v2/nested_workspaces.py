@@ -252,7 +252,7 @@ def _colocated_app_roots(
         )
         if not (has_config or has_spa_host):
             continue
-        name = _package_name(repo_root / d)
+        name = _package_name(repo_root / d, repo_root)
         packages.append(WorkspacePackage(name=name, path=d))
         accepted.append(d)
         signals.append(f"colocated app root at {d}/")

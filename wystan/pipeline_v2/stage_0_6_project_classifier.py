@@ -411,7 +411,7 @@ class ProjectSignals:
 
         # ── dependency signals ──
         pkg_json = ws.package_json if ws.package_json is not None else _read_json_safe(
-            ws_root / "package.json"
+            ws_root / "package.json", repo_root
         )
         client_deps = _deps_matching(pkg_json, _CLIENT_FRAMEWORK_DEPS)
         server_deps = _deps_matching(pkg_json, _SERVER_FRAMEWORK_DEPS)
@@ -448,12 +448,12 @@ class ProjectSignals:
         )
 
         # ── python / rust library shape ──
-        pyproject_text = _read_text_safe(ws_root / "pyproject.toml")
+        pyproject_text = _read_text_safe(ws_root / "pyproject.toml", repo_root)
         has_pyproject_project = (
             pyproject_text is not None and "[project]" in pyproject_text
         )
         has_pyproject_scripts = _pyproject_has_scripts(pyproject_text)
-        cargo_text = _read_text_safe(ws_root / "Cargo.toml")
+        cargo_text = _read_text_safe(ws_root / "Cargo.toml", repo_root)
         has_cargo_package = (
             cargo_text is not None
             and "[package]" in cargo_text
@@ -1311,7 +1311,7 @@ def _synthesize_split_fullstack_workspaces(
                 continue
         except OSError:
             continue
-        pkg = _read_json_safe(d / "package.json")
+        pkg = _read_json_safe(d / "package.json", repo_root)
         synthesized.append(
             Workspace(
                 name=dir_name,

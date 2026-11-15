@@ -396,7 +396,7 @@ def _collect_manifest(
     abs_dir = (repo_root / clf.path).resolve()
 
     # ── JS ──
-    pkg = _read_json_safe(abs_dir / "package.json")
+    pkg = _read_json_safe(abs_dir / "package.json", repo_root)
     pkg_name: str | None = None
     pkg_deps: dict[str, str] = {}
     if isinstance(pkg, dict):
@@ -410,15 +410,15 @@ def _collect_manifest(
                         pkg_deps[k] = v if isinstance(v, str) else ""
 
     # ── Go ──
-    go_text = _read_text_safe(abs_dir / "go.mod")
+    go_text = _read_text_safe(abs_dir / "go.mod", repo_root)
     go_module, go_requires, go_replaces = _parse_go_mod(go_text, clf.path)
 
     # ── Rust ──
-    cargo_text = _read_text_safe(abs_dir / "Cargo.toml")
+    cargo_text = _read_text_safe(abs_dir / "Cargo.toml", repo_root)
     cargo_name, cargo_paths = _parse_cargo(cargo_text, clf.path)
 
     # ── Python ──
-    py_text = _read_text_safe(abs_dir / "pyproject.toml")
+    py_text = _read_text_safe(abs_dir / "pyproject.toml", repo_root)
     py_name, py_paths = _parse_pyproject(py_text, clf.path)
 
     return _ProjectManifest(
