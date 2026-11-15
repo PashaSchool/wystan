@@ -1,3 +1,4 @@
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,8 @@ from wystan.analyzer.git_repository import (
 )
 from wystan.analyzer.git_runner import GitError, run_git
 from wystan.models.types import Commit
+
+logger = logging.getLogger(__name__)
 
 # Regex to extract PR numbers from commit messages.
 # Handles two common GitHub merge strategies:
@@ -228,6 +231,7 @@ def get_commits(
         progress.add_task("Reading git history (fallback)...", total=None)
 
         root = repository_root(repo)
+        shallow_logged = False
         for commit in head_commits(root, max_commits):
             commit_date = datetime.fromtimestamp(
                 commit.committed, tz=timezone.utc
@@ -236,7 +240,14 @@ def get_commits(
             if age_days > days:
                 break
 
-            files_changed = numstat_file_keys(root, commit.sha, commit.parents)
+            if commit.shallow_boundary and not shallow_logged:
+                # Recorded once per walk: the parent of a boundary commit is
+                # not in the clone, so it is diffed as git's shallow view
+                # (a root), as the fast path lists it.
+                logger.warning("git history: shallow_clone at %s; boundary commits diffed as roots", root)
+                shallow_logged = True
+            diff_parents = () if commit.shallow_boundary else commit.parents
+            files_changed = numstat_file_keys(root, commit.sha, diff_parents)
             if src is not None:
                 files_changed = scope_files_to_subpath(files_changed, src)
                 if not files_changed:

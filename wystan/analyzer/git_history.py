@@ -6,7 +6,11 @@ keys of ``git diff --numstat --no-renames`` against the first parent (or
 ``git diff-tree --root`` for a root commit), so the fallback answers what
 it answered before without GitPython. Parents are read from the raw commit
 object, as GitPython read them: ``%P`` follows shallow grafts, so a
-shallow clone's boundary commit would otherwise look like a root.
+shallow clone's boundary commit would otherwise look like a root. That
+boundary commit (raw parents, none of them in the clone) is flagged; the
+caller diffs it as git's shallow view does (as a root, which is what the
+fast ``git log --name-only`` path reports for it) instead of failing on
+the missing parent, as GitPython did.
 """
 
 from __future__ import annotations
@@ -34,6 +38,8 @@ class CommitRecord:
     committed: int
     author: str
     message: str
+    #: Raw parents exist but the shallow clone holds none of them.
+    shallow_boundary: bool = False
 
 
 def _parse_records(text: str) -> list[CommitRecord]:
@@ -92,7 +98,9 @@ def head_commits(root: str, max_count: int) -> list[CommitRecord]:
     )
     records = _parse_records(out.text)
     parents = raw_parents(root, [r.sha for r in records])
-    return [replace(r, parents=p) for r, p in zip(records, parents)]
+    # %P is the grafted view: empty where raw parents exist means the
+    # commit sits on the shallow boundary.
+    return [replace(r, parents=p, shallow_boundary=bool(p) and not r.parents) for r, p in zip(records, parents)]
 
 
 def count_commits_since(root: str, since: str) -> int:
