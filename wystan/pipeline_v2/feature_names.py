@@ -32,6 +32,7 @@ from wystan.pipeline_v2.module_scope import ModuleScopes
 from wystan.pipeline_v2.ownership_moves import conservation_report, product_layer_total
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
 from wystan.pipeline_v2.request_scopes import (
+    REPOSITORY_ROOT,
     feature_scopes,
     group_by_scope,
     scope_label,
@@ -182,8 +183,12 @@ def is_supported_name(name: str, row: dict[str, Any]) -> bool:
     return all(covered)
 
 
-def _cache_key(row: dict[str, Any]) -> str:
+def _cache_key(row: dict[str, Any], scope: str = REPOSITORY_ROOT) -> str:
     payload = {"v": _CACHE_VERSION, "role": ROLE, "model": MODEL_ID, "system": SYSTEM_PROMPT, "row": row}
+    if scope != REPOSITORY_ROOT:
+        # A module's answer was read beside the module's features only: it is
+        # kept apart from a repository feature with the same evidence.
+        payload["module_scope"] = scope
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -407,7 +412,11 @@ def run_feature_names(
         telemetry["reason"] = "no_candidate"
         return telemetry
     cache = llm.get("cache")
-    answers = {slug: known for slug, row in rows.items() if (known := _remembered(cache, _cache_key(row)))}
+    scope_of = scope_lookup(feature_scopes(product_features, developer_features, module_scopes))
+    answers = {
+        slug: known for slug, row in rows.items()
+        if (known := _remembered(cache, _cache_key(row, scope_of(slug))))
+    }
     telemetry["cache_hits"] = len(answers)
     unknown = {slug: row for slug, row in rows.items() if slug not in answers}
     if unknown:
@@ -416,7 +425,6 @@ def run_feature_names(
             telemetry["reason"] = "no_key"
         else:
             telemetry["asked"] = len(unknown)
-            scope_of = scope_lookup(feature_scopes(product_features, developer_features, module_scopes))
             fresh, by_scope = _ask_per_scope(
                 unknown, product, product_features, scope_of,
                 lambda batch, named, listed: _ask(batch, named, listed, llm, client, telemetry),
@@ -426,7 +434,7 @@ def run_feature_names(
                 # telemetry stays as it was.
                 telemetry["asked_by_scope"] = by_scope
             for slug, answer in fresh.items():
-                _remember(cache, _cache_key(rows[slug]), answer)
+                _remember(cache, _cache_key(rows[slug], scope_of(slug)), answer)
             answers.update(fresh)
     before = product_layer_total(product_features, developer_features)
     counts = (len(user_flows), len(flows))

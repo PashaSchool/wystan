@@ -374,9 +374,12 @@ class _Namer:
         own. With one scope this is the one call it always was.
         """
         proposed: dict[str, str] = {}
-        for _scope, group in group_by_scope(pending, lambda target: target.scope):
+        for scope, group in group_by_scope(pending, lambda target: target.scope):
             rows = [t.prompt_row(parents.get(t.group), notes[t.key]) for t in group]
-            proposed.update(self._writer(rows))
+            # The repository's call is the call it always was; a module's
+            # call says which module, so its answers are remembered apart.
+            asked = self._writer(rows) if scope == REPOSITORY_ROOT else self._writer(rows, scope=scope)
+            proposed.update(asked)
         return proposed
 
     def _settle(self, target: NameTarget) -> None:

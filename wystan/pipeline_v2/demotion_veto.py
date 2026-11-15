@@ -34,6 +34,7 @@ from wystan.cache.backend import CacheKind
 from wystan.pipeline_v2.module_scope import ModuleScopes
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
 from wystan.pipeline_v2.request_scopes import (
+    REPOSITORY_ROOT,
     feature_scopes,
     group_by_scope,
     scope_label,
@@ -123,10 +124,15 @@ def _candidate_row(feature: Any, developers: list[Any], journeys: list[Any]) -> 
     }
 
 
-def _cache_key(row: dict[str, Any]) -> str:
+def _cache_key(row: dict[str, Any], scope: str = REPOSITORY_ROOT) -> str:
     payload = {
         "v": _CACHE_VERSION, "role": ROLE, "model": MODEL_ID, "system": SYSTEM_PROMPT, "row": row,
     }
+    if scope != REPOSITORY_ROOT:
+        # A module's verdict was given beside the module's features only; it
+        # is never read for a repository feature with the same evidence (nor
+        # the reverse). A repository feature's key is the one it always had.
+        payload["module_scope"] = scope
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
@@ -310,9 +316,10 @@ def run_demotion_veto(
         return telemetry
     rows = _rows(candidates, developer_features, user_flows, telemetry)
     cache = llm.get("cache")
+    scope_of = scope_lookup(feature_scopes(product_features, developer_features, module_scopes))
     verdicts: dict[str, tuple[str, str]] = {}
     for slug, row in rows.items():
-        known = _remembered(cache, _cache_key(row))
+        known = _remembered(cache, _cache_key(row, scope_of(slug)))
         if known is not None:
             verdicts[slug] = known
             telemetry["cache_hits"] += 1
@@ -324,14 +331,13 @@ def run_demotion_veto(
         else:
             kept = [f for f in product_features if not is_candidate(f)]
             telemetry["asked"] = len(unknown)
-            scope_of = scope_lookup(feature_scopes(product_features, developer_features, module_scopes))
             fresh = _ask_per_scope(
                 unknown, kept, scope_of,
                 lambda batch, kept_here: _ask(batch, kept_here, llm, client, telemetry),
                 telemetry,
             )
             for slug, verdict in fresh.items():
-                _remember(cache, _cache_key(rows[slug]), verdict)
+                _remember(cache, _cache_key(rows[slug], scope_of(slug)), verdict)
             verdicts.update(fresh)
     _apply_all(candidates, verdicts, product_features, is_candidate, violations, joins_prefix, telemetry)
     telemetry["unanswered"] = sorted(set(rows) - set(verdicts))
