@@ -390,6 +390,49 @@ def _go_bin_name(module_path: str | None) -> str | None:
     return segs[-1] if segs else None
 
 
+_GO_IMPORT_BLOCK_RE = re.compile(r'"([^"\s]+)"')
+_GO_MAX_PACKAGES_WALKED = 4000
+
+
+def _go_package_imports(root: Path, package_dir: str) -> set[str]:
+    """Import paths of the non-test Go files directly in ``package_dir``."""
+    found: set[str] = set()
+    base = root / package_dir
+    try:
+        names = sorted(n for n in os.listdir(base) if n.endswith(".go"))
+    except OSError:
+        return found
+    for name in names:
+        if name.endswith("_test.go"):
+            continue
+        text = _read(root, f"{package_dir}/{name}" if package_dir else name)
+        head = text.split("\nfunc ", 1)[0]
+        found.update(_GO_IMPORT_BLOCK_RE.findall(head))
+    return found
+
+
+def _go_imports_reach(
+    root: Path, mdir: str, module_name: str, start_dir: str, targets: set[str],
+) -> bool:
+    """True when the package in ``start_dir`` imports, directly or through
+    other packages of the same module, a package in ``targets``."""
+    prefix = module_name.rstrip("/") + "/"
+    module_root = "" if mdir in ("", ".") else mdir.rstrip("/") + "/"
+    seen, queue = {start_dir}, [start_dir]
+    while queue and len(seen) <= _GO_MAX_PACKAGES_WALKED:
+        current = queue.pop()
+        for imported in sorted(_go_package_imports(root, current)):
+            if not imported.startswith(prefix):
+                continue
+            package_dir = module_root + imported[len(prefix):]
+            if package_dir in targets:
+                return True
+            if package_dir not in seen:
+                seen.add(package_dir)
+                queue.append(package_dir)
+    return False
+
+
 def _p1_go(text: str, _root: Path, mdir: str, rels: list[str],
            main_dirs: frozenset[str]) -> tuple[bool, list[str], str | None]:
     mod = _GO_MODULE_RE.search(text)
@@ -404,6 +447,16 @@ def _p1_go(text: str, _root: Path, mdir: str, rels: list[str],
             if d == md or _under(d, md) or _under(md, d):
                 hits.append(md)
                 break
+    if not hits and module_name:
+        # The common Go layout keeps a thin ``cmd/<bin>/main.go`` and the
+        # commands in sibling packages (``pkg/cmd/...``, ``internal/...``).
+        # The binary owns a command when its package IMPORTS the command's
+        # package, however the directories are arranged.
+        cluster_dirs = {_dirname(rel) for rel in rels}
+        hits = [
+            md for md in scope
+            if _go_imports_reach(_root, mdir, module_name, md, cluster_dirs)
+        ]
     if not hits:
         return False, ["no reachable `package main` in module"], _go_bin_name(
             module_name)

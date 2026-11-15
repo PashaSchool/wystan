@@ -29,13 +29,13 @@ import anthropic
 from pydantic import BaseModel
 
 from wystan.analyzer.features import _normalize_stem, _best_stem_match
-from wystan.llm.cost import deterministic_params
+from wystan.llm.cost import deterministic_params, response_text
 from wystan.models.types import FeatureMap, Feature, Flow
 
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
 
-_MODEL = "claude-sonnet-4-6"
+_MODEL = "claude-sonnet-5-5"
 _MAX_RETRIES = 2
 _RETRY_BASE_DELAY = 2.0
 
@@ -541,7 +541,7 @@ def evolve_with_llm(
                 **deterministic_params(_MODEL),
             )
 
-            text = response.content[0].text if response.content else ""
+            text = response_text(response)
             parsed = _parse_json(text)
             if parsed:
                 decisions = EvolutionResponse.model_validate(parsed)

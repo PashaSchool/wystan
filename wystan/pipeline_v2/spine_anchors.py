@@ -414,7 +414,9 @@ def _pattern_key_chain(
             continue
         if low in transparent:
             continue
-        if (low in tenant_scope and i + 1 < len(segs)
+        # A single-letter segment before a param (``/t/:teamUrl/documents``)
+        # is the same pure addressing as a scope word.
+        if ((low in tenant_scope or len(low) == 1) and i + 1 < len(segs)
                 and _DYNAMIC_RE.match(segs[i + 1])
                 and _deeper_meaningful(i + 2)):
             # Pure tenant addressing — transparent (never a key).
@@ -511,6 +513,38 @@ def _bar_reason(
     return None
 
 
+#: Bar reasons for route anchors that are code containers, not capabilities.
+BAR_STRUCTURAL_CONTAINER = "structural_container"
+BAR_INTERNAL_ROUTE = "internal_route"
+_INTERNAL_SEGMENT_RE = re.compile(r"^(?:_internal|\[__)")
+
+
+def _is_internal_route_file(path: str) -> bool:
+    """A route file under a directory its author marked internal
+    (``_internal+/``, ``[__htmltopdf]+/``): machinery, not a user capability."""
+    dirs = [s for s in path.replace("\\", "/").split("/") if s][:-1]
+    return any(_INTERNAL_SEGMENT_RE.match(seg) for seg in dirs)
+
+
+def _container_bar(
+    key: str,
+    prefix: str | None,
+    files: Iterable[str],
+    structural_keys: frozenset[str],
+) -> str | None:
+    """Why a route anchor is a container rather than a capability, if it is.
+
+    A structural name bars only a DIRECTORY anchor (``…/app/components``
+    claimed whole because a few page-like files sit in it). A page the author
+    routed at ``/utils`` is a file anchor and keeps its right to mint."""
+    if prefix is not None and key in structural_keys:
+        return BAR_STRUCTURAL_CONTAINER
+    file_list = list(files)
+    if file_list and all(_is_internal_route_file(f) for f in file_list):
+        return BAR_INTERNAL_ROUTE
+    return None
+
+
 def _is_api_route(pattern: str, method: str, vocab: dict[str, Any]) -> bool:
     """API-vs-page classification of one route entry — STRUCTURAL, never
     trusting the stamped method alone (W2b.1 fix d1): the Next
@@ -535,6 +569,9 @@ def _build_route_anchors(
     vocab: dict[str, Any],
 ) -> list[SpineAnchor]:
     version_re = re.compile(vocab.get("version_segment_pattern") or r"^v\d+$")
+    structural_keys = frozenset(
+        normalize_anchor_key(str(t)) for t in (vocab.get("structural_stoplist") or [])
+    )
     # (key, prefix-or-None) → accumulation
     acc: dict[tuple[str, str | None], dict[str, Any]] = {}
 
@@ -563,7 +600,15 @@ def _build_route_anchors(
                                vocab)
         groups = [str(g) for g in (entry.get("route_groups") or [])]
         chain = _route_chain(file, pattern, vocab, version_re)
+        # A page-like file inside a structural container directory
+        # (``app/components/…/x-page.tsx``) names a component, not a
+        # capability: its sub-directories may anchor, its file name may not.
+        in_container = bool(chain) and chain[0][1] is not None and (
+            normalize_anchor_key(chain[0][0]) in structural_keys
+        )
         for seg, prefix, depth in chain:
+            if in_container and prefix is None:
+                continue
             _add(seg, prefix, depth, file, is_api, groups)
 
     out: list[SpineAnchor] = []
@@ -587,7 +632,10 @@ def _build_route_anchors(
             sources=frozenset({"route"}),
             page_route_files=frozenset(slot["page"]),
             api_route_files=frozenset(slot["api"]),
-            barred=_bar_reason(key, version_re, raw_seg=str(slot["seg"])),
+            barred=(
+                _bar_reason(key, version_re, raw_seg=str(slot["seg"]))
+                or _container_bar(key, prefix, slot["files"], structural_keys)
+            ),
             route_groups=frozenset(slot["groups"]),
             depth=slot["depth"],
         ))

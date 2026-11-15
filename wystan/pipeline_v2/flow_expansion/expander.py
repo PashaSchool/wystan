@@ -61,8 +61,14 @@ from wystan.pipeline_v2.flow_expansion.fan_in import (
     FanInResult,
     symbol_key,
 )
+from wystan.pipeline_v2.flow_expansion.trpc_edges import (
+    Procedure,
+    build_procedure_table,
+    find_procedure_calls,
+)
 from wystan.pipeline_v2.flow_expansion.span_recovery import (
     SpanRecoveryConfig,
+    whole_file_lines,
 )
 from wystan.pipeline_v2.flow_expansion.degrade_span import (
     DegradeWidenConfig,
@@ -462,6 +468,98 @@ def _demote_shared(flow: Flow, fan_in: FanInResult) -> int:
     return demoted
 
 
+def _slice_of(source: str, lines: tuple[int, int] | None) -> str:
+    if lines is None:
+        return source
+    return "\n".join(source.splitlines()[lines[0] - 1: lines[1]])
+
+
+def _attach_rpc_procedures(
+    rctx: ReachContext,
+    procedures: dict[str, Procedure],
+    call_nodes: list[CallNode],
+    node_map: dict[str, FlowNode],
+    flow_nodes: list[FlowNode],
+    flow_edges: list[FlowEdge],
+    *,
+    max_nodes: int,
+) -> int:
+    """Add the tRPC procedures called from ``call_nodes`` to the flow graph.
+
+    Each procedure becomes a ``route_handler`` node with its own span, linked
+    from the calling node by an ``rpc`` edge, followed by the procedure's
+    direct callees (one level, like an entry). Returns the number of edges
+    added."""
+    hops = 0
+    for caller in list(call_nodes):
+        sig = rctx.signatures.get(caller.file)
+        if sig is None or not sig.source:
+            continue
+        for procedure in find_procedure_calls(_slice_of(sig.source, caller.lines), procedures):
+            if _is_test_or_vendor_or_generated(procedure.file):
+                continue
+            proc_id = (
+                f"{procedure.file}#{procedure.symbol}" if procedure.symbol
+                else f"{procedure.file}#rpc:{procedure.path}"
+            )
+            if proc_id == caller.id:
+                continue
+            if proc_id not in node_map:
+                proc_node = FlowNode(
+                    id=proc_id, kind="route_handler", file=procedure.file,
+                    symbol=procedure.symbol, lines=procedure.lines,
+                    role="cross_stack_server", confidence="high",
+                )
+                node_map[proc_id] = proc_node
+                flow_nodes.append(proc_node)
+                if procedure.symbol:
+                    _attach_procedure_callees(
+                        rctx, procedure, node_map, flow_nodes, flow_edges,
+                        max_nodes=max_nodes,
+                    )
+            flow_edges.append(FlowEdge(  # type: ignore[call-arg]
+                from_=caller.id, to=proc_id, kind="rpc", confidence="high",
+            ))
+            hops += 1
+    return hops
+
+
+def _attach_procedure_callees(
+    rctx: ReachContext,
+    procedure: Procedure,
+    node_map: dict[str, FlowNode],
+    flow_nodes: list[FlowNode],
+    flow_edges: list[FlowEdge],
+    *,
+    max_nodes: int,
+) -> None:
+    """Expand one level below a procedure, exactly as an entry is expanded."""
+    sub = build_call_graph(
+        rctx,
+        entry_file=procedure.file,
+        entry_symbol=procedure.symbol,
+        entry_line=procedure.lines[0],
+        max_depth=1,
+        max_nodes=max_nodes,
+    )
+    for callee in sub.nodes[1:]:
+        if callee.id in node_map:
+            continue
+        callee_node = _to_flow_node(
+            callee,
+            role="called" if callee.symbol else "support",
+            kind="function" if callee.symbol else "file",
+            confidence=callee.confidence or ("high" if callee.symbol else "medium"),
+        )
+        node_map[callee.id] = callee_node
+        flow_nodes.append(callee_node)
+    for edge in sub.edges:
+        flow_edges.append(FlowEdge(  # type: ignore[call-arg]
+            from_=edge.from_id, to=edge.to_id, kind=edge.kind,  # type: ignore[arg-type]
+            confidence=edge.confidence,                          # type: ignore[arg-type]
+        ))
+
+
 def _expand_one_flow(
     flow: Flow,
     rctx: ReachContext,
@@ -472,6 +570,7 @@ def _expand_one_flow(
     span_recovery: "SpanRecoveryConfig | None" = None,
     decorator_cfg: "DecoratorEdgeConfig | None" = None,
     degrade_widen: "DegradeWidenConfig | None" = None,
+    procedures: dict[str, Procedure] | None = None,
 ) -> tuple[Flow, dict[str, Any]]:
     """Return the flow with ``entry`` / ``nodes`` / ``edges`` /
     ``summary`` populated, plus a small per-flow telemetry dict.
@@ -530,6 +629,14 @@ def _expand_one_flow(
                 widen_tel["degrade_widened"] = 1
             elif widened.skip:
                 widen_tel["degrade_widen_skip"] = widened.skip
+        # No symbol extraction at all for this language (no signature): the
+        # entry is measured as the whole file rather than a one-line point.
+        # Languages with signatures (Ruby, Vue) keep the widen verdict above.
+        no_signature = rctx.signatures.get(entry_file) is None
+        if no_signature and (lines is None or lines[1] <= lines[0]):
+            whole = whole_file_lines(rctx, entry_file)
+            if whole is not None:
+                lines = whole
         entry_node = FlowNode(
             id=f"{entry_file}#{entry_symbol}" if entry_symbol else entry_file,
             kind="entry",
@@ -583,7 +690,7 @@ def _expand_one_flow(
             role = "support"
         node_map[cn.id] = _to_flow_node(
             cn, role=role, kind=kind,
-            confidence="high" if cn.symbol else "medium",
+            confidence=cn.confidence or ("high" if cn.symbol else "medium"),
         )
     flow_nodes: list[FlowNode] = list(node_map.values())
     flow_edges: list[FlowEdge] = [
@@ -608,10 +715,19 @@ def _expand_one_flow(
             count=cg.dropped_node_count,
         ))
 
+    # tRPC procedures called from this flow's code. The client call is not an
+    # import, so T1 cannot reach the procedure; link it explicitly.
+    rpc_hops = 0
+    if procedures:
+        rpc_hops = _attach_rpc_procedures(
+            rctx, procedures, cg.nodes, node_map, flow_nodes, flow_edges,
+            max_nodes=max_nodes,
+        )
+
     # T2 — cross-stack HTTP boundary (only on fully-supported suffixes;
     # Rust call-graph survives but Rust doesn't have a generic HTTP
     # client pattern we'd match reliably).
-    cross_stack_hops = 0
+    cross_stack_hops = rpc_hops
     if fully_supported and routes_index:
         client_files_seen: set[tuple[str, str | None]] = set()
         for cn in cg.nodes:
@@ -829,6 +945,7 @@ def expand_flows(
     flow_by_uuid: dict[str, Flow] = {}
     expanded_flows: list[Flow] = []
     fan_in_acc = FanInAccumulator()
+    procedures = build_procedure_table(rctx)
     for feat in features:
         for fl in feat.flows or []:
             new_fl, tel = _expand_one_flow(
@@ -837,6 +954,7 @@ def expand_flows(
                 span_recovery=span_recovery,
                 decorator_cfg=decorator_cfg,
                 degrade_widen=degrade_widen,
+                procedures=procedures,
             )
             # Phase 5 — additive LOC-detail projection over the graph
             # just built (or the pre-existing one in the skip path).

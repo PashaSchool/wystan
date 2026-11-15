@@ -23,6 +23,114 @@ deterministic-first, two-layer feature-mapping engine with an AI-agent toolkit.
   (`wystan/analyzer/repo_config.py`, `wystan/analyzer/auto_alias_discoverer.py`).
   The scan pipeline never read that file.
 
+### Changed
+- **A feature made of components is tied to the pages that show it.** Page
+  imports are followed five files deep (`entry_points/page_reach.py`). A
+  feature with no page of its own, whose code is imported mostly from the
+  pages of one part of the product, is no longer removed: it takes that
+  page's name when nobody owns the page ("Analytics" on plane), or all of it
+  joins the feature that owns the page when no other part of the product
+  imports it (`scan_meta.unnameable_features_removed.joined`). A package
+  imported from several parts stays shared. `KEY_SCHEMA_VERSION` is 95.
+- **API products get a product layer from their schema.** New adapters read
+  GraphQL operations composed in code (`entry_points/graphql_schema.py`,
+  graphene: root type, group classes, operations, with descriptions from a
+  shipped `schema.graphql`) and UI action registries
+  (`entry_points/actions.py`). Each group of two or more operations becomes a
+  product feature named by the schema ("Checkout", "Gift Card"), taking the
+  unowned module that implements its operations, the unowned code its flows
+  reach, and the parentless user flows that start there
+  (`entry_group_features.py`). A package that registers UI actions is no
+  longer barred as `headless_internal_package`.
+- **A page-less feature with an API keeps its place.** In a product with
+  pages, a feature is removed for having no page only when its own code
+  serves fewer than two API operations.
+- **Navigation labels are read through the UI catalog.** A row holding a
+  catalog key (`event_types_page_title`) is resolved to its text; a key with
+  no entry is not used as a name. Catalog files are read up to 8 MB.
+- A product feature is no longer renamed into a name a sibling already has.
+  `KEY_SCHEMA_VERSION` is 91.
+- **Entry points, and command-line tools get a product layer.** A new
+  `entry_points` package records what a user can address (a page, a command)
+  with the name its author gave it and its declared parent;
+  `scan_meta.entry_points` reports them by kind. For command-line tools: a Go
+  binary owns the commands its main package imports (the `cmd/<bin>` +
+  `pkg/cmd` layout was rejected before); a `cli-tool` unit with detected
+  commands keeps its user flows; each command group becomes a product feature
+  under the binary's, named by its own description ("Manage pull requests"),
+  with `parent_product_feature_id` pointing at the binary's feature; the
+  binary's feature takes the root command's description. Names an author
+  wrote are no longer judged or removed by the code-name laws.
+  `KEY_SCHEMA_VERSION` is 88.
+- **A product feature is named by the product, and has a page.** The name
+  of a product feature is read from its top page (`authored_names.py`): the
+  navigation label that links to it, then the page title, then the first
+  heading, then the URL's own word. Directory, package and framework names
+  are never used ("Remix" for the share pages is now "Share"). In a product
+  that has pages, a feature with no page (an API endpoint, an internal
+  package) is removed from `product_features`; its code joins the feature it
+  lives under by name or becomes unowned with
+  `shared_reason: "unnameable_product_feature"` (`unnameable_demote.py`). A
+  user flow with no product-language name is removed from `user_flows`; its
+  code flows stay. Counts are in `scan_meta.unnameable_features_removed` and
+  `scan_meta.product_language_names.flows_removed`. `KEY_SCHEMA_VERSION` is
+  87.
+- **The default Sonnet is `claude-sonnet-5-5`.** The `sonnet` alias and every
+  stage default (analyst, journey abstraction, adjudicator, splitter,
+  discovery, symbol attribution, evolve) moved from `claude-sonnet-4-6`.
+  Requests to it send `thinking: {"type": "between_tools"}` and no
+  `temperature`; responses are read by block type. Pricing is $2 / $10 per
+  million tokens.
+- **A flow's entry point is code that does something.** Stage 3 classifies
+  every exported TS/JS symbol as behaviour or declaration
+  (`analyzer/symbol_behaviour.py`): a type, interface, enum, or a `const`
+  whose initializer has no function body is a declaration. Declarations are
+  not offered to the LLM as flow candidates, do not count towards the export
+  floor, and cannot be an entry point; a flow that lists only declarations is
+  dropped with a note. A `const` that wraps a function defined in the same
+  file stays a candidate. Other languages are unchanged.
+  `KEY_SCHEMA_VERSION` is 86.
+- **Product features and user flows are named in product language.** A new
+  last pass (`product_language_names`) renames `display_name` of product
+  features and `name` of user flows from the text the product shows its
+  users: page titles, headings, button labels and translated copy, including
+  Lingui `msg` / `<Trans>` and catalog keys (`ui_text.py`). Names must pass
+  the product-language laws (`product_name_laws.py`): no route parameters or
+  their residue, no glued identifiers, no bare package, directory, framework
+  or protocol names; a user flow starts with a user-goal verb. On keyed scans
+  an LLM writer proposes names; a proposal is kept only when it passes the
+  laws, every word is in the item's evidence, and it shares a word with the
+  item's own URLs and code units. A name that breaks a law and cannot be
+  replaced keeps its text, gets `name_confidence: "low"` and
+  `name_evidence: ["unnameable:<law>"]`; counts are in
+  `scan_meta.product_language_names`. Developer feature and code flow names,
+  slugs, ids and anchors are unchanged. `KEY_SCHEMA_VERSION` is 85.
+- **Every flow node is measured.** Flow expansion no longer emits file nodes
+  without a line span. An imported file is represented by the symbols the
+  caller references, each with its own span; an import the caller never
+  references adds nothing; a reference that cannot be tied to a symbol adds
+  one whole-file span with `confidence: "low"`. The
+  `WYSTAN_FLOW_SPAN_RECOVERY*` flags are retired (always on). Flow `loc`,
+  `line_ranges` and user-flow `loc` grow accordingly. `KEY_SCHEMA_VERSION` 83.
+- **Flat-file routes are read as URLs.** A Remix / React Router / TanStack
+  route file such as `t.$teamUrl+/documents.$id.edit.tsx` now yields the
+  pattern `/t/:teamUrl/documents/:id/edit` (it was the file path). The Stage 1
+  route extractor names the feature after the first capability segment
+  (`documents`), and a single-letter or scope-word segment before a parameter
+  is treated as addressing. `KEY_SCHEMA_VERSION` 84.
+- **Code containers do not mint product features.** A directory route anchor
+  with a structural name (`components`) and a route under a directory marked
+  internal (`_internal+`, `[__x]+`) are barred.
+- **RPC routers join the product.** A developer feature without a product
+  feature is attached to the product feature whose flows hold a strict
+  plurality of `rpc` edges into it (`rpc_router_rehome.py`); the cross-unit
+  demote no longer strips such a feature.
+- **tRPC calls reach the procedure.** A flow whose code calls
+  `trpc.<path>.<verb>()` now includes the procedure's defining symbol and its
+  direct callees, linked by a new `FlowEdge.kind` value `rpc`. Routers that
+  register procedures through imported identifiers and nested routers are
+  resolved (`flow_expansion/trpc_edges.py`).
+
 ### Added
 - `WYSTAN_SINGLE_PRIMARY_OWNER` (default OFF). When several features keep the
   same file through Stage 2 zero-path protection, only the conflict winner

@@ -89,3 +89,6 @@ feature-map-*.json
 
 # OpenSpec working docs (local only, never committed)
 /openspec/
+
+# Claude Code skills, agents and settings (local only, never committed)
+/.claude/

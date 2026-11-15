@@ -27,13 +27,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from wystan.llm.cost import CostTracker, deterministic_params
+from wystan.llm.cost import CostTracker, deterministic_params, response_text
 from wystan.models.types import FeatureMap
 
 logger = logging.getLogger(__name__)
 from wystan.llm.model_gateway import resolve_model as gateway_model
 
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_MODEL = "claude-sonnet-5-5"
 _MAX_ORPHANS_IN_PROMPT = 80
 _MIN_GROUP_SIZE_FOR_NEW_FEATURE = 3  # fewer files → attach to nearest existing feature
 
@@ -262,7 +262,7 @@ def _llm_classify_group(
         except Exception:
             pass
 
-    text = response.content[0].text if response.content else ""
+    text = response_text(response)
     return _parse_proposals(text, group, feature_map)
 
 

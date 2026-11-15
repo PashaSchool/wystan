@@ -48,6 +48,7 @@ from dataclasses import dataclass, field, replace
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
+from wystan.llm.cost import response_text
 from wystan.pipeline_v2.extractors.base import AnchorCandidate
 from wystan.pipeline_v2.llm_health import LlmHealth
 
@@ -645,7 +646,7 @@ def _llm_pick_name(
             max_tokens=24,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = (msg.content[0].text or "").strip()  # type: ignore[union-attr]
+        text = response_text(msg).strip()
         # Sanitize: take first whitespace-separated token, lowercase,
         # validate it kebab-cases cleanly.
         first = text.splitlines()[0].strip().split()[0] if text else ""

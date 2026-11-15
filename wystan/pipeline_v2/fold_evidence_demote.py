@@ -52,6 +52,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from wystan.pipeline_v2.rpc_router_rehome import RPC_CALLER_NOTE
 from wystan.pipeline_v2.spine_anchors import owned_paths_of
 from wystan.pipeline_v2.stage_6_86_anchored_mint import (
     _carve_content_slug,
@@ -311,6 +312,10 @@ def run_fold_evidence_demote(
             dn = str(_attr(d, "name"))
             owned = owned_paths_of(d)
             owned_of[dn] = owned
+            if _attr(d, "anchor_id") == RPC_CALLER_NOTE:
+                # Attached because this PF's flows call its RPC procedures:
+                # crossing the unit edge is the evidence, not foreign mass.
+                continue
             frn = frozenset(
                 p for p in owned
                 if not _demote_anchor_inside(p, a)
