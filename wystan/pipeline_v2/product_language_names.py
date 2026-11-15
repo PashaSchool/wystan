@@ -46,7 +46,7 @@ from wystan.pipeline_v2.product_name_laws import (
 )
 from wystan.pipeline_v2.product_strings import _read_text
 from wystan.pipeline_v2.product_name_writer import NameWriter, build_name_writer
-from wystan.pipeline_v2.request_scopes import REPOSITORY_ROOT, group_by_scope, scope_of_files
+from wystan.pipeline_v2.request_scopes import REPOSITORY_ROOT, group_by_scope, scopes_of_items
 from wystan.pipeline_v2.spine_anchors import load_spine_vocab
 from wystan.pipeline_v2.ui_text import UiLabel, UiTextIndex, collect_ui_text
 
@@ -717,9 +717,10 @@ def run_product_language_names(
     for dev in developer_features:
         if dev.product_feature_id:
             members_of.setdefault(dev.product_feature_id, []).append(dev.name)
-    for target, feature in zip(feature_targets, product_features):
+    feature_scopes = scopes_of_items([owned_paths[f.name] for f in product_features], module_scopes)
+    for target, feature, scope in zip(feature_targets, product_features, feature_scopes):
         target.members = sorted(members_of.get(feature.name, []))
-        target.scope = scope_of_files(owned_paths[feature.name], module_scopes)
+        target.scope = scope
 
     feature_namer = _Namer(ctx, writer)
     feature_namer.reserve("pf", (f.display_name or f.name for f in authored_features))
@@ -737,8 +738,10 @@ def run_product_language_names(
     flow_namer = _Namer(ctx, writer)
     shared = _paths_shared_between_user_flows(flows_of)
     flow_targets = [_flow_target(uf, flows_of.get(uf.id, []), index, shared) for uf in user_flows]
-    for target, user_flow in zip(flow_targets, user_flows):
-        target.scope = scope_of_files(_member_files(flows_of.get(user_flow.id, [])), module_scopes)
+    flow_scopes = scopes_of_items(
+        [_member_files(flows_of.get(uf.id, [])) for uf in user_flows], module_scopes)
+    for target, scope in zip(flow_targets, flow_scopes):
+        target.scope = scope
     flow_namer.run(flow_targets, parents)
     return {
         "keyed": writer is not None,

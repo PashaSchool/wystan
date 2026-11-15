@@ -27,6 +27,7 @@ Pure: no file is read, no model is called.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, TypeVar
 
@@ -46,18 +47,22 @@ __all__ = [
     "group_by_scope",
     "scope_lookup",
     "scope_label",
-    "scope_of_files",
     "scoped_product_name",
+    "scopes_of_items",
 ]
 
 
-def scope_of_files(
-    paths: Iterable[str], module_scopes: ModuleScopes | None,
-) -> str:
-    """The module scope of an item made of ``paths``; ``""`` for the root."""
+def scopes_of_items(
+    files_per_item: Sequence[Iterable[str]], module_scopes: ModuleScopes | None,
+) -> list[str]:
+    """Per item: the module scope of the files it is made of (``""``: root).
+
+    One call per call site: the module locator is built once and remembers
+    every directory it resolved, instead of once per item.
+    """
     if not module_scopes:
-        return REPOSITORY_ROOT
-    return grain_scopes([list(dict.fromkeys(paths))], module_scopes)[0]
+        return [REPOSITORY_ROOT] * len(files_per_item)
+    return grain_scopes([list(dict.fromkeys(files)) for files in files_per_item], module_scopes)
 
 
 def feature_scopes(
@@ -79,7 +84,8 @@ def feature_scopes(
         home = getattr(dev, "product_feature_id", None)
         if home in files:
             files[home].extend(dev.paths or [])
-    return {name: scope_of_files(paths, module_scopes) for name, paths in files.items()}
+    names = list(files)
+    return dict(zip(names, scopes_of_items([files[name] for name in names], module_scopes)))
 
 
 def group_by_scope(
@@ -100,10 +106,17 @@ def group_by_scope(
 def scoped_product_name(product: str, scope: str) -> str:
     """What a request calls the product: the product, and for a nested
     module's request also the module (its root path, as the scope record
-    holds it). The root scope keeps the product's name unchanged."""
+    holds it). The root scope keeps the product's name unchanged.
+
+    The module path is a directory name of the scanned repository, so it is
+    written as a JSON string, as these prompts write every other
+    repository-derived text (their item rows): a newline or a control
+    character in it cannot start a prompt line of its own. ASCII escapes are
+    kept on so line and paragraph separators are escaped too.
+    """
     if scope == REPOSITORY_ROOT:
         return product
-    return f"{product}, module {scope}"
+    return f"{product}, module {json.dumps(scope)}"
 
 
 def scope_lookup(
