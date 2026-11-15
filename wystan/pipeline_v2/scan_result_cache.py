@@ -3790,7 +3790,8 @@ ENV_OUTPUT_FLAGS = (
 #: KS129 (2026-11-13): a split's residual parent seeds no lattice journey.
 #: KS130 (2026-11-13): the KS129 rule is withdrawn; maps of 129 are not this engine's.
 #: KS131 (2026-11-14): the nested-module scope rules (KS123) merged with KS130.
-KEY_SCHEMA_VERSION = 131
+#: KS132 (2026-11-15): veto, name writer and feature naming ask per module scope (rule S1).
+KEY_SCHEMA_VERSION = 132
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
