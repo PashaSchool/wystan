@@ -70,6 +70,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
+from wystan.analyzer.safe_read import read_repo_bytes, repo_root_of
 from wystan.pipeline_v2.non_code_file import non_code_class
 from wystan.pipeline_v2.owner_oracle import elect_primary_owners
 from wystan.pipeline_v2.ownership_v2 import ownership_v2_enabled
@@ -84,6 +85,7 @@ __all__ = [
     "stage_6_97_enabled",
     "apply_feature_loc",
     "count_file_loc",
+    "count_loc_of_bytes",
     "prefetch_loc_cache",
 ]
 
@@ -197,22 +199,32 @@ def _is_source_ext(path: str) -> bool:
 def count_file_loc(abs_path: Path, rel_path: str) -> int:
     """Line count for ONE file per the engine's LOC convention; 0 when
     the file is excluded (test / generated / lockfile / binary / missing
-    / empty)."""
+    / empty).
+
+    The repository is untrusted: the file is read through
+    ``analyzer.safe_read.read_repo_bytes`` (regular files only, no symlink
+    out of the repository, at most ``MAX_FILE_BYTES``, NUL sniff before the
+    rest is read). A refused file counts 0, as an unreadable one always did.
+    """
     if is_test_path(rel_path) or is_generated_path(rel_path):
         return 0
     if _is_excluded_name(rel_path):
         return 0
-    try:
-        with open(abs_path, "rb") as fp:
-            head = fp.read(_SNIFF_BYTES)
-    except OSError:
+    read = read_repo_bytes(abs_path, repo_root_of(abs_path, rel_path))
+    if read.data is None:
         return 0
-    if b"\x00" in head:  # NUL sniff — extensionless binaries
+    return count_loc_of_bytes(rel_path, read.data)
+
+
+def count_loc_of_bytes(rel_path: str, data: bytes) -> int:
+    """:func:`count_file_loc` on bytes already read safely: the same
+    exclusions, the same NUL sniff, and the text ``Path.read_text`` gave
+    (UTF-8 with replacement, universal newlines)."""
+    if is_test_path(rel_path) or is_generated_path(rel_path) or _is_excluded_name(rel_path):
         return 0
-    try:
-        text = abs_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    if b"\x00" in data[:_SNIFF_BYTES]:  # NUL sniff — extensionless binaries
         return 0
+    text = data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     # Late import: tools ← pipeline_v2 is the existing dependency
     # direction for the strip predicates; the LOC scanner lives in
     # tools and imports stage_6_9b, so import at call time to keep

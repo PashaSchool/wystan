@@ -37,8 +37,11 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 from typing import NamedTuple
+
+from wystan.analyzer.safe_read import open_repo_file, repo_root_of
 
 __all__ = [
     "CLASS_BUNDLED",
@@ -164,21 +167,24 @@ class FileSample(NamedTuple):
     tail: bytes
 
 
-def read_sample(abs_path: Path) -> FileSample | None:
+def read_sample(abs_path: Path, repo_root: Path | None = None) -> FileSample | None:
     """Size, first ``HEAD_BYTES`` and last ``TAIL_BYTES`` of a regular file;
-    ``None`` when it cannot be read, is empty or is not a regular file."""
+    ``None`` when it cannot be read, is empty or is not a regular file.
+
+    Opened through ``analyzer.safe_read.open_repo_file`` (regular file only,
+    no symlink out of ``repo_root``, never a FIFO or device). Only the two
+    ends are read, so no size cap applies: ``max_bytes`` is unbounded.
+    ``repo_root`` defaults to the file's directory, the narrowest root."""
+    root = Path(repo_root) if repo_root is not None else Path(abs_path).parent
     try:
-        if not os.path.isfile(abs_path):
-            return None
-        size = os.stat(abs_path).st_size
-        if size <= 0:
-            return None
-        with open(abs_path, "rb") as handle:
-            head = handle.read(HEAD_BYTES)
+        with open_repo_file(abs_path, root, max_bytes=sys.maxsize) as (fd, size, _refused):
+            if fd is None or size <= 0:
+                return None
+            head = os.read(fd, HEAD_BYTES)
             if size <= HEAD_BYTES:
                 return FileSample(size, head, head[-TAIL_BYTES:])
-            handle.seek(size - TAIL_BYTES)
-            return FileSample(size, head, handle.read(TAIL_BYTES))
+            os.lseek(fd, size - TAIL_BYTES, os.SEEK_SET)
+            return FileSample(size, head, os.read(fd, TAIL_BYTES))
     except OSError:
         return None
 
@@ -291,7 +297,7 @@ def classify_sample(rel_path: str, sample: FileSample) -> str | None:
 
 def non_code_class(abs_path: Path, rel_path: str) -> str | None:
     """Read the bounded sample of ``abs_path`` and classify it."""
-    sample = read_sample(Path(abs_path))
+    sample = read_sample(Path(abs_path), repo_root_of(abs_path, rel_path))
     if sample is None:
         return None
     return classify_sample(rel_path, sample)

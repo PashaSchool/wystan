@@ -89,6 +89,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from wystan.analyzer.features import _calculate_health
+from wystan.analyzer.safe_read import read_repo_bytes
 from wystan.pipeline_v2.stage_6_97b_uf_loc import (
     flow_owned_spans,
     union_span_len,
@@ -153,12 +154,15 @@ def uf_owned_lines_by_file(
 def count_file_lines(repo_path: Path, rel_path: str) -> int | None:
     """Total line count of ``rel_path`` under ``repo_path``; ``None`` when
     the file is unreadable/absent (deleted since the flow ledger was built).
-    Binary-safe (counts ``\\n``), no decode."""
-    try:
-        with open(repo_path / rel_path, "rb") as fh:
-            return sum(1 for _ in fh)
-    except OSError:
+    Binary-safe (counts ``\\n``), no decode. Read through
+    ``analyzer.safe_read.read_repo_bytes`` (regular files inside the
+    repository, at most ``MAX_FILE_BYTES``); a refused file is ``None`` like
+    an unreadable one. Binary files are still counted, as they always were."""
+    read = read_repo_bytes(Path(repo_path) / rel_path, repo_path, stop_at_binary=False)
+    if read.data is None:
         return None
+    data = read.data
+    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
 
 
 def _null_state_fields() -> dict[str, Any]:
