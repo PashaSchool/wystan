@@ -44,11 +44,15 @@ from wystan.analyzer.repo_read_tally import (
     REASON_OVER_CAP,
     record_refusal,
 )
+from wystan.analyzer.repo_held_dirs import release_idle
 from wystan.analyzer.repo_open import (
+    _EXHAUSTED_ERRNOS,
     FILE_FLAGS,
+    DescriptorsExhausted,
     NotRegularFile,
     OutsideRepository,
     open_contained,
+    retry_exhausted,
     symlink_containment_enabled,
 )
 
@@ -63,6 +67,7 @@ __all__ = [
     "REFUSED_OVER_CAP",
     "SNIFF_BYTES",
     "TEXT_READ_MAX_BYTES",
+    "DescriptorsExhausted",
     "FileBytes",
     "open_repo_file",
     "read_repo_bytes",
@@ -149,6 +154,12 @@ def _open_uncontained(path: str) -> tuple[int | None, str | None]:
         return None, REFUSED_NOT_REGULAR
     try:
         return os.open(path, FILE_FLAGS), None
+    except OSError as err:
+        if err.errno not in _EXHAUSTED_ERRNOS:
+            return None, REFUSED_OPEN_ERROR
+    release_idle()
+    try:
+        return retry_exhausted(lambda: os.open(path, FILE_FLAGS), path), None
     except OSError:
         return None, REFUSED_OPEN_ERROR
 

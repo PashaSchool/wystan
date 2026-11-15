@@ -18,20 +18,15 @@ Two open paths, chosen once per platform (``open_path()``):
   link, or the path has a ``..`` or is not spelled under the boundary, is the
   path resolved, required to resolve inside the boundary, and its resolved
   components opened the same way, so an in-repository link reads as the file
-  it names. A thread keeps the descriptors of the directories it last read in
-  (``repo_held_dirs``: per thread, bounded, keyed by the boundary's identity),
-  so the next file of such a directory costs one ``fstatat`` and one
-  ``openat``; the file type is checked on that ``fstatat`` (no follow) before
-  the open.
-* ``fallback`` (no ``dir_fd`` or no ``O_NOFOLLOW``): resolve, require the resolved path
-  inside the boundary, ``stat`` it, open it (``O_NOFOLLOW`` where defined),
-  then require the descriptor's device and inode to equal the checked
-  target's, and resolve the path again and require the same: still inside,
-  and the file there is the descriptor's. What remains: a parent directory
-  swapped for a link out of the repository before the first ``stat``, back
-  before the second resolution, and out again before the second ``stat``
-  (three swaps, each inside a window of a few system calls) yields an outside
-  file whose identity matches. A hard link inside the repository to an outside
+  it names. The process keeps the descriptors of the directories it last
+  read in (``repo_held_dirs``: shared by all threads, bounded by a share of
+  the descriptor limit, leased per read, checked against the path's current
+  identity), so the next file of such a directory costs an ``lstat``, an
+  ``fstatat`` and an ``openat``; the file type is checked on that ``fstatat``
+  (no follow) before the open. Running out of descriptors is never a refusal
+  (``open_contained``).
+* ``fallback`` (no ``dir_fd`` or no ``O_NOFOLLOW``): ``repo_open_fallback``, which states
+  the race that remains there. A hard link inside the repository to an outside
   file is indistinguishable on either path (git never creates one).
 """
 
@@ -41,9 +36,10 @@ import errno
 import os
 import stat
 from pathlib import Path
+from typing import Callable
 
 from wystan.analyzer.repo_boundary import Boundary
-from wystan.analyzer.repo_held_dirs import HeldDirs, held_for
+from wystan.analyzer.repo_held_dirs import lease_dir, release, release_idle
 
 __all__ = [
     "FILE_FLAGS",
@@ -51,10 +47,12 @@ __all__ = [
     "OPEN_PATH_DIR_FD",
     "OPEN_PATH_FALLBACK",
     "SYMLINK_CONTAINMENT_ENV",
+    "DescriptorsExhausted",
     "NotRegularFile",
     "OutsideRepository",
     "open_contained",
     "open_path",
+    "retry_exhausted",
     "symlink_containment_enabled",
 ]
 
@@ -80,12 +78,21 @@ _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NO_FOLLOW
 _BOUNDARY_FLAGS = _DIR_FLAGS & ~_NO_FOLLOW
 #: What ``O_NOFOLLOW`` raises on a link (``ENOTDIR`` with ``O_DIRECTORY``).
 _LINK_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
+#: The process (or the system) has no descriptor left.
+_EXHAUSTED_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE})
 _HAS_DIR_FD = (os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
                and os.stat in os.supports_follow_symlinks)
 
 
 class OutsideRepository(OSError):
     """The path leaves the repository, or a link was swapped in."""
+
+
+class DescriptorsExhausted(BaseException):
+    """The process has no file descriptor left, even after closing the idle
+    held ones. Not an ``OSError`` (nor an ``Exception``): no call site may
+    take it for an unreadable file, so the scan fails instead of producing a
+    map from files it could not open."""
 
 
 class NotRegularFile(OSError):
@@ -189,32 +196,20 @@ def _require_examinable(path: Path) -> None:
         raise FileNotFoundError(errno.ENOENT, "cannot be examined", str(path)) from err
 
 
-def _held_dir(held: HeldDirs, real_root: str, dir_parts: tuple[str, ...]) -> tuple[int, bool]:
-    """``(descriptor of the directory, whether it was already held)``."""
-    fd = held.get(dir_parts)
-    if fd is not None:
-        return fd, True
-    fd = _open_dir_beneath(real_root, dir_parts)
-    held.put(dir_parts, fd)
-    return fd, False
-
-
-def _open_in_held_dir(held: HeldDirs, boundary: Boundary, parts: tuple[str, ...]) -> int | None:
-    """Open the file ``parts[-1]`` in its held directory; ``None`` when a
+def _open_in_held_dir(boundary: Boundary, parts: tuple[str, ...]) -> int | None:
+    """Open the file ``parts[-1]`` in its (held) directory; ``None`` when a
     component is a link (resolve instead)."""
-    dir_fd, was_held = _held_dir(held, boundary.real, parts[:-1])
+    dir_parts = parts[:-1]
+    dir_fd, entry = lease_dir(boundary.real, dir_parts, lambda: _open_dir_beneath(boundary.real, dir_parts))
     try:
         found = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        if not was_held:
-            raise
-        held.drop(parts[:-1])  # the held directory was replaced: walk again
-        return _open_in_held_dir(held, boundary, parts)
-    if stat.S_ISLNK(found.st_mode):
-        return None
-    if not stat.S_ISREG(found.st_mode):
-        raise NotRegularFile(errno.EACCES, "not a regular file", parts[-1])
-    return os.open(parts[-1], FILE_FLAGS | _NO_FOLLOW, dir_fd=dir_fd)
+        if stat.S_ISLNK(found.st_mode):
+            return None
+        if not stat.S_ISREG(found.st_mode):
+            raise NotRegularFile(errno.EACCES, "not a regular file", parts[-1])
+        return os.open(parts[-1], FILE_FLAGS | _NO_FOLLOW, dir_fd=dir_fd)
+    finally:
+        release(dir_fd, entry)
 
 
 def _open_lexical(path: Path, boundary: Boundary) -> int | None:
@@ -223,7 +218,7 @@ def _open_lexical(path: Path, boundary: Boundary) -> int | None:
     if parts is None:
         return None
     try:
-        return _open_in_held_dir(held_for(boundary.real), boundary, parts)
+        return _open_in_held_dir(boundary, parts)
     except OSError as err:
         if err.errno in _LINK_ERRNOS:
             return None
@@ -256,41 +251,38 @@ def _open_resolved(path: Path, boundary: Boundary) -> int:
         raise
 
 
-def _identity(found: os.stat_result) -> tuple[int, int]:
-    return found.st_dev, found.st_ino
+def _open_once(path: Path, boundary: Boundary) -> int:
+    if not _dir_fd_path_available():
+        # Late import: the fallback module reads this module's checks.
+        from wystan.analyzer.repo_open_fallback import open_checked
 
-
-def _same_file_after_open(path: Path, boundary: Boundary, fd: int, checked: os.stat_result) -> None:
-    """The fallback's checks after the open (module doc)."""
-    opened = _identity(os.fstat(fd))
-    again = _resolve_inside(path, boundary)
-    if opened != _identity(checked) or again is None or _identity(os.stat(again)) != opened:
-        raise OutsideRepository(errno.EACCES, "the file changed while it was opened", str(path))
-
-
-def _open_checked(path: Path, boundary: Boundary) -> int:
-    """No ``dir_fd``: open the resolved path and prove it is the checked,
-    contained file (module doc)."""
-    _require_examinable(path)
-    resolved = _resolved_parts(path, boundary)
-    if resolved is None:
-        raise _not_inside(path, boundary)
-    target = resolved[0].joinpath(*resolved[1])
-    checked = os.stat(target)
-    if not stat.S_ISREG(checked.st_mode):  # a link to a FIFO or device is never opened
-        raise NotRegularFile(errno.EACCES, "not a regular file", str(path))
-    fd = os.open(target, FILE_FLAGS | _NO_FOLLOW)
-    try:
-        _same_file_after_open(path, boundary, fd, checked)
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
+        return open_checked(path, boundary)
+    fd = _open_lexical(path, boundary)
+    return _open_resolved(path, boundary) if fd is None else fd
 
 
 def open_contained(path: Path, boundary: Boundary) -> int:
-    """A descriptor of ``path`` opened inside ``boundary`` (module doc)."""
-    if not _dir_fd_path_available():
-        return _open_checked(path, boundary)
-    fd = _open_lexical(path, boundary)
-    return _open_resolved(path, boundary) if fd is None else fd
+    """A descriptor of ``path`` opened inside ``boundary`` (module doc).
+
+    Running out of descriptors is never a refusal: the idle held directory
+    descriptors are closed and the open tried once more; if it still fails,
+    ``DescriptorsExhausted`` ends the scan."""
+    try:
+        return _open_once(path, boundary)
+    except OSError as err:
+        if err.errno not in _EXHAUSTED_ERRNOS:
+            raise
+    release_idle()
+    return retry_exhausted(lambda: _open_once(path, boundary), path)
+
+
+def retry_exhausted(open_again: Callable[[], int], path: os.PathLike[str] | str) -> int:
+    """The second open after the process ran out of descriptors: its
+    descriptor, or ``DescriptorsExhausted``."""
+    try:
+        return open_again()
+    except OSError as err:
+        if err.errno in _EXHAUSTED_ERRNOS:
+            raise DescriptorsExhausted(f"no file descriptor left to read {os.fspath(path)!r}: {err}") from err
+        raise
+
