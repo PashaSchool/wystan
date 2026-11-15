@@ -42,6 +42,7 @@ import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_head_or_raise
 from typing import Any, Iterable, NamedTuple
 
 from wystan.analyzer.safe_read import path_within_repo
@@ -443,8 +444,7 @@ class _Reader:
         if not _is_repo_relative(rel_path) or not path_within_repo(path, self._root):
             return _FileView([])
         try:
-            with open(path, "rb") as handle:
-                head = handle.read(FILE_HEAD_BYTES + 1)
+            head = read_repo_head_or_raise(path, self._root, FILE_HEAD_BYTES + 1)
         except OSError:
             return _FileView([])
         is_cut = len(head) > FILE_HEAD_BYTES

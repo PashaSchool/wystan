@@ -54,6 +54,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_bytes_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.cache.backend import CacheKind
@@ -675,7 +676,7 @@ def _barrel_exports(repo_path: Path, rel: str) -> list[
         return _BARREL_EXPORT_CACHE[rel]
     out: list[tuple[str, dict[str, str] | None]] = []
     try:
-        data = (repo_path / rel).read_bytes()
+        data = read_repo_bytes_or_raise(repo_path / rel, repo_path)
         if len(data) <= _BARREL_MAX_BYTES:
             text = data.decode("utf-8", errors="replace")
             events: list[tuple[int, str, dict[str, str] | None]] = []
@@ -1132,7 +1133,7 @@ def get_page_interiors(
     pages: dict[str, PageInterior] = {}
     for rel, page_kind in pages_list:
         try:
-            data = (repo_path / rel).read_bytes()
+            data = read_repo_bytes_or_raise(repo_path / rel, repo_path)
         except OSError:
             stats["read_errors"] += 1
             continue

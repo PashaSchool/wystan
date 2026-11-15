@@ -83,6 +83,7 @@ from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any, Literal
 
 from wystan.analyzer.reverse_imports import (
@@ -312,7 +313,7 @@ class _SourceCache:
             if stat.st_size > _MAX_SLICE_BYTES:
                 self._text[rel] = None
                 return None
-            self._text[rel] = abs_path.read_text(encoding="utf-8", errors="ignore")
+            self._text[rel] = read_repo_text_or_raise(abs_path, self._repo_path, errors="ignore")
         except OSError:
             self._text[rel] = None
         return self._text[rel]
