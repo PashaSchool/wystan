@@ -94,6 +94,22 @@ def read_objects(root: str, oids: list[bytes], kind: bytes) -> list[bytes]:
     return contents
 
 
+def object_sizes(root: str, oids: list[bytes]) -> list[int | None]:
+    """Size of each object, ``None`` when it is not in the object store
+    (``cat-file --batch-check``; no content is read and, under the runner,
+    nothing is fetched)."""
+    sizes: list[int | None] = []
+    for start in range(0, len(oids), OBJECTS_PER_BATCH):
+        batch = oids[start:start + OBJECTS_PER_BATCH]
+        out = run_git(root, "cat-file", "--batch-check", stdin=b"".join(o + b"\n" for o in batch)).stdout
+        for line in out.splitlines():
+            parts = line.split(b" ")
+            sizes.append(int(parts[2]) if len(parts) == 3 and parts[1] != b"missing" else None)
+    if len(sizes) != len(oids):
+        raise GitError(f"cat-file --batch-check answered {len(sizes)} of {len(oids)} objects")
+    return sizes
+
+
 def raw_parents(root: str, shas: list[str]) -> list[tuple[str, ...]]:
     """The ``parent`` headers of each commit object, grafts not applied."""
     objects = read_objects(root, [object_name(s).encode() for s in shas], b"commit")
@@ -114,7 +130,14 @@ def head_commits(root: str, max_count: int) -> list[CommitRecord]:
     parents = raw_parents(root, [r.sha for r in records])
     # %P is the grafted view: empty where raw parents exist means the
     # commit sits on the shallow boundary.
-    return [replace(r, parents=p, shallow_boundary=bool(p) and not r.parents) for r, p in zip(records, parents)]
+    grafted = [bool(p) and not r.parents for r, p in zip(records, parents)]
+    # A boundary commit whose first parent object is in the clone anyway is
+    # diffed against it, as GitPython did; only a missing parent makes it a
+    # root.
+    first = [p[0].encode() for p, g in zip(parents, grafted) if g]
+    present = iter(size is not None for size in object_sizes(root, first)) if first else iter(())
+    boundary = [g and not next(present) for g in grafted]
+    return [replace(r, parents=p, shallow_boundary=b) for r, p, b in zip(records, parents, boundary)]
 
 
 def count_commits_since(root: str, since: str) -> int:
