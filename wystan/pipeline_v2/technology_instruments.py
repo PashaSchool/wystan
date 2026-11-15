@@ -119,6 +119,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import Any, Iterable, Mapping
 
 __all__ = [
@@ -412,8 +413,7 @@ def detect_technology_instruments(
     for rel in tracked:
         if rel.rsplit("/", 1)[-1] == "package.json":
             try:
-                doc = json.loads(
-                    (repo_path / rel).read_text(encoding="utf-8"))
+                doc = json.loads(read_repo_text_or_raise(repo_path / rel, repo_path, max_bytes=MANIFEST_READ_MAX_BYTES))
                 if isinstance(doc, dict):
                     manifests[rel] = doc
             except (OSError, ValueError):
@@ -641,8 +641,7 @@ def detect_technology_instruments(
         if 0 < n_src <= 2:
             for rel in src:
                 try:
-                    text = (repo_path / rel).read_text(
-                        encoding="utf-8", errors="ignore")
+                    text = read_repo_text_or_raise(repo_path / rel, repo_path, errors="ignore")
                     src_loc += sum(1 for ln in text.splitlines()
                                    if ln.strip())
                 except OSError:
@@ -692,8 +691,7 @@ def detect_technology_instruments(
         verdict = bool(rels)
         for rel in rels:
             try:
-                text = (repo_path / rel).read_text(
-                    encoding="utf-8", errors="ignore")
+                text = read_repo_text_or_raise(repo_path / rel, repo_path, errors="ignore")
             except OSError:
                 verdict = False
                 break

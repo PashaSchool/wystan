@@ -73,6 +73,7 @@ import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any, Mapping
 
 from wystan.pipeline_v2.cli_commands import (  # noqa: F401 — re-export
@@ -3035,8 +3036,8 @@ def run_anchored_mint(
                 if p.stat().st_size > 1_500_000:  # nav_parent's read cap
                     _d_text_cache[rel] = None
                 else:
-                    _d_text_cache[rel] = p.read_text(
-                        encoding="utf-8", errors="ignore")
+                    _d_text_cache[rel] = read_repo_text_or_raise(
+                        p, Path(getattr(ctx, "repo_path", ".")), errors="ignore")
             except OSError:
                 _d_text_cache[rel] = None
         return _d_text_cache[rel]
