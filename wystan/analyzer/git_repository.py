@@ -11,14 +11,23 @@ same for an ordinary repository.
 from __future__ import annotations
 
 import os
+import re
 from collections import deque
 from dataclasses import dataclass
 
-from wystan.analyzer.git_runner import GitError, UnsafeGit, run_git
+from wystan.analyzer.git_runner import GitError, GitFailed, UnsafeGit, run_git
 
 
 class NotARepository(GitError, ValueError):
     """``path`` is not (the top level of) a git working tree."""
+
+
+class ForeignOwnedRepository(GitError):
+    """``path`` lies inside a repository another user owns, which the user
+    did not name: git's ownership check stands, the engine says why."""
+
+
+_DUBIOUS = re.compile(r"dubious ownership in repository at '([^']*)'")
 
 
 @dataclass(frozen=True)
@@ -29,17 +38,22 @@ class GitRepository:
 
     working_tree_dir: str | None
     git_dir: str
+    #: The path the user named. git runs there (it finds the top itself), so
+    #: ``safe.directory`` never names a repository the user did not name.
+    named_root: str | None = None
 
     @property
     def root(self) -> str:
-        """Where git runs: the working tree, else the git directory."""
-        return self.working_tree_dir or self.git_dir
+        """Where git runs: the named path, else the working tree, else the
+        git directory."""
+        return self.named_root or self.working_tree_dir or self.git_dir
 
 
 def repository_root(repo: object) -> str | None:
     """The working tree (else git directory) of ``repo``: a
     :class:`GitRepository` or any object with GitPython's attributes."""
-    root = getattr(repo, "working_tree_dir", None) or getattr(repo, "git_dir", None)
+    root = (getattr(repo, "named_root", None) or getattr(repo, "working_tree_dir", None)
+            or getattr(repo, "git_dir", None))
     return os.fspath(root) if root else None
 
 
@@ -49,25 +63,35 @@ def open_repository(path: str | os.PathLike[str], *, search_parent_directories: 
     start = os.path.abspath(os.fspath(path))
     if not os.path.exists(start):
         raise FileNotFoundError(start)
-    bare, git_dir = _git_dir_of(start)
+    stay_inside = not search_parent_directories
+    bare, git_dir = _git_dir_of(start, stay_inside)
     if bare:
         # GitPython loaded a bare repository too (no working tree).
-        if not search_parent_directories and os.path.realpath(git_dir) != os.path.realpath(start):
+        if stay_inside and os.path.realpath(git_dir) != os.path.realpath(start):
             raise NotARepository(f"{start!r} is not the top of a git repository")
-        return GitRepository(None, git_dir)
-    cdup = _rev_parse(start, "--show-cdup")[0]
-    if cdup and not search_parent_directories:
+        return GitRepository(None, git_dir, start)
+    cdup = _rev_parse(start, stay_inside, "--show-cdup")[0]
+    if cdup and stay_inside:
         raise NotARepository(f"{start!r} is not the top of a git working tree")
-    return GitRepository(os.path.normpath(os.path.join(start, cdup)), git_dir)
+    return GitRepository(os.path.normpath(os.path.join(start, cdup)), git_dir, start)
 
 
-def _rev_parse(start: str, *flags: str) -> list[str]:
+def _rev_parse(start: str, stay_inside: bool, *flags: str) -> list[str]:
     """``git rev-parse <flags>`` lines; a failure means "not a repository",
-    except when no safe git exists, which the caller must see as is."""
+    except when no safe git exists or the enclosing repository belongs to
+    another user, which the caller must see as is."""
     try:
-        lines = run_git(start, "rev-parse", *flags).text.splitlines()
+        lines = run_git(start, "rev-parse", *flags, stay_inside=stay_inside).text.splitlines()
     except UnsafeGit:
         raise
+    except GitFailed as exc:
+        foreign = _DUBIOUS.search(exc.stderr)
+        if foreign:
+            raise ForeignOwnedRepository(
+                f"this directory is inside a git repository owned by another user ({foreign.group(1)}); "
+                "scan the repository's top level or pass it with --subpath"
+            ) from exc
+        raise NotARepository(f"{start!r} is not a git repository") from exc
     except GitError as exc:
         raise NotARepository(f"{start!r} is not a git repository") from exc
     if len(lines) != len(flags):
@@ -75,8 +99,8 @@ def _rev_parse(start: str, *flags: str) -> list[str]:
     return lines
 
 
-def _git_dir_of(start: str) -> tuple[bool, str]:
-    is_bare, git_dir = _rev_parse(start, "--is-bare-repository", "--absolute-git-dir")
+def _git_dir_of(start: str, stay_inside: bool) -> tuple[bool, str]:
+    is_bare, git_dir = _rev_parse(start, stay_inside, "--is-bare-repository", "--absolute-git-dir")
     return is_bare == "true", git_dir
 
 

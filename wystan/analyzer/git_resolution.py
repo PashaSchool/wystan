@@ -32,7 +32,7 @@ from __future__ import annotations
 import functools
 import os
 
-from wystan.analyzer.git_discovery import exclusion_roots, topmost_repository_ancestor
+from wystan.analyzer.git_discovery import exclusion_roots, read_pointer, topmost_repository_ancestor
 from wystan.analyzer.git_process import GitError, run_bounded
 from wystan.analyzer.path_identity import is_within
 
@@ -97,9 +97,6 @@ EXPLICIT_GIT_ENV = "WYSTAN_GIT"
 _NO_PROTOCOL = "none"
 _DISCOVERY_TIMEOUT_SEC = 10.0
 _DISCOVERY_OUTPUT_BYTES = 1 << 16
-#: Ownership is not a question for this read-only probe (every option above
-#: applies); the scan's own calls name only the scanned root.
-_DISCOVERY_SAFE_DIRECTORY = "safe.directory=*"
 
 
 class UnsafeGit(GitError):
@@ -186,7 +183,9 @@ def _explicit_git(value: str, scanned: str) -> str:
 
 
 def _confirmed_roots(git: str, root: str, search_path: str) -> tuple[str, ...]:
-    argv = [git, *SAFE_OPTIONS, "-c", _DISCOVERY_SAFE_DIRECTORY, "-C", root,
+    # Trust only the path itself: a foreign-owned enclosing repository makes
+    # the probe fail (then the file-system roots stand), never trusted.
+    argv = [git, *SAFE_OPTIONS, "-c", f"safe.directory={root}", "-C", root,
             "rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"]
     try:
         result = run_bounded(argv, base_environment(search_path), _DISCOVERY_TIMEOUT_SEC, _DISCOVERY_OUTPUT_BYTES)
@@ -199,8 +198,8 @@ def _confirmed_roots(git: str, root: str, search_path: str) -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=32)
-def _resolution(root: str, path: str, explicit: str) -> tuple[str, tuple[str, ...], str]:
-    """(git, exclusion roots, the working tree's top level, else ``root``)."""
+def _resolution(root: str, path: str, explicit: str) -> tuple[str, tuple[str, ...]]:
+    """(git, exclusion roots). Discovery only excludes; it never grants trust."""
     entries = _absolute_entries(path)
     roots = exclusion_roots(root)
     found = _explicit_git(explicit, root) if explicit else _pick(entries, roots)
@@ -208,19 +207,39 @@ def _resolution(root: str, path: str, explicit: str) -> tuple[str, tuple[str, ..
     for named in confirmed:
         if not any(is_within(named, r) for r in roots):
             raise UnsafeGit(f"git places {root} under {named}, outside the excluded locations; refusing")
-    return found, roots, (confirmed[0] if confirmed else root)
+    return found, roots
 
 
-def _resolve(repo_root: str, path: str | None = None) -> tuple[str, tuple[str, ...], str]:
+def _resolve(repo_root: str, path: str | None = None) -> tuple[str, tuple[str, ...]]:
     current = os.environ.get("PATH", os.defpath) if path is None else path
     return _resolution(os.path.realpath(repo_root), current, os.environ.get(EXPLICIT_GIT_ENV, ""))
 
 
-def trusted_directory(repo_root: str) -> str:
-    """The ``safe.directory`` to name for ``repo_root``: the top level of
-    its working tree (git checks ownership there, so a subdirectory scan of
-    another user's clone needs the top), else the path itself."""
-    return _resolve(repo_root)[2]
+def _is_git_dir(path: str) -> bool:
+    return os.path.isfile(os.path.join(path, "HEAD")) and os.path.isdir(os.path.join(path, "objects"))
+
+
+def is_repository_top(path: str) -> bool:
+    """``path`` is a working-tree top (a ``.git`` directory that looks like
+    a repository, or a ``gitdir:`` file) or a bare git directory. A bogus
+    ``.git`` does not count: git walks past it, and so does discovery."""
+    real = os.path.realpath(path)
+    dot_git = os.path.join(real, ".git")
+    if os.path.isdir(dot_git) and not os.path.islink(dot_git):
+        return _is_git_dir(dot_git)
+    pointer = read_pointer(dot_git)
+    return bool(pointer and pointer.startswith("gitdir:")) or _is_git_dir(real)
+
+
+def ceiling_environment(path: str, stay_inside: bool = False) -> dict[str, str]:
+    """``GIT_CEILING_DIRECTORIES`` at ``path``'s parent when git must not
+    adopt an enclosing repository: the path is itself a repository top (the
+    root the user named) or the caller asked for this path only."""
+    real = os.path.realpath(path)
+    parent = os.path.dirname(real)
+    if parent == real or os.pathsep in parent or not (stay_inside or is_repository_top(real)):
+        return {}
+    return {"GIT_CEILING_DIRECTORIES": parent}
 
 
 def safe_search_path(repo_root: str | None = None, path: str | None = None) -> str:
@@ -242,4 +261,7 @@ def git_executable(repo_root: str | None) -> str:
 
 def child_environment(repo_root: str | None = None) -> dict[str, str]:
     """The whole environment of the git child; nothing else is passed."""
-    return base_environment(safe_search_path(repo_root))
+    env = base_environment(safe_search_path(repo_root))
+    if repo_root:
+        env.update(ceiling_environment(repo_root))
+    return env

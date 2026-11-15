@@ -38,8 +38,8 @@ from wystan.analyzer.git_resolution import (
     UnsafeGit,
     child_environment,
     git_executable,
+    ceiling_environment,
     safe_search_path,
-    trusted_directory,
 )
 
 __all__ = [
@@ -94,10 +94,11 @@ class UnsafeArgument(GitError, ValueError):
 
 def git_command(repo_root: str, *args: str) -> list[str]:
     """``argv`` of a git command on ``repo_root``, ``argv[0]`` absolute.
-    ``safe.directory`` names this repository's top level only (command-line
-    scope is honoured for it), so a clone owned by another user still scans,
-    from its top or a subdirectory, without the user's global configuration."""
-    trusted = trusted_directory(repo_root)
+    ``safe.directory`` names exactly the path the caller passed (command-line
+    scope is honoured for it), never a repository found above it: the root
+    the user named scans even when another user owns it; an enclosing
+    repository the user did not name keeps git's own ownership check."""
+    trusted = os.path.realpath(repo_root)
     return [
         git_executable(repo_root), *SAFE_OPTIONS, "-c", f"safe.directory={trusted}",
         "-C", repo_root, *args,
@@ -180,6 +181,7 @@ def run_git(
     max_output: int = DEFAULT_MAX_OUTPUT_BYTES,
     check: bool = True,
     stdin: bytes | None = None,
+    stay_inside: bool = False,
 ) -> GitResult:
     """Run ``git <args>`` on ``repo_root`` through the hardened runner.
     Raises :class:`GitError` (``GitFailed`` for a non-zero exit when
@@ -187,6 +189,8 @@ def run_git(
     root = os.fspath(repo_root)
     subcommand = _check_subcommand(args)
     env = child_environment(root)
+    # ``stay_inside``: this path only, never an enclosing repository.
+    env.update(ceiling_environment(root, stay_inside))
     if subcommand in _FILTERING_SUBCOMMANDS:
         env.update(filter_environment(root))
     argv = git_command(root, subcommand, *_FORCED_FLAGS.get(subcommand, ()), *args[1:])

@@ -279,6 +279,8 @@ _LOG_TIMEOUT_SEC = 120.0
 #: ``%H %ct %an %B``, each field NUL-terminated (``git_history.split_records``).
 _FAST_FORMAT = f"%H{FIELD_END}%ct{FIELD_END}%an{FIELD_END}%B{FIELD_END}"
 _FAST_FIELDS = 4
+#: Pathspec magic: the path is relative to the top of the working tree.
+_TOP_PATHSPEC = ":(top)"
 
 
 def _get_commits_fast(
@@ -307,7 +309,9 @@ def _get_commits_fast(
            f"--pretty=format:{_FAST_FORMAT}", "--name-only", "-z"]
     norm_src = normalize_subpath(src)
     if norm_src is not None:
-        cmd += ["--", norm_src]
+        # git may run from the named subdirectory: the pathspec is the
+        # top-relative subpath either way.
+        cmd += ["--", f"{_TOP_PATHSPEC}{norm_src}"]
     try:
         result = run_git(repo_path, *cmd, timeout=_LOG_TIMEOUT_SEC, check=False)
     except GitError:
