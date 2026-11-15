@@ -53,6 +53,7 @@ from wystan.analyzer.repo_open import (
 )
 
 __all__ = [
+    "MANIFEST_READ_MAX_BYTES",
     "MAX_FILE_BYTES",
     "REFUSED_BINARY",
     "REFUSED_MISSING",
@@ -61,6 +62,7 @@ __all__ = [
     "REFUSED_OUTSIDE",
     "REFUSED_OVER_CAP",
     "SNIFF_BYTES",
+    "TEXT_READ_MAX_BYTES",
     "FileBytes",
     "open_repo_file",
     "read_repo_bytes",
@@ -72,6 +74,17 @@ __all__ = [
 #: the ten corpus clones is 10.7 MB (a bundled script); six times that keeps
 #: every file the map has ever counted and bounds what a crafted file costs.
 MAX_FILE_BYTES = 64 * 1024 * 1024
+#: Cap of a text read whose purpose sets no tighter bound (a source file, a
+#: catalog). The same as the line counters' cap: the largest tracked text
+#: file on the corpus is 10.7 MB.
+TEXT_READ_MAX_BYTES = MAX_FILE_BYTES
+#: Cap of a manifest or config read (package.json, tsconfig, Cargo.toml,
+#: go.mod, pyproject.toml, workspace files, git config). The largest such
+#: tracked file on the 27 corpus clones is 84 KB; 4 MiB is fifty times that.
+#: The smallest cap the guard sets: a smaller ``max_bytes`` is a call site's
+#: own work bound (it skipped the same files before the guard), and a file
+#: over it is not reported as a refusal.
+MANIFEST_READ_MAX_BYTES = 4 * 1024 * 1024
 #: Head inspected for a NUL byte before a file is read on (the line count's
 #: binary sniff has always read this much). The one copy of this number.
 SNIFF_BYTES = 8192
@@ -161,12 +174,21 @@ _TALLIED = {
 }
 
 
-def _tally(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, refused: str | None) -> None:
+def _is_reported(path: os.PathLike[str] | str, reason: str, cap: int) -> bool:
+    """Not reported, so an ordinary repository's map is unchanged: a
+    directory where a file was expected (a probe that found nothing;
+    ``read_text`` raised there too), and a file over a call site's own work
+    bound below the guard's caps (the site skipped it before the guard)."""
+    if reason == REASON_NOT_REGULAR:
+        return not os.path.isdir(path)
+    if reason == REASON_OVER_CAP:
+        return cap >= MANIFEST_READ_MAX_BYTES
+    return True
+
+
+def _tally(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, refused: str | None, cap: int) -> None:
     reason = _TALLIED.get(refused) if refused else None
-    # A directory where a file was expected is a probe that found nothing
-    # (``read_text`` raised there too), not a refusal: like a missing file
-    # it is not reported, so an ordinary repository's map is unchanged.
-    if reason is not None and not (reason == REASON_NOT_REGULAR and os.path.isdir(path)):
+    if reason is not None and _is_reported(path, reason, cap):
         record_refusal(path, repo_root, reason)
 
 
@@ -191,7 +213,7 @@ def open_repo_file(
                 refused = REFUSED_NOT_REGULAR
             elif size > cap:
                 refused = REFUSED_OVER_CAP
-        _tally(path, repo_root, refused)
+        _tally(path, repo_root, refused, cap)
         yield (None if refused else fd), size, refused
     finally:
         if fd is not None:
@@ -229,7 +251,7 @@ def read_repo_bytes(
             read = _read_rest(fd, head, cap)
     except OSError:
         read = FileBytes(None, REFUSED_OPEN_ERROR)
-    _tally(path, repo_root, read.refused)  # growth past the cap, a failed read
+    _tally(path, repo_root, read.refused, cap)  # growth past the cap, a failed read
     return read
 
 
@@ -237,8 +259,6 @@ def read_repo_bytes(
 # names are served from here too so call sites import one module. Resolved on
 # first use (PEP 562), so either module may be imported first.
 _TEXT_READS = frozenset({
-    "MANIFEST_READ_MAX_BYTES",
-    "TEXT_READ_MAX_BYTES",
     "read_repo_bytes_or_raise",
     "read_repo_head_or_raise",
     "read_repo_text_head_or_raise",
