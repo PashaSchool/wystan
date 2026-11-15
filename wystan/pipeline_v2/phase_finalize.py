@@ -2956,7 +2956,8 @@ def run_finalize_phase(
     if shared_leaf_consistency_enabled() and anchored_mint_applied:
         try:
             slc_tele = enforce_shared_leaf_consistency(
-                features, product_features, lineage_result.routes_index)
+                features, product_features, lineage_result.routes_index,
+                module_scopes=getattr(ctx, "module_scopes", None))
             scan_meta["shared_leaf_consistency"] = slc_tele
         except Exception as exc:  # noqa: BLE001 — never break a scan
             scan_meta.setdefault("warnings", []).append(
@@ -3832,6 +3833,9 @@ def run_finalize_phase(
                     "keeper_on": keeper_enabled(),
                     "repo_root": ctx.repo_path,
                 },
+                # Rule S2: a journey folds only into a journey of its own
+                # module scope.
+                module_scopes=getattr(ctx, "module_scopes", None),
             )
             _gaps = _sq_tele.get("coverage_gaps")
             # KEY-PRESENCE contract: the pass returns None in off mode (key
@@ -4022,6 +4026,9 @@ def run_finalize_phase(
             try:
                 _hag_tele = apply_home_affinity_gate(
                     user_flows, features, product_features,
+                    # Rule S2: better homes only inside a journey's own
+                    # module scope.
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 _orphan_gap_rows, _og_tele = build_orphan_flow_gaps(
                     user_flows, features, product_features,
@@ -4623,6 +4630,9 @@ def run_finalize_phase(
                     # (mirror of the 6.7d backstop's ``pf_flows``). Ignored
                     # while WYSTAN_TJR_DONOR_GUARD is off.
                     developer_features=features,
+                    # Rule S2: targets only inside a journey's own module
+                    # scope.
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 scan_meta["token_journey_rehome"] = _tjr_tele
                 log_tjr.info(
@@ -4887,6 +4897,7 @@ def run_finalize_phase(
                         "cache": getattr(ctx, "cache_backend", None),
                         "llm_health": llm_health,
                     },
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 scan_meta["feature_names"] = _fn_tele
                 log_fn.info(
@@ -5722,7 +5733,9 @@ def run_finalize_phase(
             run_orphan_uf_path_attach,
         )
         _oup_tele = run_orphan_uf_path_attach(
-            product_features, features, user_flows, list(bipartite.flows))
+            product_features, features, user_flows, list(bipartite.flows),
+            # Rule S2: only owners of the journey's own module scope vote.
+            module_scopes=getattr(ctx, "module_scopes", None))
         if _oup_tele is not None:
             scan_meta["orphan_uf_path_attach"] = _oup_tele
     except Exception as exc:  # noqa: BLE001 — attach never breaks a scan
@@ -6291,7 +6304,9 @@ def run_finalize_phase(
     try:
         from wystan.pipeline_v2.orphan_uf_path_attach import run_orphan_uf_owner_attach
         scan_meta["orphan_uf_owner_attach"] = run_orphan_uf_owner_attach(
-            product_features, features, user_flows, list(bipartite.flows))
+            product_features, features, user_flows, list(bipartite.flows),
+            # Rule S2: only owners of the journey's own module scope count.
+            module_scopes=getattr(ctx, "module_scopes", None))
     except Exception as exc:  # noqa: BLE001 — attach never breaks a scan
         scan_meta.setdefault("warnings", []).append(
             f"orphan-uf owner-attach failed ({exc}); orphans left"

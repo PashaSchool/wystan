@@ -55,19 +55,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import re
-import statistics
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
 from wystan.llm.cost import deterministic_params
 from wystan.llm.model_gateway import resolve_model as gateway_model
+from wystan.pipeline_v2.module_scope import ModuleScopes, grain_rulers
 from wystan.pipeline_v2.stage_8_9_anchor_subdecompose import (
     _MIN_DOMAINS,
-    _OVERSIZED_MEDIAN_MULT,
-    _OVERSIZED_SHARE,
     _deown_residual,
     _make_subfeature,
     _owned_paths,
@@ -332,11 +329,17 @@ def llm_component_split(
     model: str = DEFAULT_MODEL,
     cache_backend: Any | None = None,
     repo_slug: str = "repo",
+    module_scopes: ModuleScopes | None = None,
     _client_factory: Callable[[], Any | None] = _default_client_factory,
 ) -> LlmComponentSplitResult:
     """Split oversized component-blob features into per-product-area
     sub-features using a cached LLM label per blob. Mutates *features* in
     place (de-owns the split source, appends sub-features). Returns telemetry.
+
+``module_scopes`` is the scan's record of the rows that belong to a
+    nested module (``module_scope.ModuleScopes``, made by Stage 2): a
+    feature is oversized among the rows of its own module scope, as in
+    Stage 8.9. ``None`` or empty — the default — means one repo-wide ruler.
 
     No-op when disabled, when no client is available, or when no oversized
     feature carries a real ``components`` fan-out — safe to wire unconditionally.
@@ -352,21 +355,18 @@ def llm_component_split(
     if not devs:
         return result
 
-    # Repo-grain thresholds — IDENTICAL definition to Stage 8.9
-    # (rule-no-magic-tuning): floor = median feature size, oversized cut =
-    # max(2x median, 15% of all owned files), anti-shatter cap = other-feature
-    # count. Computed once over the current developer-feature set.
+    # Grain thresholds — the SAME ruler as Stage 8.9, from the one place
+    # that computes it (rule-no-magic-tuning): oversized cut = max(2x
+    # median, 15% of the owned files) among the rows of the feature's own
+    # module scope, anti-shatter cap = the number of those other rows.
+    # Computed once over the current developer-feature set.
     owned_by = {id(f): _owned_paths(f) for f in devs}
-    sizes = [len(v) for v in owned_by.values() if v]
-    if not sizes:
+    rulers = grain_rulers([owned_by[id(f)] for f in devs], module_scopes)
+    ruler_of = {
+        id(f): ruler for f, ruler in zip(devs, rulers) if ruler is not None
+    }
+    if not ruler_of:
         return result
-    median = max(2, int(statistics.median(sizes)))
-    total_owned = len({p for v in owned_by.values() for p in v})
-    cut = max(
-        _OVERSIZED_MEDIAN_MULT * median,
-        math.ceil(_OVERSIZED_SHARE * total_owned),
-    )
-    max_domains = max(_MIN_DOMAINS, len(devs) - 1)
 
     if client is None:
         client = _client_factory()
@@ -374,6 +374,11 @@ def llm_component_split(
     used_names = {f.name for f in features}
 
     for source in list(devs):
+        ruler = ruler_of.get(id(source))
+        if ruler is None:
+            continue  # no row this one is measured with owns a file
+        cut = ruler.cut
+        max_domains = max(_MIN_DOMAINS, ruler.peers - 1)
         owned = owned_by[id(source)]
         # Oversized when EITHER surface crosses the cut: the owned set (what
         # the split moves) OR the member_files ledger (the surface the blob

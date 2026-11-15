@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from wystan.cache.backend import CacheBackend
     from wystan.pipeline_v2.git_snapshot import GitSnapshot
+    from wystan.pipeline_v2.module_scope import ModuleScopes
     from wystan.pipeline_v2.shared_source import SharedSourceState
     from wystan.pipeline_v2.stage_0_6_shape import ClassificationResult
 
@@ -166,6 +167,12 @@ class ScanContext:
     # across the ``_isolate`` stage boundary. ``None`` → every consumer
     # constructs its cache locally (tests / replay / scoped contexts).
     shared_source: "SharedSourceState | None" = None
+    # Which rows exist only because a nested module was read (see
+    # ``module_scope``). Written once, by the orchestrator, from the
+    # Stage 2 result; ``None`` before Stage 2 and in a repository
+    # without such rows it is empty. Captured with the stage inputs, so
+    # a replayed stage measures and names as the scan did.
+    module_scopes: "ModuleScopes | None" = None
 
     def with_shape(self, result: "ClassificationResult") -> "ScanContext":
         """Return a NEW ScanContext with the shape-classification fields populated.

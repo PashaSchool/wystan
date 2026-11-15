@@ -249,10 +249,43 @@ def _is_structural_home(pf: "Feature") -> bool:
     return len(name.replace("-", "")) <= 2
 
 
+def _journey_and_feature_scopes(
+    product_features: list["Feature"],
+    user_flows: list["UserFlow"],
+    developer_features: list["Feature"] | None,
+    module_scopes: Any,
+) -> tuple[dict[int, str], dict[str, str], dict[int, str]]:
+    """Rule S2 (:mod:`rehome_scopes`): ``(journey scopes by id(journey),
+    product feature scopes by name, developer row scopes by id(row))``.
+    Without a nested module every value is the root scope."""
+    from wystan.pipeline_v2.rehome_scopes import (
+        journey_scopes,
+        product_feature_scopes,
+        row_scopes,
+    )
+
+    developers = [
+        d for d in developer_features or ()
+        if getattr(d, "layer", "developer") == "developer"
+    ]
+    flow_by_id: dict[str, Any] = {}
+    for dev in developers:
+        for fl in getattr(dev, "flows", None) or []:
+            for key in (getattr(fl, "uuid", None), getattr(fl, "name", None)):
+                if key and key not in flow_by_id:
+                    flow_by_id[key] = fl
+    return (
+        journey_scopes(user_flows, flow_by_id, module_scopes),
+        product_feature_scopes(product_features, developers, module_scopes),
+        row_scopes(developers, module_scopes),
+    )
+
+
 def run_token_journey_rehome(
     product_features: list["Feature"],
     user_flows: list["UserFlow"],
     developer_features: list["Feature"] | None = None,
+    module_scopes: Any = None,
 ) -> dict[str, Any]:
     """Re-home mis-homed journeys by resource/name token match. Mutates
     ``UserFlow.product_feature_id`` (+ ``lane_ref``/``residual``) in place;
@@ -260,7 +293,13 @@ def run_token_journey_rehome(
 
     ``developer_features`` feeds the donor guard's flow-ful test (the sibling's
     ``pf_flows`` construction: dev stamp → PF slug → owned flows). ``None``
-    keeps the pre-fixb109 call contract; the guard then cannot fire."""
+    keeps the pre-fixb109 call contract; the guard then cannot fire.
+
+    ``module_scopes`` is the scan's record of nested modules (rule S2,
+    :mod:`rehome_scopes`): a journey's targets are the product features of
+    its own module scope, and the donor guard counts the journeys and the
+    developer rows of that scope. ``None`` or an empty record: one scope,
+    the pass as it was."""
     tele: dict[str, Any] = {
         "enabled": True, "applied": False,
         "candidates": 0, "rehomed": 0, "fallbacks": 0,
@@ -273,8 +312,13 @@ def run_token_journey_rehome(
     # running REAL-journey census (mirror of its ``covered`` Counter). "Real" =
     # ``synthesized`` falsy: the ratchet class counts exactly those, and a
     # synthesized seed can never clear it (P9 §0.2).
-    pf_flow_count: dict[str, int] = {}
-    real_cover: dict[str, int] = {}
+    # Rule S2: both censuses are kept per (module scope, feature), so a
+    # journey's guard counts only its own scope (one scope without modules).
+    uf_scope, pf_scope, dev_scope = _journey_and_feature_scopes(
+        product_features, user_flows, developer_features, module_scopes,
+    )
+    pf_flow_count: dict[tuple[str, str], int] = {}
+    real_cover: dict[tuple[str, str], int] = {}
     if guard_on:
         for dev in developer_features or ():
             if getattr(dev, "layer", "developer") != "developer":
@@ -282,17 +326,20 @@ def run_token_journey_rehome(
             pid = getattr(dev, "product_feature_id", None)
             if not pid:
                 continue
-            pf_flow_count[str(pid)] = (pf_flow_count.get(str(pid), 0)
-                                       + len(getattr(dev, "flows", None) or []))
+            key = (dev_scope[id(dev)], str(pid))
+            pf_flow_count[key] = (pf_flow_count.get(key, 0)
+                                  + len(getattr(dev, "flows", None) or []))
         for _uf in user_flows:
             if getattr(_uf, "synthesized", False):
                 continue
             _pid = getattr(_uf, "product_feature_id", None)
             if _pid:
-                real_cover[str(_pid)] = real_cover.get(str(_pid), 0) + 1
+                key = (uf_scope[id(_uf)], str(_pid))
+                real_cover[key] = real_cover.get(key, 0) + 1
+        flowful = {pid for (_scope, pid), v in pf_flow_count.items() if v > 0}
         tele["donor_guard"] = {
             "enabled": True, "abstained": 0, "abstentions": [],
-            "flowful_donors": sum(1 for v in pf_flow_count.values() if v > 0),
+            "flowful_donors": len(flowful),
         }
     pf_by_name: dict[str, "Feature"] = {}
     for pf in product_features:
@@ -317,6 +364,7 @@ def run_token_journey_rehome(
             target_toks.append((pf, toks))
 
     for uf in user_flows:
+        scope = uf_scope[id(uf)]
         pfid = getattr(uf, "product_feature_id", None)
         home = pf_by_name.get(pfid) if pfid else None
         home_missing = pfid is not None and home is None
@@ -341,6 +389,8 @@ def run_token_journey_rehome(
         for pf, toks in target_toks:
             if pf is home:
                 continue
+            if pf_scope.get(getattr(pf, "name", None), "") != scope:
+                continue  # rule S2: never a target of another module scope
             ov = len(uf_toks & toks)
             if ov > best_overlap or (
                     ov == best_overlap and ov > 0 and best_pf is not None
@@ -362,6 +412,7 @@ def run_token_journey_rehome(
             reason = _guard_abstain_reason(
                 uf, home, pfid, home_struct,
                 pf_flow_count=pf_flow_count, real_cover=real_cover,
+                scope=scope,
             )
             if reason is not None:
                 _g = tele["donor_guard"]
@@ -382,11 +433,12 @@ def run_token_journey_rehome(
                 # keep the running REAL census honest for later donors
                 # (mirror of the sibling's ``covered[donor] -= 1``)
                 if pfid:
-                    real_cover[str(pfid)] = max(
-                        0, real_cover.get(str(pfid), 0) - 1)
+                    real_cover[(scope, str(pfid))] = max(
+                        0, real_cover.get((scope, str(pfid)), 0) - 1)
                 _to = getattr(best_pf, "name", None)
                 if _to:
-                    real_cover[str(_to)] = real_cover.get(str(_to), 0) + 1
+                    real_cover[(scope, str(_to))] = (
+                        real_cover.get((scope, str(_to)), 0) + 1)
             tele["displacements"].append({
                 "uf_id": getattr(uf, "id", None),
                 "uf_name": getattr(uf, "name", None),
@@ -422,8 +474,9 @@ def _guard_abstain_reason(
     pfid: str | None,
     home_struct: bool,
     *,
-    pf_flow_count: dict[str, int],
-    real_cover: dict[str, int],
+    pf_flow_count: dict[tuple[str, str], int],
+    real_cover: dict[tuple[str, str], int],
+    scope: str = "",
 ) -> str | None:
     """The donor guard's verdict for ONE would-be move: a reason string to
     abstain, or ``None`` to let the shipped law stand.
@@ -450,7 +503,9 @@ def _guard_abstain_reason(
     if _is_double_duty_home(uf, donor):
         return "donor_name_is_journey_action"
     # M1 — never carry a flow-ful donor's LAST REAL journey away.
-    if pf_flow_count.get(donor, 0) > 0 and real_cover.get(donor, 0) <= 1:
+    # Counted inside the journey's own module scope (rule S2).
+    if (pf_flow_count.get((scope, donor), 0) > 0
+            and real_cover.get((scope, donor), 0) <= 1):
         return "donor_last_real_journey"
     return None
 

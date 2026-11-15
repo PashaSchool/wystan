@@ -65,6 +65,15 @@ class AnchorCandidate:
             discarded. Sorted, deduped, lowercase. Empty for stacks
             without route groups; additive — nothing downstream is
             required to read it.
+        scope: ``""`` for every anchor read from the repository root
+            (all extractors, always, before nested modules were read).
+            An extractor that also reads a layout from a nested module
+            root sets it, on the anchors it could not have produced
+            from the repository root, to that root as a repo-relative
+            POSIX path (``"services/api"``). The name is then unique
+            inside that module only, and Stage 2 neither joins the
+            anchor by name with one of another root nor lets it take a
+            file an unscoped anchor claims (see ``module_scope``).
     """
 
     name: str
@@ -75,6 +84,7 @@ class AnchorCandidate:
     rationale: str = ""
     routes: tuple[tuple[str, str, str], ...] = ()
     route_groups: tuple[str, ...] = ()
+    scope: str = ""
 
 
 @runtime_checkable

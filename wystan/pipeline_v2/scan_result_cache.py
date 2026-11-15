@@ -1035,7 +1035,7 @@ ENV_OUTPUT_FLAGS = (
     # between the 6.86 mint window and the Stage 6.7 UF family — the
     # single existing mint sees the new flows naturally (no new mint
     # channel). Healthy flow-density is a secondary EXCLUDE-only filter
-    # (< repo flowful median / _OVERSIZED_MEDIAN_MULT); chunk
+    # (below half the flowful median of the row's peers); chunk
     # eligibility is ratio-triggered (exports/paths prompt caps)
     # independent of the global oversized cut; locale-births die on the
     # existing MIN_EXPORTS gate. Reshapes flows[] /
@@ -3761,10 +3761,22 @@ ENV_OUTPUT_FLAGS = (
 #: that is another feature's slug is not taken as a name.
 #: KS117 (2026-11-12): ``developer_features`` is written as the ids of the
 #: developer rows of ``features`` instead of a second copy of them (D5).
+#: KS118 (2026-11-12): ``go-package`` also reads the Go layout from every
+#: ``go.mod`` below the repository root; the rows that exist only because of
+#: it form a module scope (own flow names, own "oversized" ruler, joined by
+#: name only inside it); every row a repository had before is unchanged.
+#: KS120 (2026-11-12): the same rule as KS118, rebuilt; 118 and 119 are
+#: skipped because maps of two rejected builds were written under them.
+#: KS121 (2026-11-12): the unit that registers a command tool's commands
+#: takes the tool's anchor where it would stand alone under its package name;
+#: the file lane counts a product feature that lives wholly in a nested
+#: module only for files of that module.
 #: KS122 (2026-11-12): the journey refiner and the name writer remember an
 #: answer under a key without the scan ordinals (the question sent to the
 #: model is unchanged; the refiner's answer is stored by local id and mapped
 #: back); 118-121 are other branches'.
+#: KS123 (2026-11-13): the nested-module scope rules (KS118-121) and the
+#: content-keyed name memory (KS122) in one build; no rule changed.
 #: KS125 (2026-11-13): Stage 8.9 splits a flat oversized row by the route
 #: group its files handle when it has no directory to split along; 123 and
 #: 124 are other branches'.
@@ -3777,7 +3789,10 @@ ENV_OUTPUT_FLAGS = (
 #: KS128 (2026-11-13): born-row record and anchor rule changed the map.
 #: KS129 (2026-11-13): a split's residual parent seeds no lattice journey.
 #: KS130 (2026-11-13): the KS129 rule is withdrawn; maps of 129 are not this engine's.
-KEY_SCHEMA_VERSION = 130
+#: KS131 (2026-11-14): the nested-module scope rules (KS123) merged with KS130.
+#: KS132 (2026-11-15): veto, name writer and feature naming ask per module scope (rule S1).
+#: KS133 (2026-11-15): nothing is re-homed or folded across module scopes (rule S2).
+KEY_SCHEMA_VERSION = 133
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
