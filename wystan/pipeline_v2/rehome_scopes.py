@@ -44,6 +44,7 @@ __all__ = [
     "REPOSITORY_ROOT",
     "flow_files",
     "journey_scopes",
+    "journey_scopes_from_flows",
     "product_feature_scopes",
     "row_scopes",
     "targets_in_scope",
@@ -83,6 +84,24 @@ def journey_scopes(
         for uf in user_flows
     ]
     scopes = scopes_of_items(files_per_journey, module_scopes)
+    return {id(uf): scope for uf, scope in zip(user_flows, scopes)}
+
+
+def journey_scopes_from_flows(
+    user_flows: Sequence[Any], flows: Iterable[Any], module_scopes: ModuleScopes | None,
+) -> dict[int, str]:
+    """``{id(journey): scope}`` from the flows that name the journey as
+    theirs (``Flow.user_flow_id``): how the naming pass reads a journey's
+    code (``product_language_names._member_files``), for the steps of that
+    pass."""
+    if not module_scopes:
+        return {id(uf): REPOSITORY_ROOT for uf in user_flows}
+    files_of: dict[str, list[str]] = {}
+    for flow in flows:
+        owner = getattr(flow, "user_flow_id", None)
+        if owner:
+            files_of.setdefault(str(owner), []).extend(flow_files(flow))
+    scopes = scopes_of_items([files_of.get(str(uf.id), []) for uf in user_flows], module_scopes)
     return {id(uf): scope for uf, scope in zip(user_flows, scopes)}
 
 

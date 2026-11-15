@@ -442,7 +442,9 @@ def run_feature_names(
     _Applier(product_features, rows, violations, joins_prefix, telemetry).apply(answers)
     if telemetry["not_a_capability"]:
         telemetry["removal"] = demote_unnameable_features(
-            product_features, developer_features, user_flows, flows)
+            product_features, developer_features, user_flows, flows,
+            # Rule S2: what leaves a rejected feature stays in its module scope.
+            module_scopes=module_scopes)
     telemetry["conservation"] = conservation_report(
         before, product_layer_total(product_features, developer_features),
         journeys=(counts[0], len(user_flows)), flows=(counts[1], len(flows)),

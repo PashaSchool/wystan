@@ -809,6 +809,8 @@ def name_product_layer(
     # What has no product-language name is not shown as product.
     telemetry["features_removed"] = demote_unnameable_features(
         product_features, developer, user_flows, flows,
+        # Rule S2: what leaves a removed feature stays in its module scope.
+        module_scopes=getattr(ctx, "module_scopes", None),
     )
     if name_flows:
         telemetry["flows_removed"] = drop_unnameable_flows(user_flows, flows)

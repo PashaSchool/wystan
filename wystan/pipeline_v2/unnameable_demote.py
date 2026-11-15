@@ -28,6 +28,12 @@ from typing import Any
 
 from wystan.pipeline_v2.ownership_moves import credit_lines, mark_not_product
 from wystan.pipeline_v2.product_language_names import JOINS_PREFIX, is_unnameable
+from wystan.pipeline_v2.rehome_scopes import (
+    REPOSITORY_ROOT,
+    journey_scopes_from_flows,
+    product_feature_scopes,
+    row_scopes,
+)
 
 __all__ = ["SHARED_REASON", "demote_unnameable_features", "drop_unnameable_flows"]
 
@@ -123,16 +129,55 @@ def _joined_feature(feature: Any, survivors: list[str]) -> str | None:
     return None
 
 
+class _ScopedHomes:
+    """Rule S2 (:mod:`rehome_scopes`): a row or a journey of a removed
+    feature goes only to a feature of its own module scope, whether by a
+    stated join, by the name of its directory or by the owner of its pages.
+    A repository item is placed exactly as if no nested module had been
+    read. Without a nested module every item and feature is in the root
+    scope and every list here is the full list."""
+
+    def __init__(
+        self, product_features: list[Any], developer_features: list[Any],
+        user_flows: list[Any], flows: list[Any], module_scopes: Any,
+    ) -> None:
+        self._feature = product_feature_scopes(product_features, developer_features, module_scopes)
+        self._row = row_scopes(developer_features, module_scopes)
+        self._journey = journey_scopes_from_flows(user_flows, flows, module_scopes)
+
+    def of_row(self, dev: Any) -> str:
+        return self._row.get(id(dev), REPOSITORY_ROOT)
+
+    def of_journey(self, user_flow: Any) -> str:
+        return self._journey.get(id(user_flow), REPOSITORY_ROOT)
+
+    def same(self, scope: str, target: str | None) -> str | None:
+        """``target`` when it is a feature of ``scope``, else ``None``."""
+        return target if target and self._feature.get(target, REPOSITORY_ROOT) == scope else None
+
+    def survivors(self, survivors: list[str], scope: str) -> list[str]:
+        return [slug for slug in survivors if self._feature.get(slug, REPOSITORY_ROOT) == scope]
+
+    def owners(self, owner_of: dict[str, str], scope: str) -> dict[str, str]:
+        return {path: slug for path, slug in owner_of.items() if self._feature.get(slug, REPOSITORY_ROOT) == scope}
+
+
 def demote_unnameable_features(
     product_features: list[Any],
     developer_features: list[Any],
     user_flows: list[Any],
     flows: list[Any] = (),
+    module_scopes: Any = None,
 ) -> dict[str, Any]:
-    """Remove unnameable product features in place; returns telemetry."""
+    """Remove unnameable product features in place; returns telemetry.
+
+    ``module_scopes`` is the scan's record of nested modules (rule S2):
+    what leaves a removed feature goes only to a feature of its own scope.
+    ``None`` or an empty record: one scope, the pass as it was."""
     demoted = sorted((pf for pf in product_features if is_unnameable(pf)), key=lambda pf: pf.name)
     gone = {pf.name for pf in demoted}
     survivors = [pf.name for pf in product_features if pf.name not in gone]
+    scoped = _ScopedHomes(product_features, developer_features, user_flows, list(flows), module_scopes)
     telemetry: dict[str, Any] = {"demoted": [], "devs_rehomed": 0, "devs_unowned": 0}
     joins = {pf.name: _joined_feature(pf, survivors) for pf in demoted}
     telemetry["joined"] = {name: target for name, target in joins.items() if target}
@@ -143,9 +188,11 @@ def demote_unnameable_features(
     for dev in sorted(developer_features, key=lambda d: d.name):
         if dev.product_feature_id not in gone:
             continue
+        scope = scoped.of_row(dev)
         # Plumbing has no home by resemblance: only a stated join moves it.
-        by_name = None if dev.product_feature_id in plumbing else _home_for(dev, survivors)
-        home = joins.get(dev.product_feature_id) or by_name
+        by_name = None if dev.product_feature_id in plumbing else _home_for(
+            dev, scoped.survivors(survivors, scope))
+        home = scoped.same(scope, joins.get(dev.product_feature_id)) or by_name
         moved_from.setdefault(dev.product_feature_id, []).append(dev.name)
         _credit_lines(dev, home, by_slug)
         new_home[dev.name] = home
@@ -166,18 +213,22 @@ def demote_unnameable_features(
     journeys_of: Counter[str] = Counter()
     all_flows = list(flows)
     not_product: list[Any] = []
+    owners_in: dict[str, dict[str, str]] = {}
     for user_flow in user_flows:
         if user_flow.product_feature_id not in gone:
             continue
         journeys_of[user_flow.product_feature_id] += 1
-        joined = joins.get(user_flow.product_feature_id)
+        scope = scoped.of_journey(user_flow)
+        joined = scoped.same(scope, joins.get(user_flow.product_feature_id))
         if joined and not _code_went_to(user_flow, joined, all_flows, owner_of_dev):
             # The feature joined another one; this journey's code did not.
             telemetry["flows_not_following_join"] += 1
             joined = None
-        home = joined or new_home.get(str(getattr(user_flow, "domain", "") or ""))
+        home = joined or scoped.same(scope, new_home.get(str(getattr(user_flow, "domain", "") or "")))
         was_plumbing = user_flow.product_feature_id in plumbing
-        user_flow.product_feature_id = home or _flow_home(user_flow, all_flows, owner_of)
+        if scope not in owners_in:
+            owners_in[scope] = scoped.owners(owner_of, scope)
+        user_flow.product_feature_id = home or _flow_home(user_flow, all_flows, owners_in[scope])
         if was_plumbing and not user_flow.product_feature_id:
             not_product.append(user_flow)
             continue
