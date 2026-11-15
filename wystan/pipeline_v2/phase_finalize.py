@@ -4888,6 +4888,7 @@ def run_finalize_phase(
                         "cache": getattr(ctx, "cache_backend", None),
                         "llm_health": llm_health,
                     },
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 scan_meta["feature_names"] = _fn_tele
                 log_fn.info(

@@ -31,7 +31,14 @@ import re
 from typing import Any, Callable, Iterable
 
 from wystan.cache.backend import CacheKind
+from wystan.pipeline_v2.module_scope import ModuleScopes
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
+from wystan.pipeline_v2.request_scopes import (
+    feature_scopes,
+    group_by_scope,
+    scope_label,
+    scope_lookup,
+)
 from wystan.pipeline_v2.stage_6_9_test_strip import is_test_path
 from wystan.pipeline_v2.unnameable_demote import PLUMBING_NOTE
 
@@ -208,6 +215,31 @@ def _ask(
     return verdicts
 
 
+def _ask_per_scope(
+    rows: dict[str, dict[str, Any]], kept: list[Any], scope_of: Callable[[str], str],
+    ask: Callable[[dict[str, dict[str, Any]], list[Any]], dict[str, tuple[str, str]]],
+    telemetry: dict[str, Any],
+) -> dict[str, tuple[str, str]]:
+    """Verdicts asked per module scope (``request_scopes``, rule S1).
+
+    The candidates of one scope are asked beside the kept features of the
+    same scope only: a module feature asked beside the repository's was
+    judged against them, and the repository's beside the module's. The
+    root scope's requests are the ones composed when no module exists.
+    With one scope this is one ``ask`` over everything, as before.
+    """
+    groups = group_by_scope(sorted(rows), scope_of)
+    verdicts: dict[str, tuple[str, str]] = {}
+    for scope, slugs in groups:
+        kept_here = [f for f in kept if scope_of(f.name) == scope]
+        verdicts.update(ask({slug: rows[slug] for slug in slugs}, kept_here))
+    if len(groups) > 1:
+        # Written only when a request was split, so a scan without a nested
+        # module keeps its telemetry as it was.
+        telemetry["asked_by_scope"] = {scope_label(scope): len(slugs) for scope, slugs in groups}
+    return verdicts
+
+
 def _lawful_name(feature: Any, taken: set[str], violations: Callable[[str], list[str]]) -> str | None:
     """The name a kept feature wears: the one it has when that passes the
     laws, else its slug written as words; ``None`` when neither does."""
@@ -255,11 +287,14 @@ def run_demotion_veto(
     joins_prefix: str,
     llm: dict[str, Any] | None = None,
     client_factory: Callable[[], Any | None] = _default_client_factory,
+    module_scopes: ModuleScopes | None = None,
 ) -> dict[str, Any]:
     """Judge the features about to be removed, in place; returns telemetry.
 
     A ``capability`` loses its unnameable note and so is not removed; a
-    ``part_of`` gains the join note the removal already honours."""
+    ``part_of`` gains the join note the removal already honours.
+    ``module_scopes`` is the scan's record of nested modules: the
+    candidates of each module are asked in requests of their own."""
     llm = llm or {}
     telemetry: dict[str, Any] = {
         "applied": False, "reason": None, "model": MODEL_ID, "candidates": 0, "asked": 0,
@@ -289,7 +324,12 @@ def run_demotion_veto(
         else:
             kept = [f for f in product_features if not is_candidate(f)]
             telemetry["asked"] = len(unknown)
-            fresh = _ask(unknown, kept, llm, client, telemetry)
+            scope_of = scope_lookup(feature_scopes(product_features, developer_features, module_scopes))
+            fresh = _ask_per_scope(
+                unknown, kept, scope_of,
+                lambda batch, kept_here: _ask(batch, kept_here, llm, client, telemetry),
+                telemetry,
+            )
             for slug, verdict in fresh.items():
                 _remember(cache, _cache_key(rows[slug]), verdict)
             verdicts.update(fresh)
