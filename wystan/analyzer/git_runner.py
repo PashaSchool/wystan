@@ -26,11 +26,14 @@ not a plain token makes the command refuse instead of run.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import os
 import re
-from typing import BinaryIO, Callable, TypeVar
+import shutil
+import tempfile
+from typing import BinaryIO, Callable, Iterator, TypeVar
 
 from wystan.analyzer.git_arguments import FORMS, refusal
 from wystan.analyzer.git_process import GitError, GitFailed, GitResult, run_bounded, run_streaming
@@ -68,6 +71,9 @@ _FORCED_FLAGS = {
 #: Commands that hash working-tree files, where git runs the clean filters
 #: the clone's configuration defines.
 _FILTERING_SUBCOMMANDS = frozenset({"diff", "status"})
+#: Commands that rewrite the index as a side effect even when optional
+#: locks are off (git's diff refreshes it with a mandatory lock).
+_INDEX_REFRESHING = frozenset({"diff"})
 #: Commands whose output lists untracked files.
 _LISTS_UNTRACKED = frozenset({"status"})
 _FILTER_KEYS = ("clean", "smudge", "process")
@@ -186,6 +192,26 @@ def _user_options(subcommand: str) -> tuple[str, ...]:
     return ("-c", f"core.excludesFile={excludes}") if excludes else ()
 
 
+@contextlib.contextmanager
+def _private_index(root: str, subcommand: str, env: dict[str, str]) -> Iterator[dict[str, str]]:
+    """``GIT_INDEX_FILE`` on a private copy of the index for commands that
+    refresh it whatever ``GIT_OPTIONAL_LOCKS`` says (porcelain ``diff``):
+    the refresh writes the copy, never the scanned clone; the output is the
+    same."""
+    if subcommand not in _INDEX_REFRESHING:
+        yield {}
+        return
+    found = run_bounded(git_command(root, "rev-parse", "--git-path", "index"), env, _CONFIG_TIMEOUT_SEC, 1 << 12)
+    index = os.path.join(root, found.text.strip()) if found.returncode == 0 else ""
+    if not index or not os.path.isfile(index) or os.path.islink(index):
+        yield {}
+        return
+    with tempfile.TemporaryDirectory(prefix="wystan-index-") as private:
+        copy = os.path.join(private, "index")
+        shutil.copyfile(index, copy)
+        yield {"GIT_INDEX_FILE": copy}
+
+
 def _prepared(root: str, args: tuple[str, ...], stay_inside: bool) -> tuple[str, list[str], dict[str, str]]:
     """(subcommand, argv, environment) of an allowed command on ``root``."""
     subcommand = _check_subcommand(args)
@@ -221,7 +247,8 @@ def run_git(
     Raises :class:`GitError` (``GitFailed`` for a non-zero exit when
     ``check``); ``args[0]`` must be an allowed subcommand."""
     subcommand, argv, env = _prepared(os.fspath(repo_root), args, stay_inside)
-    result = run_bounded(argv, env, timeout, max_output, stdin)
+    with _private_index(os.fspath(repo_root), subcommand, env) as index_env:
+        result = run_bounded(argv, {**env, **index_env}, timeout, max_output, stdin)
     if check and result.returncode != 0:
         raise GitFailed(subcommand, result)
     return result
