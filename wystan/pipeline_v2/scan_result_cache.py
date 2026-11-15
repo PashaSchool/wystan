@@ -3791,7 +3791,8 @@ ENV_OUTPUT_FLAGS = (
 #: KS130 (2026-11-13): the KS129 rule is withdrawn; maps of 129 are not this engine's.
 #: KS131 (2026-11-14): the nested-module scope rules (KS123) merged with KS130.
 #: KS132 (2026-11-15): veto, name writer and feature naming ask per module scope (rule S1).
-KEY_SCHEMA_VERSION = 132
+#: KS133 (2026-11-15): nothing is re-homed or folded across module scopes (rule S2).
+KEY_SCHEMA_VERSION = 133
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
