@@ -460,7 +460,7 @@ _DJANGO_SETTINGS_MARKERS = (
 )
 
 
-def _is_django_repo(root: Path, files: list[str], dep_haystack: str, *, scan_root: Path) -> bool:
+def _is_django_repo(root: Path, files: list[str], dep_haystack: str, *, scan_root: Path | None = None) -> bool:
     """``True`` only when a genuine Django marker is present.
 
     Order is cheapest-first: dependency manifest substring → root
@@ -480,7 +480,7 @@ def _is_django_repo(root: Path, files: list[str], dep_haystack: str, *, scan_roo
             continue
         if "/site-packages/" in f"/{norm}" or "/node_modules/" in f"/{norm}":
             continue
-        blob = _read_text(root / rel, scan_root)
+        blob = _read_text(root / rel, root if scan_root is None else scan_root)
         if blob and any(marker in blob for marker in _DJANGO_SETTINGS_MARKERS):
             return True
     return False
@@ -490,16 +490,17 @@ def _detect_python_stack(
     root: Path,
     files: list[str],
     *,
-    scan_root: Path,
+    scan_root: Path | None = None,
 ) -> tuple[str | None, list[str]]:
-    """Return (stack_slug, signals) for a Python-shaped directory."""
+    """Return (stack_slug, signals) for a Python-shaped directory; manifests
+    are read bounded by ``scan_root`` (default ``root``)."""
     signals: list[str] = []
 
     # Read deps from pyproject.toml / requirements.txt without
     # importing tomllib for portability — we only need substring match.
     dep_text_blobs: list[str] = []
     for fname in ("pyproject.toml", "requirements.txt", "Pipfile", "setup.py"):
-        blob = _read_text(root / fname, scan_root)
+        blob = _read_text(root / fname, root if scan_root is None else scan_root)
         if blob is not None:
             dep_text_blobs.append(blob.lower())
             signals.append(f"{fname} present")
