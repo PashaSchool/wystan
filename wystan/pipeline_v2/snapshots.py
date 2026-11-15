@@ -223,6 +223,19 @@ def resolve_snapshot_budget_sec(n_snapshots: int) -> float:
     return per * max(1, n_snapshots)
 
 
+#: Refused tree paths named in one warning; the count is always complete.
+_REFUSALS_SHOWN = 5
+
+
+def _record_refusals(telemetry: dict[str, Any], sha: str, refused: list, warn: Callable[[str], None]) -> None:
+    """A tree entry the export would not write (unsafe name, collision) is
+    counted in telemetry (the key exists only when one happened) and named
+    in the run log."""
+    telemetry["impact_export_refused"] = telemetry.get("impact_export_refused", 0) + len(refused)
+    shown = ", ".join(f"{path!r} ({why})" for path, why in refused[:_REFUSALS_SHOWN])
+    warn(f"impact: snapshot {sha[:12]}: {len(refused)} tree path(s) not written: {shown}")
+
+
 def _skip_detail(exc: Exception) -> object:
     return (exc.stderr or exc) if isinstance(exc, GitFailed) else exc
 
@@ -291,9 +304,11 @@ def run_snapshots(
                 f"snapshot(s)",
             )
             break
-        tree_dir = tempfile.mkdtemp(prefix="wystan-impact-")
+        tree_dir = tempfile.mkdtemp(prefix="wystan-impact-")  # mode 0700, ours
         try:
-            export_tree(repo_path, object_name(sha), tree_dir)
+            report = export_tree(repo_path, object_name(sha), tree_dir)
+            if report.refused:
+                _record_refusals(telemetry, sha, report.refused, _warn)
             results[sha] = compute(Path(tree_dir), sha)
             telemetry["impact_snapshots"] += 1
         except Exception as exc:  # noqa: BLE001 — never fail the scan
