@@ -64,6 +64,8 @@ _WINDOWS = os.name == "nt"
 #: The user's explicit git, for a machine where every git on PATH lies in
 #: an excluded ancestor (a home directory that is itself a working tree).
 EXPLICIT_GIT_ENV = "WYSTAN_GIT"
+#: A protocol name git does not know: ``GIT_ALLOW_PROTOCOL`` then allows none.
+_NO_PROTOCOL = "none"
 _DISCOVERY_TIMEOUT_SEC = 10.0
 _DISCOVERY_OUTPUT_BYTES = 1 << 16
 #: Ownership is not a question for this read-only probe (every option above
@@ -115,6 +117,13 @@ def base_environment(search_path: str) -> dict[str, str]:
         "PATH": search_path, "HOME": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C",
+        # The engine never uses the network. A clone's own
+        # ``protocol.<name>.allow=always`` beats ``protocol.allow=never``;
+        # this list (git >= 2.6.1) beats every config and names no protocol.
+        "GIT_ALLOW_PROTOCOL": _NO_PROTOCOL,
+        # A promisor clone must not even try to fetch a missing object
+        # (git >= 2.45; older gits fail the attempt on the line above).
+        "GIT_NO_LAZY_FETCH": "1",
     }
     if _WINDOWS:
         env["NoDefaultCurrentDirectoryInExePath"] = "1"
