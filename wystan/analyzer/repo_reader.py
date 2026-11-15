@@ -46,7 +46,12 @@ __all__ = [
     "REFUSED_OVER_CAP",
     "SNIFF_BYTES",
     "FileBytes",
+    "MANIFEST_READ_MAX_BYTES",
+    "TEXT_READ_MAX_BYTES",
     "open_repo_file",
+    "read_repo_bytes_or_raise",
+    "read_repo_head_or_raise",
+    "read_repo_text_or_raise",
     "read_repo_bytes",
     "repo_path",
 ]
@@ -220,9 +225,14 @@ def read_repo_bytes(
 
 # ── Drop-in text reads for call sites that read a repository file ───────
 
-#: Cap of a text read whose purpose sets no tighter bound. The same as the
-#: line counters' cap: no tracked text file on the corpus comes near it.
+#: Cap of a text read whose purpose sets no tighter bound (a source file, a
+#: catalog). The same as the line counters' cap: the largest tracked text
+#: file on the corpus is 10.7 MB.
 TEXT_READ_MAX_BYTES = MAX_FILE_BYTES
+#: Cap of a manifest or config read (package.json, tsconfig, Cargo.toml,
+#: go.mod, pyproject.toml, workspace files, git config). The largest such
+#: tracked file on the 27 corpus clones is 84 KB; 4 MiB is fifty times that.
+MANIFEST_READ_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _refusal_error(path: os.PathLike[str] | str, refused: str | None) -> OSError:

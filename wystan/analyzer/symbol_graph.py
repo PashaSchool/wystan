@@ -33,6 +33,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 
 from .ast_extractor import (
     SymbolRange,
@@ -244,7 +245,7 @@ def _go_module_path(repo_root: str | Path) -> str | None:
     if not p.is_file():
         return None
     try:
-        for line in p.read_text(encoding="utf-8").splitlines():
+        for line in read_repo_text_or_raise(p, repo_root, max_bytes=MANIFEST_READ_MAX_BYTES).splitlines():
             line = line.strip()
             if line.startswith("module "):
                 return line.split(None, 1)[1].strip()
@@ -902,6 +903,6 @@ def _add_http_edges(
 def _read_safe(repo_root: str, rel_path: str) -> str | None:
     abs_path = Path(repo_root) / rel_path
     try:
-        return abs_path.read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(abs_path, repo_root, errors="ignore")
     except OSError:
         return None

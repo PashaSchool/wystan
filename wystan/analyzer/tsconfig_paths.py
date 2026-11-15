@@ -60,6 +60,7 @@ import logging
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -356,7 +357,7 @@ def _load_compiler_options(
     seen.add(resolved)
 
     try:
-        text = tsconfig_path.read_text(encoding="utf-8", errors="ignore")
+        text = read_repo_text_or_raise(tsconfig_path, repo_root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
     except OSError:
         return {}, str(tsconfig_path.parent)
 
