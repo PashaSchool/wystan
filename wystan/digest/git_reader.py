@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from wystan.analyzer.git_history import numstat_file_keys
+from wystan.analyzer.git_history import numstat_file_keys, raw_parents
 from wystan.analyzer.git_repository import GitRepository, open_repository, origin_url
 from wystan.analyzer.git_runner import object_name, revision, run_git
 
@@ -101,9 +101,12 @@ def _first_parent_records(root: str, branch: str, since: datetime, until: dateti
     for raw in out.split(_RECORD):
         parts = raw.lstrip("\0\n").split(_FIELD, _DIGEST_FIELDS - 1)
         if len(parts) == _DIGEST_FIELDS:
-            sha, parents, author, email, committed, msg = parts
-            records.append((sha, tuple(parents.split()), author, email, committed, msg))
-    return records
+            sha, _grafted, author, email, committed, msg = parts
+            records.append((sha, author, email, committed, msg))
+    # Parents as the commit object names them (GitPython's view), not as
+    # shallow grafts rewrite them.
+    parents = raw_parents(root, [r[0] for r in records])
+    return [(r[0], p, *r[1:]) for r, p in zip(records, parents)]
 
 
 def _raw_diff_first_paths(raw: bytes) -> list[str]:
