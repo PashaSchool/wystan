@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 from wystan.pipeline_v2.data import load_stack_yaml
@@ -292,9 +293,7 @@ class ExpressRouteExtractor(PatternExtractor):
 
         for rel in _candidate_files(ctx, c):
             try:
-                text = (repo / rel).read_text(
-                    encoding="utf-8", errors="ignore",
-                )[: self._MAX_FILE_BYTES]
+                text = read_repo_text_or_raise(repo / rel, repo, errors="ignore")[: self._MAX_FILE_BYTES]
             except OSError:
                 continue
             # Quick reject — file mentions neither a Router constructor

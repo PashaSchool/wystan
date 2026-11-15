@@ -53,6 +53,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Iterable
 
 from wystan.analyzer.safe_read import path_within_repo
@@ -459,9 +460,7 @@ def _read_text(repo_path: Path, rel: str) -> str | None:
     if not path_within_repo(fp, repo_path):
         return None
     try:
-        if not fp.is_file() or fp.stat().st_size > _MAX_FILE_BYTES:
-            return None
-        return fp.read_text(encoding="utf-8", errors="replace")
+        return read_repo_text_or_raise(fp, repo_path, errors="replace", max_bytes=_MAX_FILE_BYTES)
     except OSError:
         return None
 

@@ -51,6 +51,7 @@ tuned magic numbers (the one structural cap is justified inline).
 """
 
 from __future__ import annotations
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -821,9 +822,7 @@ def _read(repo_root, rel_path: str) -> str | None:
     """Best-effort UTF-8 read of ``repo_root/rel_path``; ``None`` on error."""
     try:
         from pathlib import Path
-        return (Path(repo_root) / rel_path).read_text(
-            encoding="utf-8", errors="ignore",
-        )
+        return read_repo_text_or_raise(Path(repo_root) / rel_path, repo_root, errors="ignore")
     except (OSError, ValueError):
         return None
 

@@ -48,6 +48,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -6113,7 +6114,7 @@ def _apply_uf_name_laws(
                 fp = _v2_repo / rel
                 if (fp.is_file()
                         and fp.stat().st_size <= _RUNG_SOURCE_MAX_FILE_BYTES):
-                    text = fp.read_text(encoding="utf-8", errors="ignore")
+                    text = read_repo_text_or_raise(fp, _v2_repo, errors="ignore")
             except OSError:
                 text = ""
         _v2_read_cache[rel] = text

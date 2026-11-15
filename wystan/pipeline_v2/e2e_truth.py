@@ -52,6 +52,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any, Literal
 
 from wystan.pipeline_v2.spine_anchors import (
@@ -426,7 +427,7 @@ def extract_e2e_journeys(
     n_spec_files = 0
     for path in specs:
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = read_repo_text_or_raise(path, repo_root, errors="replace")
         except OSError:
             continue
         is_pw = _PLAYWRIGHT_MARKER in text
