@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from wystan.analyzer.git_runner import GitError, object_name, run_git
+from wystan.analyzer.git_runner import GitError, GitFailed, object_name, run_git
 
 # Every field of a pretty format ends in NUL (``%x00``) and ``-z`` puts a
 # NUL between commits: no commit field can hold a NUL, so a message with
@@ -101,13 +101,35 @@ def object_sizes(root: str, oids: list[bytes]) -> list[int | None]:
     sizes: list[int | None] = []
     for start in range(0, len(oids), OBJECTS_PER_BATCH):
         batch = oids[start:start + OBJECTS_PER_BATCH]
-        out = run_git(root, "cat-file", "--batch-check", stdin=b"".join(o + b"\n" for o in batch)).stdout
+        try:
+            out = run_git(root, "cat-file", "--batch-check", stdin=b"".join(o + b"\n" for o in batch)).stdout
+        except GitFailed:
+            # git < 2.45 tries to fetch an object a promisor clone lacks, and
+            # the runner refuses: the batch holds an absent object. Ask one
+            # by one, so the present ones keep their sizes.
+            sizes += [_single_size(root, oid) for oid in batch]
+            continue
         for line in out.splitlines():
             parts = line.split(b" ")
             sizes.append(int(parts[2]) if len(parts) == 3 and parts[1] != b"missing" else None)
     if len(sizes) != len(oids):
         raise GitError(f"cat-file --batch-check answered {len(sizes)} of {len(oids)} objects")
     return sizes
+
+
+def _single_size(root: str, oid: bytes) -> int | None:
+    try:
+        line = run_git(root, "cat-file", "--batch-check", stdin=oid + b"\n").stdout.split(b" ")
+    except GitFailed:
+        return None
+    return int(line[2]) if len(line) == 3 and line[1] != b"missing" else None
+
+
+def absent_objects(root: str, sha: str) -> set[bytes]:
+    """Objects of ``sha``'s tree the object store lacks, listed without
+    fetching (``rev-list --objects --missing=print``)."""
+    out = run_git(root, "rev-list", "--objects", "--no-walk", "--missing=print", object_name(sha)).stdout
+    return {line[1:].split(b" ")[0] for line in out.splitlines() if line.startswith(b"?")}
 
 
 def raw_parents(root: str, shas: list[str]) -> list[tuple[str, ...]]:

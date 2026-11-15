@@ -1,5 +1,7 @@
 import logging
+import os
 import re
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from wystan.analyzer.git_history import (
     numstat_file_keys,
     split_records,
 )
+from wystan.analyzer.git_partial import history_offline, partial_clone_filter
 from wystan.analyzer.git_repository import (
     GitRepository,
     NotARepository,
@@ -222,9 +225,53 @@ def get_commits(
             from computing over the whole monorepo. ``None`` preserves
             the whole-repo behaviour (back-compat).
     """
+    return read_history(repo, days=days, max_commits=max_commits, src=src)[0]
+
+
+def read_history(
+    repo: GitRepository, *, days: int = 365, max_commits: int = DEFAULT_MAX_COMMITS, src: str | None = None,
+) -> tuple[list[Commit], dict | None]:
+    """``get_commits`` and, for a partial clone whose normal read failed,
+    what the offline read could not provide (``git_partial``)."""
+    root = repository_root(repo)
     fast = _get_commits_fast(repo, days=days, max_commits=max_commits, src=src)
     if fast is not None:
-        return fast
+        commits, note = fast, None
+    elif root and partial_clone_filter(root):
+        records, note = history_offline(root, max_commits, days, normalize_subpath(src))
+        commits = _commits_from_records(records, days, normalize_subpath(src))
+    else:
+        commits, note = _walk_commits(repo, days=days, max_commits=max_commits, src=src), None
+    _remember_note(_note_key(repo), note)
+    return commits, note
+
+
+#: The last few history notes, so a caller of ``get_commits`` (one history
+#: read) can still learn what a partial clone could not provide.
+_HISTORY_NOTES: OrderedDict = OrderedDict()
+_HISTORY_NOTES_KEPT = 16
+
+
+def _remember_note(key: tuple, note: dict | None) -> None:
+    _HISTORY_NOTES[key] = note
+    _HISTORY_NOTES.move_to_end(key)
+    while len(_HISTORY_NOTES) > _HISTORY_NOTES_KEPT:
+        _HISTORY_NOTES.popitem(last=False)
+
+
+def _note_key(repo) -> str:
+    top = getattr(repo, "working_tree_dir", None) or getattr(repo, "git_dir", None) or repository_root(repo)
+    return os.path.realpath(top)
+
+
+def history_note(repo: GitRepository) -> dict | None:
+    """What the last history read of this repository could not provide
+    (``None``: everything was read, or no read happened)."""
+    return _HISTORY_NOTES.get(_note_key(repo))
+
+
+def _walk_commits(repo: GitRepository, *, days: int, max_commits: int, src: str | None) -> list[Commit]:
+    """The per-commit walk GitPython did: slow, kept for unusual states."""
 
     # Fallback — the original per-commit walk. Slow on large histories
     # but maximally compatible.
@@ -324,9 +371,17 @@ def _get_commits_fast(
 
 def _commits_from_log(raw: str, days: int, norm_src: str | None) -> list[Commit]:
     """Commits of a fast-path log, newest first, until the ``days`` cutoff."""
+    records = ((sha, ct, author, body, names)
+               for (sha, ct, author, body), names in split_records(raw, _FAST_FIELDS, with_files=True))
+    return _commits_from_records(records, days, norm_src)
+
+
+def _commits_from_records(records, days: int, norm_src: str | None) -> list[Commit]:
+    """``(sha, committed, author, body, names)`` records as Commits, newest
+    first, until the ``days`` cutoff."""
     commits: list[Commit] = []
     now = datetime.now(tz=timezone.utc)
-    for (sha, ct_raw, author, body), names in split_records(raw, _FAST_FIELDS, with_files=True):
+    for sha, ct_raw, author, body, names in records:
         try:
             commit_date = datetime.fromtimestamp(int(ct_raw), tz=timezone.utc)
         except ValueError:

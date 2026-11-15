@@ -1,14 +1,11 @@
 """Write the tree of one commit to a directory, from raw blobs.
 
-Why it exists: ``pipeline_v2/snapshots.run_snapshots`` (the impact
-snapshots of Stage 6.96) used ``git worktree add`` and ``git checkout`` to
-see the repository at older commits. A checkout runs the clone's content
-filters and hooks in a working-tree context of its own, which no filter
-list computed for the main tree covers. Here nothing is checked out: the
-tree is listed (``ls-tree``), sizes are asked first (``cat-file
---batch-check``), and each blob the caller wants is streamed raw to disk
-(``cat-file --batch`` applies no filter, textconv or end-of-line
-conversion). Every other file is an EMPTY placeholder, so a walk lists the
+Replaces the ``git worktree add``/``checkout`` of the impact snapshots
+(``pipeline_v2/snapshots.run_snapshots``): a checkout runs the clone's
+filters and hooks in a working-tree context of its own. Here the tree is
+listed (``ls-tree``), sizes come first (``cat-file --batch-check``), and
+each wanted blob is streamed raw (``cat-file --batch``: no filter, textconv
+or end-of-line conversion). Every other file is an EMPTY placeholder, so a walk lists the
 tree as a checkout would; its real size is kept in the report, not on
 disk. No file the export writes is larger than the bytes fetched for it,
 and the bytes written are capped (``MAX_TREE_BYTES``), as is the number of
@@ -33,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO, Callable
 
-from wystan.analyzer.git_history import object_sizes
+from wystan.analyzer.git_history import absent_objects, object_sizes
 from wystan.analyzer.git_runner import GitError, object_name, run_git, stream_git
 from wystan.analyzer.path_identity import is_within
 
@@ -43,8 +40,7 @@ from wystan.analyzer.path_identity import is_within
 MAX_TREE_ENTRIES = 500_000
 MAX_TREE_BYTES = 8 * 1024 ** 3
 MAX_PATH_BYTES = 1024
-#: The longest file name the common file systems accept.
-MAX_COMPONENT_BYTES = 255
+MAX_COMPONENT_BYTES = 255  # the longest file name common file systems accept
 #: Bytes copied per read while streaming a blob to its file.
 _COPY_CHUNK_BYTES = 1 << 20
 #: Directory descriptors kept open while writing (files arrive grouped by
@@ -78,11 +74,11 @@ class TreeTooLarge(GitError):
 
 
 class MissingObjects(GitError):
-    """Blobs of the tree are not in the object store (a partial clone)."""
+    """Objects of the tree are not in the object store (a partial clone)."""
 
     def __init__(self, count: int) -> None:
         self.count = count
-        super().__init__(f"{count} blob(s) of the tree are not in the object store")
+        super().__init__(f"{count} object(s) of the tree are not in the object store")
 
 
 @dataclass
@@ -282,6 +278,9 @@ def export_tree(
     if any(base.iterdir()):
         raise OSError(f"export destination is not empty: {base}")
     report = ExportReport()
+    absent = absent_objects(root, sha)
+    if absent:
+        raise MissingObjects(len(absent))
     files = _plan(_entries(root, sha), report)
     sizes = object_sizes(root, [oid for _m, oid, _p in files])
     missing = sum(size is None for size in sizes)

@@ -2765,6 +2765,13 @@ def run_finalize_phase(
             run_dir=run_dir,
         )
     scan_meta["stage_6_96_impact"] = dict(impact_telemetry)
+    # A partial clone scans with what its object store holds (the engine
+    # never fetches) and says so; absent for an ordinary clone.
+    from wystan.pipeline_v2.partial_clone_meta import partial_clone_record
+
+    partial = partial_clone_record(ctx.repo_path, impact_telemetry)
+    if partial is not None:
+        scan_meta["partial_clone"] = partial
 
     # ── LLM-health stamp (fail LOUD on auth-dead scans) ────────────
     # Must run AFTER the last LLM-bearing stage (6.7b above) and BEFORE
