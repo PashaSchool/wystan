@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -270,16 +271,16 @@ _PY_FRAMEWORK_DEPS = (
 )
 
 
-def _read_json(path: Path) -> dict[str, object] | None:
+def _read_json(path: Path, root: Path) -> dict[str, object] | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(read_repo_text_or_raise(path, root, max_bytes=MANIFEST_READ_MAX_BYTES))
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def _read_text(path: Path) -> str | None:
+def _read_text(path: Path, root: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(path, root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
     except OSError:
         return None
 
@@ -478,7 +479,7 @@ def _is_django_repo(root: Path, files: list[str], dep_haystack: str) -> bool:
             continue
         if "/site-packages/" in f"/{norm}" or "/node_modules/" in f"/{norm}":
             continue
-        blob = _read_text(root / rel)
+        blob = _read_text(root / rel, root)
         if blob and any(marker in blob for marker in _DJANGO_SETTINGS_MARKERS):
             return True
     return False
@@ -495,7 +496,7 @@ def _detect_python_stack(
     # importing tomllib for portability — we only need substring match.
     dep_text_blobs: list[str] = []
     for fname in ("pyproject.toml", "requirements.txt", "Pipfile", "setup.py"):
-        blob = _read_text(root / fname)
+        blob = _read_text(root / fname, root)
         if blob is not None:
             dep_text_blobs.append(blob.lower())
             signals.append(f"{fname} present")
@@ -584,7 +585,7 @@ def detect_stack(
     Signals is a human-readable list of what was found, exposed via
     ``ScanContext.stack_signals`` for debugging misdetections.
     """
-    pkg = _read_json(root / "package.json")
+    pkg = _read_json(root / "package.json", root)
     stack, signals = _detect_js_stack(root, files, pkg)
     if stack:
         return stack, signals
@@ -625,7 +626,7 @@ def _enrich_workspaces(
     out: list[Workspace] = []
     for pkg in info.packages:
         pkg_root = repo_path / pkg.path
-        pkg_json_data = _read_json(pkg_root / "package.json")
+        pkg_json_data = _read_json(pkg_root / "package.json", repo_path)
         stack, _signals = detect_stack(pkg_root, pkg.files)
         out.append(
             Workspace(

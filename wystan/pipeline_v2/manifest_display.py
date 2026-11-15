@@ -47,6 +47,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 
 __all__ = [
     "PF_MANIFEST_NAME_ENV",
@@ -130,13 +131,12 @@ def word_split_slug(slug: str) -> str | None:
 # ── manifest readers (each rung: best-effort, never a crash) ────────────
 
 
-def _read_small(path: Path) -> str | None:
-    """Bounded text read; ``None`` on anything unusual (missing, huge,
-    unreadable, undecodable)."""
+def _read_small(path: Path, root: Path) -> str | None:
+    """Bounded text read through the guarded reader (contained in the
+    repository ``root``); ``None`` on anything unusual (missing, huge,
+    unreadable, undecodable, refused)."""
     try:
-        if not path.is_file() or path.stat().st_size > _MAX_MANIFEST_BYTES:
-            return None
-        return path.read_text(encoding="utf-8", errors="strict")
+        return read_repo_text_or_raise(path, root, max_bytes=_MAX_MANIFEST_BYTES)
     except OSError:
         return None
     except UnicodeDecodeError:
@@ -232,7 +232,7 @@ def scope_identity_slug(repo_root: str | os.PathLike[str],
             return None  # containment: an anchor may never escape the repo
     except OSError:
         return None
-    raw = _json_field(pkg_dir / "package.json", "name")
+    raw = _json_field(pkg_dir / "package.json", "name", root)
     name = _clean_name(raw)
     if not name or not name.startswith("@") or "/" not in name:
         return None
@@ -250,8 +250,8 @@ def scope_identity_slug(repo_root: str | os.PathLike[str],
     return "%s-%s" % (scope, bare)
 
 
-def _json_field(path: Path, field: str) -> object:
-    text = _read_small(path)
+def _json_field(path: Path, field: str, root: Path) -> object:
+    text = _read_small(path, root)
     if text is None:
         return None
     try:
@@ -261,11 +261,11 @@ def _json_field(path: Path, field: str) -> object:
     return doc.get(field) if isinstance(doc, dict) else None
 
 
-def _metadata_module_name(pkg_dir: Path) -> str | None:
+def _metadata_module_name(pkg_dir: Path, root: Path) -> str | None:
     """Rung 2 — first top-level ``name: "…"`` literal in a metadata
     module (``_metadata.ts`` class)."""
     for base in _METADATA_MODULES:
-        text = _read_small(pkg_dir / base)
+        text = _read_small(pkg_dir / base, root)
         if text is None:
             continue
         m = _TS_NAME_RE.search(text)
@@ -276,9 +276,9 @@ def _metadata_module_name(pkg_dir: Path) -> str | None:
     return None
 
 
-def _pyproject_name(pkg_dir: Path, rel_dir: str) -> str | None:
+def _pyproject_name(pkg_dir: Path, rel_dir: str, root: Path) -> str | None:
     """Rung 6 — ``[project] name`` (authored-test gated)."""
-    text = _read_small(pkg_dir / "pyproject.toml")
+    text = _read_small(pkg_dir / "pyproject.toml", root)
     if text is None:
         return None
     try:
@@ -323,27 +323,27 @@ def _manifest_display_name_cached(root: str, rel_dir: str) -> str | None:
         return None
 
     # 1. config.json "name" — a declared display string, used verbatim.
-    name = _clean_name(_json_field(pkg_dir / "config.json", "name"))
+    name = _clean_name(_json_field(pkg_dir / "config.json", "name", root_path))
     if name:
         return name
     # 2. metadata module name literal.
-    name = _metadata_module_name(pkg_dir)
+    name = _metadata_module_name(pkg_dir, root_path)
     if name:
         return name
     # 3. package.json "displayName" — display by definition.
-    name = _clean_name(_json_field(pkg_dir / "package.json", "displayName"))
+    name = _clean_name(_json_field(pkg_dir / "package.json", "displayName", root_path))
     if name:
         return name
     # 4. package.json "name" — authored-test gated (npm slugs equal to
     #    the dir name do NOT qualify).
     name = _authored_slug_name(
-        _json_field(pkg_dir / "package.json", "name"), rel_dir)
+        _json_field(pkg_dir / "package.json", "name", root_path), rel_dir)
     if name:
         return name
     # 5. composer.json "name" (vendor/pkg) — authored-test gated.
     name = _authored_slug_name(
-        _json_field(pkg_dir / "composer.json", "name"), rel_dir)
+        _json_field(pkg_dir / "composer.json", "name", root_path), rel_dir)
     if name:
         return name
     # 6. pyproject.toml [project] name — authored-test gated.
-    return _pyproject_name(pkg_dir, rel_dir)
+    return _pyproject_name(pkg_dir, rel_dir, root_path)

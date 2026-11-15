@@ -55,6 +55,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 
 from wystan.analyzer.workspace import (
     WorkspaceInfo,
@@ -124,9 +125,9 @@ def _has_noise_segment(rel_dir: str) -> bool:
     return any(seg.lower() in _NOISE_SEGMENTS for seg in rel_dir.split("/") if seg)
 
 
-def _read_json(path: Path) -> dict[str, object] | None:
+def _read_json(path: Path, root: Path) -> dict[str, object] | None:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_repo_text_or_raise(path, root, max_bytes=MANIFEST_READ_MAX_BYTES))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     return data if isinstance(data, dict) else None
@@ -135,8 +136,8 @@ def _read_json(path: Path) -> dict[str, object] | None:
 # ── Tier A — nested workspace manifests ─────────────────────────────────
 
 
-def _workspace_patterns_from_package_json(path: Path) -> list[str]:
-    doc = _read_json(path)
+def _workspace_patterns_from_package_json(path: Path, root: Path) -> list[str]:
+    doc = _read_json(path, root)
     if doc is None:
         return []
     workspaces = doc.get("workspaces")
@@ -181,15 +182,14 @@ def _nested_manifest_packages(
         base_dir = repo_root / d
         if kind == "pnpm":
             try:
-                content = (base_dir / "pnpm-workspace.yaml").read_text(
-                    encoding="utf-8",
-                )
+                content = read_repo_text_or_raise(
+                    base_dir / "pnpm-workspace.yaml", repo_root, max_bytes=MANIFEST_READ_MAX_BYTES)
             except OSError:
                 continue
             patterns = _parse_yaml_list(content, "packages")
         else:
             patterns = _workspace_patterns_from_package_json(
-                base_dir / "package.json",
+                base_dir / "package.json", repo_root,
             )
         # pnpm negations ("!apps/api") are exclusions, not packages.
         patterns = [p for p in patterns if p and not p.startswith("!")]

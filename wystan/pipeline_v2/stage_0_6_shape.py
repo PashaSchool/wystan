@@ -36,6 +36,7 @@ import logging
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
@@ -163,9 +164,9 @@ class ShapeSignals:
         root = Path(ctx.repo_path)
 
         pkg_json_path = root / "package.json"
-        pkg_json = _read_json_safe(pkg_json_path)
-        pyproject_text = _read_text_safe(root / "pyproject.toml")
-        cargo_text = _read_text_safe(root / "Cargo.toml")
+        pkg_json = _read_json_safe(pkg_json_path, root)
+        pyproject_text = _read_text_safe(root / "pyproject.toml", root)
+        cargo_text = _read_text_safe(root / "Cargo.toml", root)
 
         # ── workspace info from ctx ──
         workspaces = ctx.workspaces or []
@@ -1161,16 +1162,16 @@ def classify_repo_shape(
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
-def _read_json_safe(path: Path) -> dict[str, Any] | None:
+def _read_json_safe(path: Path, root: Path) -> dict[str, Any] | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(read_repo_text_or_raise(path, root, max_bytes=MANIFEST_READ_MAX_BYTES))
     except (OSError, ValueError):
         return None
 
 
-def _read_text_safe(path: Path) -> str | None:
+def _read_text_safe(path: Path, root: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(path, root, errors="ignore")
     except OSError:
         return None
 
@@ -1192,7 +1193,7 @@ def _detect_fastapi_factory(root: Path) -> bool:
         root / "src" / "main.py",
     )
     for c in candidates:
-        text = _read_text_safe(c)
+        text = _read_text_safe(c, root)
         if text is None:
             continue
         if "FastAPI(" in text:
@@ -1482,7 +1483,7 @@ def _detect_parent_shape(parent_root: Path | None) -> str:
         cargo = parent_root / "Cargo.toml"
         if cargo.is_file():
             try:
-                text = cargo.read_text(encoding="utf-8", errors="ignore")
+                text = read_repo_text_or_raise(cargo, parent_root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
                 if "[workspace]" in text:
                     return "cargo-workspace"
             except OSError:
