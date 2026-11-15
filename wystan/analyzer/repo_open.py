@@ -230,11 +230,24 @@ def _open_lexical(path: Path, boundary: Boundary) -> int | None:
         raise
 
 
+def _not_inside(path: Path, boundary: Boundary) -> OSError:
+    """The refusal of a path that does not resolve strictly inside the
+    boundary: the boundary directory itself is not a regular file (as a
+    directory, it is not reported); anything else leaves the repository."""
+    try:
+        is_boundary = os.path.realpath(path) == boundary.real
+    except (OSError, ValueError):
+        is_boundary = False
+    if is_boundary:
+        return NotRegularFile(errno.EACCES, "the scanned directory itself", str(path))
+    return OutsideRepository(errno.EACCES, "resolves outside the repository", str(path))
+
+
 def _open_resolved(path: Path, boundary: Boundary) -> int:
     _require_examinable(path)
     resolved = _resolved_parts(path, boundary)
     if resolved is None:
-        raise OutsideRepository(errno.EACCES, "resolves outside the repository", str(path))
+        raise _not_inside(path, boundary)
     try:
         return _open_beneath(*resolved)
     except OSError as err:
@@ -261,7 +274,7 @@ def _open_checked(path: Path, boundary: Boundary) -> int:
     _require_examinable(path)
     resolved = _resolved_parts(path, boundary)
     if resolved is None:
-        raise OutsideRepository(errno.EACCES, "resolves outside the repository", str(path))
+        raise _not_inside(path, boundary)
     target = resolved[0].joinpath(*resolved[1])
     checked = os.stat(target)
     if not stat.S_ISREG(checked.st_mode):  # a link to a FIFO or device is never opened
