@@ -6,11 +6,14 @@ public names are the same so the index can import this module instead.
 
 ``git`` is resolved to an absolute path once per search path, on the
 caller's ``PATH`` with empty, ``.`` and relative entries removed (each of
-those means "the current directory", which may be inside the clone) and
-with every entry inside the repository or the current directory removed;
-a result that still lies inside either is refused. "Inside" is decided by
-file identity (``path_identity.is_within``), so a case variant or a linked
-spelling of the repository is inside too. On Windows
+those makes the current directory a search location, and it may be inside
+the clone) and with every absolute entry inside the scanned repository
+removed; a result that still lies inside the repository is refused. Only
+the scanned repository is untrusted: an absolute entry under the current
+directory is kept, so a service running with cwd ``/`` still finds
+``/usr/bin/git``. "Inside" is decided by file identity
+(``path_identity.is_within``), so a case variant or a linked spelling of
+the repository is inside too. On Windows
 ``NoDefaultCurrentDirectoryInExePath`` keeps the system from searching the
 current directory first, and the lookup here never adds it.
 
@@ -117,7 +120,7 @@ _FORBIDDEN_IN_REVISION = ("\0", "\n", "\r")
 
 
 class UnsafeGit(GitError):
-    """No git outside the repository and the current directory was found."""
+    """No git outside the scanned repository was found."""
 
 
 class UnsafeArgument(GitError, ValueError):
@@ -125,13 +128,15 @@ class UnsafeArgument(GitError, ValueError):
 
 
 def safe_search_path(repo_root: str | None = None, path: str | None = None) -> str:
-    """The search path without the entries that mean "here" (empty, ``.``,
-    relative) and without any entry inside the repository or the current
-    directory, by identity: a planted binary is never a candidate."""
+    """The search path without the entries that make the current directory
+    a search location (empty, ``.``, relative) and without any absolute
+    entry inside the scanned repository, by identity: a binary planted in
+    the clone is never a candidate."""
     entries = (os.environ.get("PATH", os.defpath) if path is None else path).split(os.pathsep)
     kept = [e for e in entries if e and e != "." and os.path.isabs(e)]
-    here = [d for d in (repo_root, os.getcwd()) if d]
-    return os.pathsep.join(e for e in kept if not any(is_within(e, d) for d in here))
+    if not repo_root:
+        return os.pathsep.join(kept)
+    return os.pathsep.join(e for e in kept if not is_within(e, repo_root))
 
 
 def _executable_names() -> tuple[str, ...]:
@@ -158,9 +163,8 @@ def git_executable(repo_root: str | None) -> str:
     found = _which(safe_search_path(repo_root))
     if found is None:
         raise UnsafeGit("git not found on the sanitised search path")
-    here = [d for d in (repo_root, os.getcwd()) if d]
-    if any(is_within(found, d) for d in here):
-        raise UnsafeGit(f"refusing git inside the repository or the current directory: {found}")
+    if repo_root and is_within(found, repo_root):
+        raise UnsafeGit(f"refusing git inside the scanned repository: {found}")
     return found
 
 
