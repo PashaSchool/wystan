@@ -31,6 +31,7 @@ import logging
 import os
 import re
 
+from wystan.analyzer.git_arguments import FORMS, refusal
 from wystan.analyzer.git_process import GitError, GitFailed, GitResult, run_bounded
 from wystan.analyzer.git_resolution import (
     SAFE_OPTIONS,
@@ -48,15 +49,7 @@ __all__ = [
 ]
 
 #: The built-in subcommands the engine runs, and nothing else.
-ALLOWED_SUBCOMMANDS = frozenset({
-    "cat-file", "config", "diff", "diff-tree", "log", "ls-files", "ls-tree",
-    "rev-list", "rev-parse", "status", "symbolic-ref",
-})
-#: Subcommands with several modes may only run these (read-only) ones.
-_RESTRICTED_ACTIONS = {
-    "cat-file": frozenset({"--batch"}),
-    "config": frozenset({"--get", "--get-regexp"}),
-}
+ALLOWED_SUBCOMMANDS = frozenset(FORMS)
 #: Diff-producing commands never run an external diff or textconv driver
 #: and show a submodule only as a commit pointer; diff and status never look
 #: inside a submodule at all (its own configuration and filters would apply
@@ -128,13 +121,15 @@ def revision(value: str) -> str:
 
 
 def _check_subcommand(args: tuple[str, ...]) -> str:
+    """``args[0]`` if ``args`` is one of the engine's command forms
+    (``git_arguments.FORMS``); anything else, e.g. ``log --output=F``, is
+    refused before git starts."""
     if not args or args[0] not in ALLOWED_SUBCOMMANDS:
         raise UnsafeArgument(f"git subcommand not allowed: {args[:1]!r}")
-    subcommand = args[0]
-    allowed = _RESTRICTED_ACTIONS.get(subcommand)
-    if allowed is not None and not allowed.intersection(args[1:]):
-        raise UnsafeArgument(f"git {subcommand} action not allowed: {args[1:]!r}")
-    return subcommand
+    why = refusal(args[0], args[1:])
+    if why:
+        raise UnsafeArgument(f"git {args[0]}: {why}")
+    return args[0]
 
 
 @functools.lru_cache(maxsize=8)
