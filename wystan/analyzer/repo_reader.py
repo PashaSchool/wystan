@@ -120,18 +120,23 @@ _roots_checked: set[str] = set()
 
 
 def require_repo_root(repo_root: os.PathLike[str] | str, signature: str) -> None:
-    """Raise ``TypeError`` unless ``repo_root`` is an existing directory.
+    """Raise ``TypeError`` when ``repo_root`` exists and is not a directory.
 
     For readers whose first argument changed meaning from a file path to the
     repository root while keeping its position: a call written for the old
-    signature (``count_file_loc(root / rel, rel)``) would otherwise count
-    nothing, silently. Checked once per root and process."""
+    signature (``count_file_loc(root / rel, rel)``) passes an existing file
+    and would otherwise count nothing, silently. A root that does not exist
+    (a fixture's ``/repo``, a replay without its clone) holds no file to
+    read, so the reader returns what it returned for a missing file, as
+    ``dev`` did; an old-style call naming a missing file gave 0 on ``dev``
+    too. Checked once per root and process."""
     raw = os.fspath(repo_root)
     if raw in _roots_checked:
         return
-    if not os.path.isdir(raw):
+    if os.path.isdir(raw):
+        _roots_checked.add(raw)
+    elif os.path.exists(raw):
         raise TypeError(f"{signature}: the first argument must be the repository root directory, got {raw!r}")
-    _roots_checked.add(raw)
 
 
 def _open_uncontained(path: str) -> tuple[int | None, str | None]:
