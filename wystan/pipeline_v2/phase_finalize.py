@@ -4627,6 +4627,9 @@ def run_finalize_phase(
                     # (mirror of the 6.7d backstop's ``pf_flows``). Ignored
                     # while WYSTAN_TJR_DONOR_GUARD is off.
                     developer_features=features,
+                    # Rule S2: targets only inside a journey's own module
+                    # scope.
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 scan_meta["token_journey_rehome"] = _tjr_tele
                 log_tjr.info(
