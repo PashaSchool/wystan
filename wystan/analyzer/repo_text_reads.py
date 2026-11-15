@@ -13,6 +13,7 @@ refused one the same way. Re-exported by ``repo_reader``.
 
 from __future__ import annotations
 
+import codecs
 import io
 import locale
 import os
@@ -65,8 +66,11 @@ def read_repo_text_or_raise(
                            stop_at_binary=False)
     if read.data is None:
         raise _refusal_error(path, read.refused)
-    # ``read_text()`` with no encoding decodes with the locale's encoding.
-    text = read.data.decode(locale.getpreferredencoding(False) if encoding is None else encoding, errors or "strict")
+    # ``read_text()`` decodes with the codec's incremental decoder (it differs
+    # from ``bytes.decode``: UTF-16 without a byte-order mark is an error),
+    # and with no encoding uses the locale's.
+    codec = locale.getpreferredencoding(False) if encoding is None else encoding
+    text = codecs.getincrementaldecoder(codec)(errors or "strict").decode(read.data, final=True)
     # Universal newlines; most files have no CR, and the scan for one is
     # cheaper than two replacing passes.
     return text.replace("\r\n", "\n").replace("\r", "\n") if "\r" in text else text

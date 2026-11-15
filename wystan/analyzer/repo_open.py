@@ -163,21 +163,30 @@ def _open_beneath(real_root: Path | str, parts: tuple[str, ...]) -> int:
     ``OSError`` when a component is a link or missing."""
     dir_fd = _open_dir_beneath(real_root, parts[:-1])
     try:
+        _require_regular_beneath(dir_fd, parts[-1])
         return os.open(parts[-1], FILE_FLAGS | _NO_FOLLOW, dir_fd=dir_fd)
     finally:
         os.close(dir_fd)
 
 
-def _check_file_type(path: Path) -> None:
-    """Refuse before any open what is not a regular file or a link to one
-    (a link is resolved and its target checked by ``fstat`` after the open);
-    a path that cannot be examined counts as missing, as it always did."""
+def _require_regular_beneath(dir_fd: int, name: str) -> None:
+    """Refuse, before the open, a resolved target that is not a regular file
+    (a link to a FIFO or device is never opened). A link here was swapped in
+    after the resolution."""
+    found = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    if stat.S_ISLNK(found.st_mode):
+        raise OSError(errno.ELOOP, "a link was swapped in", name)
+    if not stat.S_ISREG(found.st_mode):
+        raise NotRegularFile(errno.EACCES, "not a regular file", name)
+
+
+def _require_examinable(path: Path) -> None:
+    """A path that cannot be examined counts as missing, as it always did.
+    (Its type is checked on the resolved target, before the open.)"""
     try:
-        found = os.lstat(path)
+        os.lstat(path)
     except OSError as err:
         raise FileNotFoundError(errno.ENOENT, "cannot be examined", str(path)) from err
-    if not stat.S_ISLNK(found.st_mode) and not stat.S_ISREG(found.st_mode):
-        raise NotRegularFile(errno.EACCES, "not a regular file", str(path))
 
 
 def _held_dir(held: HeldDirs, real_root: str, dir_parts: tuple[str, ...]) -> tuple[int, bool]:
@@ -222,7 +231,7 @@ def _open_lexical(path: Path, boundary: Boundary) -> int | None:
 
 
 def _open_resolved(path: Path, boundary: Boundary) -> int:
-    _check_file_type(path)
+    _require_examinable(path)
     resolved = _resolved_parts(path, boundary)
     if resolved is None:
         raise OutsideRepository(errno.EACCES, "resolves outside the repository", str(path))
@@ -249,12 +258,14 @@ def _same_file_after_open(path: Path, boundary: Boundary, fd: int, checked: os.s
 def _open_checked(path: Path, boundary: Boundary) -> int:
     """No ``dir_fd``: open the resolved path and prove it is the checked,
     contained file (module doc)."""
-    _check_file_type(path)
+    _require_examinable(path)
     resolved = _resolved_parts(path, boundary)
     if resolved is None:
         raise OutsideRepository(errno.EACCES, "resolves outside the repository", str(path))
     target = resolved[0].joinpath(*resolved[1])
     checked = os.stat(target)
+    if not stat.S_ISREG(checked.st_mode):  # a link to a FIFO or device is never opened
+        raise NotRegularFile(errno.EACCES, "not a regular file", str(path))
     fd = os.open(target, FILE_FLAGS | _NO_FOLLOW)
     try:
         _same_file_after_open(path, boundary, fd, checked)
