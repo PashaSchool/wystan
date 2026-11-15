@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_boundary import declare_subtree
 from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
@@ -459,7 +460,7 @@ _DJANGO_SETTINGS_MARKERS = (
 )
 
 
-def _is_django_repo(root: Path, files: list[str], dep_haystack: str) -> bool:
+def _is_django_repo(root: Path, files: list[str], dep_haystack: str, *, scan_root: Path) -> bool:
     """``True`` only when a genuine Django marker is present.
 
     Order is cheapest-first: dependency manifest substring → root
@@ -479,7 +480,7 @@ def _is_django_repo(root: Path, files: list[str], dep_haystack: str) -> bool:
             continue
         if "/site-packages/" in f"/{norm}" or "/node_modules/" in f"/{norm}":
             continue
-        blob = _read_text(root / rel, root)
+        blob = _read_text(root / rel, scan_root)
         if blob and any(marker in blob for marker in _DJANGO_SETTINGS_MARKERS):
             return True
     return False
@@ -488,6 +489,8 @@ def _is_django_repo(root: Path, files: list[str], dep_haystack: str) -> bool:
 def _detect_python_stack(
     root: Path,
     files: list[str],
+    *,
+    scan_root: Path,
 ) -> tuple[str | None, list[str]]:
     """Return (stack_slug, signals) for a Python-shaped directory."""
     signals: list[str] = []
@@ -496,7 +499,7 @@ def _detect_python_stack(
     # importing tomllib for portability — we only need substring match.
     dep_text_blobs: list[str] = []
     for fname in ("pyproject.toml", "requirements.txt", "Pipfile", "setup.py"):
-        blob = _read_text(root / fname, root)
+        blob = _read_text(root / fname, scan_root)
         if blob is not None:
             dep_text_blobs.append(blob.lower())
             signals.append(f"{fname} present")
@@ -515,7 +518,7 @@ def _detect_python_stack(
     #   3. a ``settings.py`` actually contains Django config markers
     #      (``INSTALLED_APPS`` / ``DJANGO_SETTINGS_MODULE`` /
     #      ``django.`` import).
-    if _is_django_repo(root, files, haystack):
+    if _is_django_repo(root, files, haystack, scan_root=scan_root):
         signals.append("django dep, manage.py, or django-config settings.py")
         return "django", signals
 
@@ -568,6 +571,8 @@ def _detect_ruby_stack(root: Path) -> tuple[str | None, list[str]]:
 def detect_stack(
     root: Path,
     files: list[str],
+    *,
+    scan_root: Path | None = None,
 ) -> tuple[str | None, list[str]]:
     """Detect the framework / stack of a directory.
 
@@ -584,13 +589,18 @@ def detect_stack(
 
     Signals is a human-readable list of what was found, exposed via
     ``ScanContext.stack_signals`` for debugging misdetections.
+
+    ``scan_root`` is the root of the scan ``root`` lies in (default: ``root``
+    itself); manifests are read bounded by it, so a workspace manifest linked
+    to another part of the scanned tree reads as the file it names.
     """
-    pkg = _read_json(root / "package.json", root)
+    bound = root if scan_root is None else scan_root
+    pkg = _read_json(root / "package.json", bound)
     stack, signals = _detect_js_stack(root, files, pkg)
     if stack:
         return stack, signals
 
-    py_stack, py_signals = _detect_python_stack(root, files)
+    py_stack, py_signals = _detect_python_stack(root, files, scan_root=bound)
     signals.extend(py_signals)
     if py_stack:
         return py_stack, signals
@@ -627,7 +637,7 @@ def _enrich_workspaces(
     for pkg in info.packages:
         pkg_root = repo_path / pkg.path
         pkg_json_data = _read_json(pkg_root / "package.json", repo_path)
-        stack, _signals = detect_stack(pkg_root, pkg.files)
+        stack, _signals = detect_stack(pkg_root, pkg.files, scan_root=repo_path)
         out.append(
             Workspace(
                 name=pkg.name,
@@ -775,6 +785,10 @@ def stage_0_intake(
         if norm_subpath is not None
         else repo_path
     )
+    if norm_subpath is not None:
+        # Reads under the subtree stay bounded by the repository the user
+        # passed (not by the subtree, not by anything above the repository).
+        declare_subtree(effective_root, repo_path)
 
     # Run-id assignment lives here (Stage 0 is the only place that
     # owns "this run started"). Import lazily to keep the stage's

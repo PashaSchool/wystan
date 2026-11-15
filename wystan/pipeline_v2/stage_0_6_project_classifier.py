@@ -435,7 +435,7 @@ class ProjectSignals:
         tool_dir = _first_existing_dir(ws_root, _TOOL_DIR_CANDIDATES)
 
         # ── non-JS backend markers (reuse Stage 0.6 helpers) ──
-        has_fastapi = _detect_fastapi_factory(ws_root)
+        has_fastapi = _detect_fastapi_factory(ws_root, scan_root=repo_root)
         has_go_cmd_main = _has_cmd_with_main_go(ws_root)
         has_go_top_level = (ws_root / "go.mod").exists() and _has_top_level_go_files(
             ws_root

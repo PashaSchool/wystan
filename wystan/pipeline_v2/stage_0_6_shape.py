@@ -1181,10 +1181,12 @@ def _pyproject_has_scripts(text: str | None) -> bool:
     return text is not None and "[project.scripts]" in text
 
 
-def _detect_fastapi_factory(root: Path) -> bool:
+def _detect_fastapi_factory(root: Path, *, scan_root: Path | None = None) -> bool:
     """Detect a top-level ``FastAPI()`` factory in common entry files.
 
     Scans only a small fixed set of candidates — never the whole tree.
+    ``scan_root`` bounds the reads when ``root`` is a workspace of a larger
+    scan (default: ``root`` itself).
     """
     candidates = (
         root / "main.py",
@@ -1193,7 +1195,7 @@ def _detect_fastapi_factory(root: Path) -> bool:
         root / "src" / "main.py",
     )
     for c in candidates:
-        text = _read_text_safe(c, root)
+        text = _read_text_safe(c, root if scan_root is None else scan_root)
         if text is None:
             continue
         if "FastAPI(" in text:

@@ -6,8 +6,10 @@ what a scanned repository must not make the engine open:
 * The caller passes the repository root and a path relative to it; an
   absolute path or one with a ``..`` segment is refused (``repo_path``).
 * Containment (``analyzer.safe_read``, switch ``WYSTAN_SYMLINK_CONTAINMENT``,
-  default on): the path is resolved; it must resolve inside the resolved
-  root. The file is then opened component by component under a descriptor of
+  default on): the path is resolved; it must resolve inside the boundary of
+  the root (``repo_boundary``: the root itself, or the repository the user
+  passed for a ``--subpath`` subtree; never anything above). The file is then
+  opened component by component under a descriptor of
   the root, every component with ``O_NOFOLLOW`` (``os.open`` with
   ``dir_fd``), so a directory or a symlink swapped in between the check and
   the open is refused, not followed: the opened file is inside the root by
@@ -36,6 +38,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Iterator
+
+from wystan.analyzer.repo_boundary import boundary_of
 
 __all__ = [
     "MAX_FILE_BYTES",
@@ -95,10 +99,11 @@ def repo_path(repo_root: os.PathLike[str] | str, rel_path: str) -> Path | None:
 
 
 def _resolved_parts(path: Path, repo_root: Path) -> tuple[Path, tuple[str, ...]] | None:
-    """``(resolved root, components of the resolved path under it)``, or
-    ``None`` when the path resolves outside the root (or loops)."""
+    """``(resolved boundary, components of the resolved path under it)``, or
+    ``None`` when the path resolves outside the repository ``repo_root``
+    belongs to (``repo_boundary``), or loops."""
     try:
-        real_root = Path(os.path.realpath(repo_root))
+        real_root = Path(boundary_of(repo_root).real)
         real = Path(os.path.realpath(path))
         parts = real.relative_to(real_root).parts
     except (OSError, ValueError, RuntimeError):

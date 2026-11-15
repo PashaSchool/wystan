@@ -250,7 +250,7 @@ def synthesise_workspaces(ctx: ScanContext) -> list[Workspace]:
             # detect_stack expects workspace-relative paths
             f[len(rel_path) + 1:] if f.startswith(rel_path + "/") else f
             for f in ws_files
-        ])
+        ], scan_root=ctx.repo_path)
         out.append(
             Workspace(
                 name=ws_root.name,
