@@ -85,7 +85,12 @@ SAFE_OPTIONS = (
     "-c", "status.submoduleSummary=false",
     # A signature check runs gpg and prints into ``git log`` output.
     "-c", "log.showSignature=false",
+    # color.diff/color.status beat color.ui: all three, or a clone's
+    # color.diff=always colours `git diff HEAD`.
     "-c", "color.ui=false",
+    "-c", "color.diff=false",
+    "-c", "color.status=false",
+    "-c", "status.renames=true",            # porcelain v1 shows staged renames (default)
     *OUTPUT_PINS,
 )
 
