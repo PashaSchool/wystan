@@ -373,7 +373,7 @@ def _mine_commit_prefixes(repo_path: str, min_count: int = 5) -> dict[str, int]:
     pat_bare = re.compile(r"^([a-z][a-z0-9_/-]+):")
     pat_scope = re.compile(r"^[a-z]+\(([a-z][a-z0-9_/-]+)\):", re.IGNORECASE)
     counts: dict[str, int] = {}
-    for line in r.text.splitlines():
+    for line in r.universal_text.splitlines():
         m = pat_scope.match(line)
         if m:
             prefix = m.group(1).lower()
@@ -473,7 +473,7 @@ def _collect_files_for_commit_prefix(repo_path: str, prefix: str) -> set[str]:
     )
     files: set[str] = set()
     in_match = False
-    for line in r.text.splitlines():
+    for line in r.universal_text.splitlines():
         if line.startswith("COMMIT:"):
             in_match = bool(pat.match(line[7:]))
         elif in_match and line.strip():

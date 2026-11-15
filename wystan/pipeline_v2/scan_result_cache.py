@@ -3915,7 +3915,7 @@ def _git(repo_path: Path, *args: str, binary: bool = False) -> Any | None:
     except GitError as exc:
         logger.debug("scan_result_cache: git %s failed (%s)", args, exc)
         return None
-    return out.stdout if binary else out.text
+    return out.stdout if binary else out.universal_text
 
 
 def _is_git_repo(repo_path: Path) -> bool:

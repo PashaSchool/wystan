@@ -149,7 +149,7 @@ _LS_FILES_TIMEOUT_SEC = 30.0
 def _list_tracked_files(repo_path: str) -> list[str]:
     """Use `git ls-files` to get all tracked files (honors .gitignore)."""
     try:
-        out = run_git(repo_path, "ls-files", timeout=_LS_FILES_TIMEOUT_SEC).text
+        out = run_git(repo_path, "ls-files", timeout=_LS_FILES_TIMEOUT_SEC).universal_text
     except GitError:
         return []
     return [line.strip() for line in out.splitlines() if line.strip()]

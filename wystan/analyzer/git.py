@@ -332,7 +332,7 @@ def _get_commits_fast(
     if result.returncode != 0:
         return None
 
-    raw = result.text
+    raw = result.universal_text
     if not raw:
         return []
 

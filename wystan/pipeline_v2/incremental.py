@@ -83,14 +83,14 @@ def changed_files_since(repo_path: Path, since: str) -> list[str]:
             since, exc,
         )
         return []
-    return [ln.strip() for ln in out.text.splitlines() if ln.strip()]
+    return [ln.strip() for ln in out.universal_text.splitlines() if ln.strip()]
 
 
 def head_sha(repo_path: Path) -> str:
     """Return the current HEAD SHA; empty string on failure."""
     try:
         out = run_git(repo_path, "rev-parse", "HEAD", timeout=_REV_PARSE_TIMEOUT_SEC)
-        return out.text.strip()
+        return out.universal_text.strip()
     except Exception as exc:  # noqa: BLE001
         logger.warning("incremental: rev-parse HEAD failed (%s)", exc)
         return ""

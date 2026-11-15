@@ -153,7 +153,7 @@ def _write_lock(lock: dict[str, Any], lock_path: Path) -> None:
 
 
 def _head_sha(repo: Path) -> str:
-    return run_git(repo, "rev-parse", "HEAD").text.strip()
+    return run_git(repo, "rev-parse", "HEAD").universal_text.strip()
 
 
 def _scan_env(state_dir: Path) -> dict[str, str]:

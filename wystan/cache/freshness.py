@@ -97,7 +97,7 @@ _RANGE_TIMEOUT_SEC = 10.0
 
 def _git_rev_parse(repo_path: str) -> str:
     try:
-        return run_git(repo_path, "rev-parse", "HEAD", timeout=_REV_PARSE_TIMEOUT_SEC).text.strip()
+        return run_git(repo_path, "rev-parse", "HEAD", timeout=_REV_PARSE_TIMEOUT_SEC).universal_text.strip()
     except GitError:
         return ""
 
@@ -107,7 +107,7 @@ def _count_commits(from_sha: str, to_sha: str, repo_path: str) -> int:
         out = run_git(
             repo_path, "rev-list", "--count", f"{revision(from_sha)}..{revision(to_sha)}",
             timeout=_RANGE_TIMEOUT_SEC,
-        ).text.strip()
+        ).universal_text.strip()
         return int(out)
     except (GitError, ValueError):
         return 0
@@ -129,7 +129,7 @@ def _diff_files(
         out = run_git(
             repo_path, "diff", "--name-only", f"{revision(from_sha)}..{revision(to_sha)}",
             timeout=_RANGE_TIMEOUT_SEC,
-        ).text
+        ).universal_text
     except GitError:
         return set(), False
 

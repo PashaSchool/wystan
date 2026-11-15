@@ -40,7 +40,15 @@ class GitResult:
 
     @property
     def text(self) -> str:
+        """stdout as UTF-8, line endings untouched (what GitPython returned)."""
         return self.stdout.decode("utf-8", "replace")
+
+    @property
+    def universal_text(self) -> str:
+        """stdout as ``subprocess.run(text=True)`` returned it: universal
+        newlines, so ``\\r\\n`` and a lone ``\\r`` read as ``\\n`` (a commit
+        message written on Windows keeps its byte-identical parse)."""
+        return self.text.replace("\r\n", "\n").replace("\r", "\n")
 
     @property
     def stderr_text(self) -> str:
