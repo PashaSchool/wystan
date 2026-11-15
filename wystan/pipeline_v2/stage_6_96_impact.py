@@ -210,10 +210,12 @@ def stage_6_96_impact(
             )
         },
     )
-    if "impact_export_refused" in run_telemetry:
-        # Tree paths the snapshot export would not write (unsafe names,
-        # collisions); present only when one happened.
-        telemetry["impact_export_refused"] = run_telemetry["impact_export_refused"]
+    # Present only when one happened: tree paths the snapshot export would
+    # not write (unsafe names, collisions), and snapshots a partial clone
+    # could not provide (blobs not in the object store; never fetched).
+    for key in ("impact_export_refused", "impact_skipped_missing_objects"):
+        if key in run_telemetry:
+            telemetry[key] = run_telemetry[key]
 
     # ── Assemble per-entity series (snapshot order is ascending) ─────
     series: list[list[ImpactPoint]] = [[] for _ in entities]

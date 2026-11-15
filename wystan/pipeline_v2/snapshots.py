@@ -63,6 +63,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -70,7 +71,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, TypeVar
 
 from wystan.analyzer.git_runner import GitFailed, object_name
-from wystan.analyzer.git_tree_export import export_tree
+from wystan.analyzer.git_tree_export import MissingObjects, export_tree
 from wystan.analyzer.import_graph import (
     _resolve_import,
     detect_monorepo_packages,
@@ -223,6 +224,20 @@ def resolve_snapshot_budget_sec(n_snapshots: int) -> float:
     return per * max(1, n_snapshots)
 
 
+#: Files whose bytes the snapshot readers use: the import index reads
+#: TS/JS/Python sources up to the reverse-import size cap; the alias and
+#: workspace readers read tsconfig/jsconfig (and their ``extends`` targets),
+#: package.json and pnpm-workspace.yaml. Every other file is exported as a
+#: same-size sparse placeholder (listed and sized as in a checkout, never
+#: read).
+_MANIFEST_SUFFIXES = frozenset({".json", ".jsonc", ".yaml", ".yml"})
+
+
+def snapshot_wants_content(path: str, size: int) -> bool:
+    suffix = PurePosixPath(path).suffix.lower()
+    return size <= _MAX_FILE_BYTES and (suffix in _SCANNED_EXTENSIONS or suffix in _MANIFEST_SUFFIXES)
+
+
 #: Refused tree paths named in one warning; the count is always complete.
 _REFUSALS_SHOWN = 5
 
@@ -306,13 +321,17 @@ def run_snapshots(
             break
         tree_dir = tempfile.mkdtemp(prefix="wystan-impact-")  # mode 0700, ours
         try:
-            report = export_tree(repo_path, object_name(sha), tree_dir)
+            report = export_tree(repo_path, object_name(sha), tree_dir, snapshot_wants_content)
             if report.refused:
                 _record_refusals(telemetry, sha, report.refused, _warn)
             results[sha] = compute(Path(tree_dir), sha)
             telemetry["impact_snapshots"] += 1
         except Exception as exc:  # noqa: BLE001 — never fail the scan
             telemetry["impact_skipped_snapshots"] += 1
+            if isinstance(exc, MissingObjects):
+                # A partial clone: the engine never fetches, so the snapshot
+                # is absent and says why (key present only when it happens).
+                telemetry["impact_skipped_missing_objects"] = telemetry.get("impact_skipped_missing_objects", 0) + 1
             _warn(f"impact: snapshot {sha[:12]} skipped: {_skip_detail(exc)}")
         finally:
             shutil.rmtree(tree_dir, ignore_errors=True)
@@ -412,6 +431,44 @@ def _extract_specs(rel_path: str, text: str) -> list[str]:
     return specs
 
 
+_EXPORT_READ_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+def _read_exported_text(path: Path) -> str | None:
+    """A source file of an exported snapshot, or ``None`` when it is not a
+    regular file, is over the read cap, or cannot be read. The export
+    directory is the engine's own, but it is read with the discipline of a
+    repository read (no link followed, regular file before and after open).
+    Move to ``wystan.analyzer.repo_reader`` once ``fix/guarded-repo-reads``
+    and this branch are both in ``dev``."""
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_FILE_BYTES:
+            return None
+        fd = os.open(path, _EXPORT_READ_FLAGS)
+    except OSError:
+        return None
+    try:
+        after = os.fstat(fd)
+        if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            return None
+        chunks, left = [], before.st_size
+        while left > 0:
+            chunk = os.read(fd, left)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        data = b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", errors="ignore")
+
+
 def build_snapshot_import_index(
     scan_root: Path,
     files: list[str] | None = None,
@@ -440,12 +497,8 @@ def build_snapshot_import_index(
         suffix = PurePosixPath(rel).suffix.lower()
         if suffix not in _SCANNED_EXTENSIONS or _is_vendor_or_test(rel):
             continue
-        abs_path = scan_root / rel
-        try:
-            if abs_path.stat().st_size > _MAX_FILE_BYTES:
-                continue
-            text = abs_path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        text = _read_exported_text(scan_root / rel)
+        if text is None:
             continue
         is_py = suffix in _PY_EXTENSIONS
         for spec in _extract_specs(rel, text):
