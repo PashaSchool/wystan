@@ -64,6 +64,7 @@ def declare_subtree(subtree: os.PathLike[str] | str, repository: os.PathLike[str
         raise ValueError(f"{inner} is not inside the scanned repository {outer}")
     with _declared_lock:
         _declared[inner] = outer
+        _boundary_of_absolute.cache_clear()
 
 
 @lru_cache(maxsize=_BOUNDARIES_REMEMBERED)
@@ -71,8 +72,14 @@ def _resolved(top: str) -> Boundary:
     return Boundary(lexical=top, real=os.path.realpath(top))
 
 
+@lru_cache(maxsize=_BOUNDARIES_REMEMBERED)
+def _boundary_of_absolute(absolute: str) -> Boundary:
+    return _resolved(_declared.get(absolute, absolute))
+
+
 def boundary_of(root: os.PathLike[str] | str) -> Boundary:
     """The boundary of reads under ``root``: the repository declared for it,
-    or ``root`` itself (module doc)."""
-    absolute = _absolute(root)
-    return _resolved(_declared.get(absolute, absolute))
+    or ``root`` itself (module doc). Memoised per absolute root (a relative
+    root is made absolute first, against the current directory)."""
+    raw = os.fspath(root)
+    return _boundary_of_absolute(raw if os.path.isabs(raw) and os.path.normpath(raw) == raw else _absolute(raw))

@@ -27,6 +27,7 @@ outside it (same inode; git never creates one).
 
 from __future__ import annotations
 
+import locale
 import os
 import stat
 from contextlib import contextmanager
@@ -35,7 +36,13 @@ from pathlib import Path, PurePath
 from typing import Iterator
 
 from wystan.analyzer.repo_boundary import boundary_of
-from wystan.analyzer.repo_open import FILE_FLAGS, OutsideRepository, open_contained, symlink_containment_enabled
+from wystan.analyzer.repo_open import (
+    FILE_FLAGS,
+    NotRegularFile,
+    OutsideRepository,
+    open_contained,
+    symlink_containment_enabled,
+)
 
 __all__ = [
     "MAX_FILE_BYTES",
@@ -92,23 +99,30 @@ def repo_path(repo_root: os.PathLike[str] | str, rel_path: str) -> Path | None:
     return Path(repo_root) / rel
 
 
-def _open(path: Path, repo_root: Path) -> tuple[int | None, str | None]:
-    """A descriptor for a regular-looking, contained file, or the refusal."""
+def _open_uncontained(path: str) -> tuple[int | None, str | None]:
+    """The kill switch: legacy reads; the file type and the cap still hold."""
     try:
         link = os.lstat(path)
     except OSError:
         return None, REFUSED_MISSING
     if not stat.S_ISLNK(link.st_mode) and not stat.S_ISREG(link.st_mode):
         return None, REFUSED_NOT_REGULAR
+    try:
+        return os.open(path, FILE_FLAGS), None
+    except OSError:
+        return None, REFUSED_OPEN_ERROR
+
+
+def _open(path: str, repo_root: os.PathLike[str] | str) -> tuple[int | None, str | None]:
+    """A descriptor for a regular-looking, contained file, or the refusal."""
     if not symlink_containment_enabled():
-        try:  # the kill switch: legacy reads, file type and cap still checked
-            return os.open(path, FILE_FLAGS), None
-        except OSError:
-            return None, REFUSED_OPEN_ERROR
+        return _open_uncontained(path)
     try:
         return open_contained(path, boundary_of(repo_root)), None
     except FileNotFoundError:
         return None, REFUSED_MISSING
+    except NotRegularFile:
+        return None, REFUSED_NOT_REGULAR
     except OutsideRepository:
         return None, REFUSED_OUTSIDE
     except OSError:
@@ -124,7 +138,9 @@ def open_repo_file(
     ``MAX_FILE_BYTES``, read at call time); ``fd`` is ``None`` with the
     refusal otherwise. Rules: module doc."""
     cap = MAX_FILE_BYTES if max_bytes is None else max_bytes
-    fd, refused = _open(Path(path), Path(repo_root))
+    # Strings, not ``Path`` objects: building two per read cost more than
+    # the system calls of the open.
+    fd, refused = _open(os.fspath(path), repo_root)
     size = 0
     try:
         if fd is not None:
@@ -205,11 +221,11 @@ def read_repo_text_or_raise(
                            stop_at_binary=False)
     if read.data is None:
         raise _refusal_error(path, read.refused)
-    import locale
-
     # ``read_text()`` with no encoding decodes with the locale's encoding.
     text = read.data.decode(locale.getpreferredencoding(False) if encoding is None else encoding, errors or "strict")
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    # Universal newlines; most files have no CR, and the scan for one is
+    # cheaper than two replacing passes.
+    return text.replace("\r\n", "\n").replace("\r", "\n") if "\r" in text else text
 
 
 def read_repo_bytes_or_raise(
