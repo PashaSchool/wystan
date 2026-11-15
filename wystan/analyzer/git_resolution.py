@@ -265,3 +265,4 @@ def child_environment(repo_root: str | None = None) -> dict[str, str]:
     if repo_root:
         env.update(ceiling_environment(repo_root))
     return env
+

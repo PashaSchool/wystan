@@ -41,6 +41,7 @@ from wystan.analyzer.git_resolution import (
     ceiling_environment,
     safe_search_path,
 )
+from wystan.analyzer.git_user_config import user_excludes_file
 
 __all__ = [
     "ALLOWED_SUBCOMMANDS", "DEFAULT_MAX_OUTPUT_BYTES", "DEFAULT_TIMEOUT_SEC",
@@ -66,6 +67,8 @@ _FORCED_FLAGS = {
 #: Commands that hash working-tree files, where git runs the clean filters
 #: the clone's configuration defines.
 _FILTERING_SUBCOMMANDS = frozenset({"diff", "status"})
+#: Commands whose output lists untracked files.
+_LISTS_UNTRACKED = frozenset({"status"})
 _FILTER_KEYS = ("clean", "smudge", "process")
 #: A filter driver name the engine will neutralise; anything else refuses.
 _PLAIN_DRIVER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -174,6 +177,13 @@ def filter_environment(repo_root: str) -> dict[str, str]:
     return env
 
 
+def _user_options(subcommand: str) -> tuple[str, ...]:
+    """The one piece of the user's own configuration the engine honours:
+    their global ignore file, for the command that lists untracked files."""
+    excludes = user_excludes_file() if subcommand in _LISTS_UNTRACKED else None
+    return ("-c", f"core.excludesFile={excludes}") if excludes else ()
+
+
 def run_git(
     repo_root: str | os.PathLike[str],
     *args: str,
@@ -193,7 +203,7 @@ def run_git(
     env.update(ceiling_environment(root, stay_inside))
     if subcommand in _FILTERING_SUBCOMMANDS:
         env.update(filter_environment(root))
-    argv = git_command(root, subcommand, *_FORCED_FLAGS.get(subcommand, ()), *args[1:])
+    argv = git_command(root, *_user_options(subcommand), subcommand, *_FORCED_FLAGS.get(subcommand, ()), *args[1:])
     result = run_bounded(argv, env, timeout, max_output, stdin)
     if check and result.returncode != 0:
         raise GitFailed(subcommand, result)
