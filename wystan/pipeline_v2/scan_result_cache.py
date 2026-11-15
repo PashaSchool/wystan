@@ -3900,6 +3900,9 @@ def engine_version() -> str:
 # ── repo content identity ────────────────────────────────────────────────
 
 
+#: Prefix of a dirty hash computed from the files because git could not
+#: read the working tree; it never equals a hash git produced.
+_UNREAD_TREE_PREFIX = "unread:"
 #: The content identity is three quick reads; a repository that needs
 #: longer is keyed as "unknown" rather than holding the scan.
 _IDENTITY_GIT_TIMEOUT_SEC = 30.0
@@ -3931,8 +3934,13 @@ def _dirty_hash(repo_path: Path) -> str:
     # file entries so each new file gets its own ``?? path`` line.
     status = _git(repo_path, "status", "--porcelain=v1", "--untracked-files=all")
     diff = _git(repo_path, "diff", "HEAD")
-    status_s = status or ""
-    diff_s = diff or ""
+    if status is None or diff is None:
+        # The working tree could not be read through git (refused: a filter
+        # the runner cannot neutralise, or failed). That is not "clean":
+        # key on the files themselves so no stale result is served.
+        return f"{_UNREAD_TREE_PREFIX}{_nongit_tree_hash(repo_path)}"
+    status_s = status
+    diff_s = diff
     # Untracked NEW files appear as "?? path" in status but contribute NOTHING to
     # ``git diff HEAD`` — so their CONTENT is invisible to the key unless hashed
     # explicitly (audit Bug 1): editing an untracked file would keep the key

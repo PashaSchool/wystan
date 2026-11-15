@@ -5,9 +5,9 @@ Three small, composable pieces — all deterministic, $0 LLM:
   1. :func:`select_snapshot_commits` — pick N commits evenly spaced over
      the scan window from the commit list ALREADY in memory
      (``ScanContext.commits``; no new ``git log``).
-  2. :func:`run_snapshots` — materialise each snapshot with
-     ``git worktree add --detach``, run a caller-supplied computation
-     against the checked-out tree, and ALWAYS clean the worktree up.
+  2. :func:`run_snapshots` — write each snapshot's tree from raw blobs
+     into a fresh directory (no checkout, no filters), run a
+     caller-supplied computation against it, and ALWAYS remove it.
      Robust by contract: per-snapshot failure skips that point with a
      logged warning (never fails the scan); a wall-clock budget skips
      the remaining snapshots when exceeded.
@@ -51,8 +51,7 @@ with ``WYSTAN_IMPACT_PER_SNAPSHOT_SEC``.
 Multi-subpath scans (follow-up noted)
 =====================================
 Each per-subpath run currently selects + materialises its own
-snapshots (cheap: the worktree checkout is the dominant cost and
-hard-links pack data). Sharing one worktree set across the subpath
+snapshots (the tree export is the dominant cost). Sharing one export set across the subpath
 runs of a single multi-scan is a known optimisation, deferred until
 the multi-runner grows a cross-subpath context to host it.
 """
@@ -70,7 +69,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, TypeVar
 
-from wystan.analyzer.git_runner import GitError, GitFailed, GitResult, object_name, run_git
+from wystan.analyzer.git_runner import GitFailed, object_name
+from wystan.analyzer.git_tree_export import export_tree
 from wystan.analyzer.import_graph import (
     _resolve_import,
     detect_monorepo_packages,
@@ -223,12 +223,8 @@ def resolve_snapshot_budget_sec(n_snapshots: int) -> float:
     return per * max(1, n_snapshots)
 
 
-#: A worktree add or checkout of a large tree takes minutes, not more.
-_SNAPSHOT_GIT_TIMEOUT_SEC = 600.0
-
-
-def _git(repo_path: Path, *args: str) -> GitResult:
-    return run_git(repo_path, *args, timeout=_SNAPSHOT_GIT_TIMEOUT_SEC)
+def _skip_detail(exc: Exception) -> object:
+    return (exc.stderr or exc) if isinstance(exc, GitFailed) else exc
 
 
 def run_snapshots(
@@ -239,38 +235,25 @@ def run_snapshots(
     budget_sec: float | None = None,
     log: Any = None,
 ) -> tuple[dict[str, T], dict[str, Any]]:
-    """Materialise each sha as a detached worktree and run ``compute``.
+    """Materialise each sha's tree in a fresh directory and run ``compute``.
 
-    ``compute(worktree_root, sha)`` receives the CHECKED-OUT tree root
+    ``compute(tree_root, sha)`` receives the root of the tree at that sha
     (the caller appends any subpath itself). Returns
     ``(results_by_sha, telemetry)`` where telemetry carries
     ``impact_snapshots`` (completed), ``impact_skipped_snapshots``
     (failed + budget-skipped), ``impact_budget_exceeded`` and
     ``budget_sec``.
 
-    Worktree REUSE (perf wave 2, R5a): ONE detached worktree is created
-    lazily at the first snapshot and re-pointed at each subsequent sha
-    with ``git checkout --detach --force`` inside it — N checkouts
-    instead of N ``worktree add`` + N ``worktree remove`` subprocess
-    pairs. Content per sha is identical to a fresh worktree: a detached
-    checkout materialises exactly the tracked tree at that sha,
-    ``compute`` never writes into the tree, and consecutive checkouts
-    remove files tracked at the previous sha but absent at the next
-    (verified by the content-parity unit test). Any add/checkout/compute
-    failure tears the worktree down and the next sha re-creates it
-    fresh, so one bad snapshot can never poison the rest of the series.
+    The tree is written from raw blobs (``git_tree_export.export_tree``),
+    not checked out: a checkout would run the clone's content filters and
+    hooks in a working-tree context of its own. Nothing is registered in
+    the clone (no ``git worktree``), so there is nothing to prune.
 
     Robustness contract (never fails the scan):
-      - ``git worktree prune`` first — clears stale registrations from
-        a previously interrupted run before we add new worktrees.
-      - any per-snapshot failure → worktree teardown (``git worktree
-        remove --force`` + ``rmtree`` fallback) + skip with a warning;
-        the next snapshot starts from a fresh worktree.
-      - the wall budget is checked BEFORE each checkout; once exceeded,
+      - any per-snapshot failure (export or compute) → skip with a
+        warning; its directory is removed and the next sha starts fresh.
+      - the wall budget is checked BEFORE each export; once exceeded,
         every remaining snapshot is skipped and telemetry notes it.
-      - a ``finally``-guaranteed closing teardown + ``git worktree
-        prune`` drop the reused worktree and any registration the
-        teardown could not remove.
     """
     if budget_sec is None:
         budget_sec = resolve_snapshot_budget_sec(len(shas))
@@ -295,67 +278,29 @@ def run_snapshots(
             log.info(f"WARN {msg}")
         logger.warning(msg)
 
-    try:
-        _git(repo_path, "worktree", "prune")
-    except GitError as exc:
-        # Not fatal — `worktree add` may still succeed.
-        _warn(f"impact: initial `git worktree prune` failed: {exc}")
-
     t0 = time.monotonic()
-    wt_dir: str | None = None  # the ONE reused worktree (lazy, see docstring)
-
-    def _teardown_worktree() -> None:
-        nonlocal wt_dir
-        if wt_dir is None:
-            return
+    for sha in shas:
+        elapsed = time.monotonic() - t0
+        if budget_sec > 0 and elapsed > budget_sec:
+            telemetry["impact_budget_exceeded"] = True
+            remaining = len(shas) - len(results) - telemetry["impact_skipped_snapshots"]
+            telemetry["impact_skipped_snapshots"] += remaining
+            _warn(
+                f"impact: wall budget {budget_sec:.0f}s exceeded after "
+                f"{elapsed:.1f}s — skipping {remaining} remaining "
+                f"snapshot(s)",
+            )
+            break
+        tree_dir = tempfile.mkdtemp(prefix="wystan-impact-")
         try:
-            _git(repo_path, "worktree", "remove", "--force", wt_dir)
-        except GitError:
-            pass
-        shutil.rmtree(wt_dir, ignore_errors=True)
-        wt_dir = None
-
-    try:
-        for sha in shas:
-            elapsed = time.monotonic() - t0
-            if budget_sec > 0 and elapsed > budget_sec:
-                telemetry["impact_budget_exceeded"] = True
-                remaining = len(shas) - len(results) - (
-                    telemetry["impact_skipped_snapshots"]
-                )
-                telemetry["impact_skipped_snapshots"] += remaining
-                _warn(
-                    f"impact: wall budget {budget_sec:.0f}s exceeded after "
-                    f"{elapsed:.1f}s — skipping {remaining} remaining "
-                    f"snapshot(s)",
-                )
-                break
-            try:
-                if wt_dir is None:
-                    wt_dir = tempfile.mkdtemp(prefix="wystan-impact-")
-                    _git(
-                        repo_path, "worktree", "add",
-                        "--detach", "--force", wt_dir, object_name(sha),
-                    )
-                else:
-                    _git(Path(wt_dir), "checkout", "--detach", "--force", object_name(sha))
-                results[sha] = compute(Path(wt_dir), sha)
-                telemetry["impact_snapshots"] += 1
-            except Exception as exc:  # noqa: BLE001 — never fail the scan
-                telemetry["impact_skipped_snapshots"] += 1
-                detail: object = exc
-                if isinstance(exc, GitFailed):
-                    detail = exc.stderr or exc
-                _warn(f"impact: snapshot {sha[:12]} skipped: {detail}")
-                # A failed add/checkout/compute leaves the worktree state
-                # unknown — drop it; the next sha re-creates it fresh.
-                _teardown_worktree()
-    finally:
-        _teardown_worktree()
-        try:
-            _git(repo_path, "worktree", "prune")
-        except GitError as exc:
-            _warn(f"impact: closing `git worktree prune` failed: {exc}")
+            export_tree(repo_path, object_name(sha), tree_dir)
+            results[sha] = compute(Path(tree_dir), sha)
+            telemetry["impact_snapshots"] += 1
+        except Exception as exc:  # noqa: BLE001 — never fail the scan
+            telemetry["impact_skipped_snapshots"] += 1
+            _warn(f"impact: snapshot {sha[:12]} skipped: {_skip_detail(exc)}")
+        finally:
+            shutil.rmtree(tree_dir, ignore_errors=True)
     _info(
         f"impact: snapshots done ok={telemetry['impact_snapshots']} "
         f"skipped={telemetry['impact_skipped_snapshots']} "
@@ -370,7 +315,7 @@ def run_snapshots(
 def list_snapshot_files(scan_root: Path) -> list[str]:
     """Sorted relative paths of every regular file under ``scan_root``.
 
-    A detached worktree contains exactly the tracked tree, so a
+    An exported snapshot contains exactly the tracked tree, so a
     filesystem walk IS the tracked-file list at that commit (no extra
     git call). ``.git`` entries and symlinks are skipped. Forward-slash
     relative paths, sorted — deterministic.
