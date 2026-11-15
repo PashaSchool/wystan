@@ -57,14 +57,17 @@ _RESTRICTED_ACTIONS = {
     "cat-file": frozenset({"--batch"}),
     "config": frozenset({"--get", "--get-regexp"}),
 }
-#: Diff-producing commands never run an external diff or textconv driver;
-#: commands that look at the working tree never descend into a submodule's
-#: (its own configuration and filters would apply there).
+#: Diff-producing commands never run an external diff or textconv driver
+#: and show a submodule only as a commit pointer; diff and status never look
+#: inside a submodule at all (its own configuration and filters would apply
+#: there). Forced here, so no call site can forget them. Consequence: a
+#: `git diff` file list omits submodule pointer bumps (gitlinks, which the
+#: engine never tracks as files); `log` and `diff-tree` keep them.
 _FORCED_FLAGS = {
-    "diff": ("--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty"),
-    "diff-tree": ("--no-ext-diff", "--no-textconv"),
-    "log": ("--no-ext-diff", "--no-textconv"),
-    "status": ("--ignore-submodules=dirty",),
+    "diff": ("--no-ext-diff", "--no-textconv", "--submodule=short", "--ignore-submodules=all"),
+    "diff-tree": ("--no-ext-diff", "--no-textconv", "--submodule=short"),
+    "log": ("--no-ext-diff", "--no-textconv", "--submodule=short"),
+    "status": ("--ignore-submodules=all",),
 }
 #: Commands that hash working-tree files, where git runs the clean filters
 #: the clone's configuration defines.

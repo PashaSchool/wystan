@@ -50,8 +50,12 @@ SAFE_OPTIONS = (
     # make a read command open a connection (or run core.sshCommand).
     "-c", "protocol.allow=never",
     "-c", "protocol.file.allow=never",
-    # A submodule's own configuration (hooks, filters) must never apply.
+    # A submodule's own configuration (hooks, filters, diff drivers) must
+    # never apply: no recursion, and no submodule diff or summary (both run
+    # git inside the submodule).
     "-c", "submodule.recurse=false",
+    "-c", "diff.submodule=short",
+    "-c", "status.submoduleSummary=false",
     # A signature check runs gpg and prints into ``git log`` output.
     "-c", "log.showSignature=false",
     # The parsers read C-quoted names (git's default); a clone setting it
