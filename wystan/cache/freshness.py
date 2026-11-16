@@ -54,7 +54,8 @@ def check_freshness(
         days_since = max(0, delta.days)
 
     if not scanned_sha or not current_sha:
-        # Legacy map or git unavailable — assume fresh enough
+        # Legacy map (no scanned commit): assume fresh enough. An unreadable
+        # HEAD raised above.
         return FreshnessReport(
             is_stale=False,
             current_sha=current_sha or "",
@@ -96,10 +97,12 @@ _RANGE_TIMEOUT_SEC = 10.0
 
 
 def _git_rev_parse(repo_path: str) -> str:
+    """HEAD's commit. A failure raises: an empty answer reads as "git
+    unavailable, assume fresh" in the caller."""
     try:
         return run_git(repo_path, "rev-parse", "HEAD", timeout=_REV_PARSE_TIMEOUT_SEC).universal_text.strip()
-    except GitError:
-        return ""
+    except GitError as exc:
+        raise GitAnswerUnavailable(f"HEAD unavailable: {exc}") from exc
 
 
 def _count_commits(from_sha: str, to_sha: str, repo_path: str) -> int:

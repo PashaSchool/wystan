@@ -9,6 +9,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from wystan.analyzer.git_runner import GitAnswerUnavailable
 from wystan.digest.git_reader import get_daily_commits
 from wystan.digest.summarizer import (
     summarize_with_llm,
@@ -60,13 +61,18 @@ def main():
     parser.add_argument("--output", "-o", default=None, help="Output file path (default: stdout)")
     args = parser.parse_args()
 
-    report = generate_digest(
-        repo_path=args.repo_path,
-        date=args.date,
-        branch=args.branch,
-        api_key=args.api_key,
-        use_llm=not args.no_llm,
-    )
+    try:
+        report = generate_digest(
+            repo_path=args.repo_path,
+            date=args.date,
+            branch=args.branch,
+            api_key=args.api_key,
+            use_llm=not args.no_llm,
+        )
+    except GitAnswerUnavailable as exc:
+        # A digest with a commit's files missing would under-report it.
+        print(f"Digest unavailable: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     output = json.dumps(report, indent=2, ensure_ascii=False)
 

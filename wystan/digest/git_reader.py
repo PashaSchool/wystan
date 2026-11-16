@@ -14,7 +14,7 @@ from pathlib import Path
 from wystan.analyzer.git_formats import DIGEST_RECORD
 from wystan.analyzer.git_history import numstat_file_keys, raw_parents, split_records
 from wystan.analyzer.git_repository import GitRepository, open_repository, origin_url
-from wystan.analyzer.git_runner import GitError, object_name, revision, run_git
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, object_name, revision, run_git
 
 # Each field NUL-terminated: no commit field can hold a NUL.
 _DIGEST_FORMAT = DIGEST_RECORD
@@ -128,7 +128,8 @@ def _raw_diff_first_paths(raw: bytes) -> list[str]:
 
 def _changed_files(root: str, sha: str, parents: tuple[str, ...]) -> list[str]:
     """Files of the commit against its first parent (renames detected), or
-    the numstat keys of a root commit; empty when git fails."""
+    the numstat keys of a root commit. A failed diff raises: an empty list
+    would report a commit that touched no files."""
     try:
         if not parents:
             return numstat_file_keys(root, sha, parents)
@@ -137,8 +138,9 @@ def _changed_files(root: str, sha: str, parents: tuple[str, ...]) -> list[str]:
             "--abbrev=40", "--full-index", "-M", "--raw", "-z", "--no-color",
         ).stdout
         return _raw_diff_first_paths(raw)
-    except Exception:
-        return []
+    except (GitError, IndexError, ValueError) as exc:
+        # IndexError/ValueError: a record git printed that does not parse.
+        raise GitAnswerUnavailable(f"files of commit {sha} unavailable: {exc}") from exc
 
 
 def get_daily_commits(

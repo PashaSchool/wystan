@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from wystan.analyzer.git_formats import SUBJECTS, TAGGED_SUBJECTS
-from wystan.analyzer.git_runner import GitError, run_git
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, run_git
 from wystan.models.types import Feature, FeatureMap, Flow
 
 logger = logging.getLogger(__name__)
@@ -361,15 +361,25 @@ _SUBJECTS_TIMEOUT_SEC = 30.0
 _PREFIX_FILES_TIMEOUT_SEC = 60.0
 
 
+def _log_or_raise(repo_path: str, what: str, *args: str, timeout: float):
+    """``git log`` for a commit-prefix pass. A failed or refused log raises:
+    an empty answer would read as "no prefixes" or "no files" and change
+    the feature set of a map cached as complete."""
+    try:
+        r = run_git(repo_path, "log", *args, timeout=timeout, check=False)
+    except GitError as exc:
+        raise GitAnswerUnavailable(f"{what} unavailable: {exc}") from exc
+    if r.returncode != 0:
+        raise GitAnswerUnavailable(f"{what} unavailable: git log exited {r.returncode}")
+    return r
+
+
 def _mine_commit_prefixes(repo_path: str, min_count: int = 5) -> dict[str, int]:
     """Extract domain prefixes from local git log subjects."""
-    try:
-        r = run_git(
-            repo_path, "log", f"--pretty={SUBJECTS}", "--since=2 years ago",
-            timeout=_SUBJECTS_TIMEOUT_SEC, check=False,
-        )
-    except GitError:
-        return {}
+    r = _log_or_raise(
+        repo_path, "commit subjects", f"--pretty={SUBJECTS}", "--since=2 years ago",
+        timeout=_SUBJECTS_TIMEOUT_SEC,
+    )
 
     pat_bare = re.compile(r"^([a-z][a-z0-9_/-]+):")
     pat_scope = re.compile(r"^[a-z]+\(([a-z][a-z0-9_/-]+)\):", re.IGNORECASE)
@@ -459,15 +469,11 @@ def extract_overlooked_top_dirs(
 # ── Stage 5: commit-prefix enrichment ────────────────────────────────
 
 def _collect_files_for_commit_prefix(repo_path: str, prefix: str) -> set[str]:
-    try:
-        r = run_git(
-            repo_path, "log",
-            f"--pretty={TAGGED_SUBJECTS}", "--name-only", "--no-renames",
-            "--since=2 years ago",
-            timeout=_PREFIX_FILES_TIMEOUT_SEC, check=False,
-        )
-    except GitError:
-        return set()
+    r = _log_or_raise(
+        repo_path, f"files of commit prefix {prefix!r}",
+        f"--pretty={TAGGED_SUBJECTS}", "--name-only", "--no-renames", "--since=2 years ago",
+        timeout=_PREFIX_FILES_TIMEOUT_SEC,
+    )
 
     pat = re.compile(
         rf"^([a-z]+\({re.escape(prefix)}\)|{re.escape(prefix)}):", re.IGNORECASE,

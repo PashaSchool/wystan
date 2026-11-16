@@ -87,13 +87,16 @@ def changed_files_since(repo_path: Path, since: str) -> list[str]:
 
 
 def head_sha(repo_path: Path) -> str:
-    """Return the current HEAD SHA; empty string on failure."""
+    """Return the current HEAD SHA. A failure raises: the map records it as
+    its scan commit, and an empty one reads as a legacy map that is always
+    fresh (``cache.freshness``). A scanned repository has a commit
+    (``load_repo`` refuses one without)."""
     try:
         out = run_git(repo_path, "rev-parse", "HEAD", timeout=_REV_PARSE_TIMEOUT_SEC)
-        return out.universal_text.strip()
-    except Exception as exc:  # noqa: BLE001
+    except GitError as exc:
         logger.warning("incremental: rev-parse HEAD failed (%s)", exc)
-        return ""
+        raise GitAnswerUnavailable(f"HEAD unavailable: {exc}") from exc
+    return out.universal_text.strip()
 
 
 def touched_feature_uuids(
