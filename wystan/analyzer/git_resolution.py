@@ -41,6 +41,7 @@ from wystan.analyzer.path_identity import is_within
 #: clone's config says. git 2.39 defaults, from git-config(1).
 OUTPUT_PINS = (
     "-c", "core.quotepath=true",            # C-quoted names, as the parsers expect
+    "-c", "core.abbrev=auto",               # `index a..b` length in diff-index -p (dirty hash)
     "-c", "core.precomposeunicode=true",    # macOS only; what `git init` writes there
     "-c", "core.autocrlf=false",            # working tree compared byte for byte
     "-c", "diff.renames=true",              # log/diff rename detection on (default)
