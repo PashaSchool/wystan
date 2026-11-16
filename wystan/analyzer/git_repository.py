@@ -15,6 +15,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 
+from wystan.analyzer.git_dir_discovery import one_value
 from wystan.analyzer.git_runner import GitError, GitFailed, UnsafeGit, run_git
 
 
@@ -70,18 +71,19 @@ def open_repository(path: str | os.PathLike[str], *, search_parent_directories: 
         if stay_inside and os.path.realpath(git_dir) != os.path.realpath(start):
             raise NotARepository(f"{start!r} is not the top of a git repository")
         return GitRepository(None, git_dir, start)
-    cdup = _rev_parse(start, stay_inside, "--show-cdup")[0]
+    cdup = _rev_parse(start, stay_inside, "--show-cdup")
     if cdup and stay_inside:
         raise NotARepository(f"{start!r} is not the top of a git working tree")
     return GitRepository(os.path.normpath(os.path.join(start, cdup)), git_dir, start)
 
 
-def _rev_parse(start: str, stay_inside: bool, *flags: str) -> list[str]:
-    """``git rev-parse <flags>`` lines; a failure means "not a repository",
-    except when no safe git exists or the enclosing repository belongs to
-    another user, which the caller must see as is."""
+def _rev_parse(start: str, stay_inside: bool, flag: str) -> str:
+    """``git rev-parse <flag>``, one value per call (``one_value``); a
+    failure or a malformed answer means "not a repository", except when no
+    safe git exists or the enclosing repository belongs to another user,
+    which the caller must see as is."""
     try:
-        lines = run_git(start, "rev-parse", *flags, stay_inside=stay_inside).text.splitlines()
+        stdout = run_git(start, "rev-parse", flag, stay_inside=stay_inside).stdout
     except UnsafeGit:
         raise
     except GitFailed as exc:
@@ -94,13 +96,15 @@ def _rev_parse(start: str, stay_inside: bool, *flags: str) -> list[str]:
         raise NotARepository(f"{start!r} is not a git repository") from exc
     except GitError as exc:
         raise NotARepository(f"{start!r} is not a git repository") from exc
-    if len(lines) != len(flags):
-        raise NotARepository(f"{start!r} is not a git repository")
-    return lines
+    value = one_value(stdout, allow_empty=flag == "--show-cdup")
+    if value is None:
+        raise NotARepository(f"{start!r}: git's answer to rev-parse {flag} is not one line (a path with a line break?)")
+    return value
 
 
 def _git_dir_of(start: str, stay_inside: bool) -> tuple[bool, str]:
-    is_bare, git_dir = _rev_parse(start, stay_inside, "--is-bare-repository", "--absolute-git-dir")
+    is_bare = _rev_parse(start, stay_inside, "--is-bare-repository")
+    git_dir = _rev_parse(start, stay_inside, "--absolute-git-dir")
     return is_bare == "true", git_dir
 
 

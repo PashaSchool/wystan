@@ -7,8 +7,11 @@ entries are walked by their on-disk sizes (git's ``create_from_disk``: the
 name length from the flags, ``strlen`` when it is 0xFFF; version 4's
 prefix-compressed names) without building them, so a 256 MiB index costs a
 window of about a megabyte, not its size. The extensions are then visited
-by their headers, as git's loop does (``while offset <= size - hash - 8``),
-reading eight bytes each and seeking over the rest.
+by their headers, as git's sequential loop does, reading eight bytes each
+and seeking over the rest. git reads the extensions from another place only
+through ``EOIE`` with threaded loading; the runner pins
+``index.threads=1`` and ``git_index_eoie`` refuses any index whose ``EOIE``
+does not agree with this walk.
 """
 
 from __future__ import annotations
@@ -50,10 +53,26 @@ MAX_EXTENSIONS = 64
 Visit = Callable[[bytes, int, int, int], None]
 
 
+class AmbiguousIndex(ValueError):
+    """git could read this index differently from the engine's walk."""
+
+
+class Extension(NamedTuple):
+    offset: int
+    name: bytes
+    size: int
+
+
 class IndexLayout(NamedTuple):
     version: int
     entries: int
-    extensions: frozenset[bytes]
+    #: Where the walked entries end and the extensions begin.
+    entries_end: int
+    chain: tuple[Extension, ...]
+
+    @property
+    def extensions(self) -> frozenset[bytes]:
+        return frozenset(ext.name for ext in self.chain)
 
 
 class _Window:
@@ -176,25 +195,30 @@ def _walk_compressed(window: _Window, count: int, fixed: int, visit: Visit | Non
     return offset
 
 
-def _extensions(fd: int, offset: int, end: int) -> frozenset[bytes] | None:
-    """Signatures of the extensions from ``offset`` up to ``end`` (the
-    trailing checksum), visited by their headers as git does."""
-    found = set()
-    for _ in range(MAX_EXTENSIONS + 1):
-        if offset + _EXTENSION.size > end:
-            return frozenset(found)
+def _extension_chain(fd: int, offset: int, end: int) -> tuple[Extension, ...]:
+    """The extensions from ``offset`` (where the walked entries end) up to
+    ``end`` (the trailing checksum), visited by their headers as git's
+    sequential loop does. Honest indexes end exactly at the checksum; a
+    header or body running past it, or too many extensions, is refused."""
+    chain = []
+    while offset + _EXTENSION.size <= end:
+        if len(chain) == MAX_EXTENSIONS:
+            raise AmbiguousIndex(f"more than {MAX_EXTENSIONS} extensions")
         header = os.pread(fd, _EXTENSION.size, offset)
-        if len(header) < _EXTENSION.size:
-            return None
         name, size = _EXTENSION.unpack(header)
-        found.add(name)
+        if offset + _EXTENSION.size + size > end:
+            raise AmbiguousIndex(f"extension {name!r} at {offset} runs past the checksum")
+        chain.append(Extension(offset, name, size))
         offset += _EXTENSION.size + size
-    return None
+    if offset != end:
+        raise AmbiguousIndex(f"extensions end at {offset}, the checksum starts at {end}")
+    return tuple(chain)
 
 
 def index_layout(fd: int, size: int, oid_bytes: int, visit: Visit | None = None) -> IndexLayout | None:
     """The layout of the index open on ``fd`` (``size`` bytes), ``None`` when
-    it does not parse."""
+    it does not parse; :class:`AmbiguousIndex` when git could see other
+    extensions than this walk does (``git_index_eoie``)."""
     if size < _HEADER.size + oid_bytes:
         return None
     header = os.pread(fd, _HEADER.size, 0)
@@ -210,7 +234,5 @@ def index_layout(fd: int, size: int, oid_bytes: int, visit: Visit | None = None)
     offset = walk(window, count, fixed, visit)
     if offset is None:
         return None
-    extensions = _extensions(fd, offset, size - oid_bytes)
-    if extensions is None:
-        return None
-    return IndexLayout(version, count, extensions)
+    chain = _extension_chain(fd, offset, size - oid_bytes)
+    return IndexLayout(version, count, offset, chain)

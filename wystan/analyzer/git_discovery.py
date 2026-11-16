@@ -73,14 +73,19 @@ def _read_outside(path: str, limit: int = POINTER_FILE_BYTES) -> str | None:
     return data.decode("utf-8", "replace").strip()
 
 
-def _discovery_read(path: str, start: str) -> str | None:
-    """Inside the scan root: the guarded reader; outside: the exclusion
-    walk's own bounded read."""
-    return read_pointer(path, start) if is_within(path, start) else _read_outside(path)
+def read_git_metadata(path: str, start: str, limit: int = POINTER_FILE_BYTES) -> str | None:
+    """A small git metadata file (a ``.git`` pointer, ``commondir``, the
+    repository config): inside the scan root through the guarded reader;
+    outside it through the bounded read above, used only to decide what git
+    may be allowed to do (exclusions, the index inspection), never put into
+    a map."""
+    return read_pointer(path, start, limit) if is_within(path, start) else _read_outside(path, limit)
+
+
 
 
 def _common_dir(git_dir: str, start: str) -> list[str]:
-    pointer = _discovery_read(os.path.join(git_dir, _COMMONDIR), start)
+    pointer = read_git_metadata(os.path.join(git_dir, _COMMONDIR), start)
     return [os.path.normpath(os.path.join(git_dir, pointer))] if pointer else []
 
 
@@ -95,7 +100,7 @@ def _entry_targets(ancestor: str, dot_git: str, start: str) -> list[str]:
         return [target, *_common_dir(target, start)]
     if stat.S_ISDIR(mode):
         return _common_dir(dot_git, start)
-    pointer = _discovery_read(dot_git, start)
+    pointer = read_git_metadata(dot_git, start)
     if pointer and pointer.startswith(_GITDIR_PREFIX):
         git_dir = os.path.normpath(os.path.join(ancestor, pointer[len(_GITDIR_PREFIX):].strip()))
         return [git_dir, *_common_dir(git_dir, start)]

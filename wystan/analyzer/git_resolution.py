@@ -32,6 +32,7 @@ from __future__ import annotations
 import functools
 import os
 
+from wystan.analyzer.git_dir_discovery import one_value
 from wystan.analyzer.git_discovery import exclusion_roots, read_pointer, topmost_repository_ancestor
 from wystan.analyzer.git_process import GitError, run_bounded
 from wystan.analyzer.path_identity import is_within
@@ -72,6 +73,11 @@ SAFE_OPTIONS = (
     "-c", f"core.hooksPath={os.devnull}",
     "-c", "core.pager=cat",
     "-c", "core.untrackedCache=false",
+    # Threaded loading takes the extensions from where the clone's EOIE says
+    # and the entries from IEOT, not from walking the entries as the
+    # engine's index inspection does (measured, git 2.39: an EOIE naming a
+    # hidden extension is followed at index.threads=4, not at 1).
+    "-c", "index.threads=1",
     "-c", f"core.attributesFile={os.devnull}",
     "-c", "diff.external=",
     # The engine never fetches; a promisor remote or a submodule must not
@@ -192,19 +198,33 @@ def _explicit_git(value: str, scanned: str) -> str:
     return real
 
 
-def _confirmed_roots(git: str, root: str, search_path: str) -> tuple[str, ...]:
+#: What git is asked to confirm, one value per call (``one_value``).
+_CONFIRMED_LOCATIONS = ("--show-toplevel", "--absolute-git-dir", "--git-common-dir")
+
+
+def _probe(git: str, root: str, search_path: str, flag: str) -> str | None:
+    """git's one-value answer, ``None`` when git says this is not a working
+    tree; a malformed answer is refused (it would hide where git looks)."""
     # Trust only the path itself: a foreign-owned enclosing repository makes
     # the probe fail (then the file-system roots stand), never trusted.
-    argv = [git, *SAFE_OPTIONS, "-c", f"safe.directory={root}", "-C", root,
-            "rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"]
+    argv = [git, *SAFE_OPTIONS, "-c", f"safe.directory={root}", "-C", root, "rev-parse", flag]
     try:
         result = run_bounded(argv, base_environment(search_path), _DISCOVERY_TIMEOUT_SEC, _DISCOVERY_OUTPUT_BYTES)
     except GitError:
-        return ()
-    lines = result.text.splitlines()
-    if result.returncode != 0 or len(lines) != 3:
+        return None
+    if result.returncode != 0:
+        return None
+    value = one_value(result.stdout)
+    if value is None:
+        raise UnsafeGit(f"git's answer to rev-parse {flag} on {root} is not one line; refusing")
+    return value
+
+
+def _confirmed_roots(git: str, root: str, search_path: str) -> tuple[str, ...]:
+    answers = [_probe(git, root, search_path, flag) for flag in _CONFIRMED_LOCATIONS]
+    if None in answers:
         return ()  # not in a working tree: the given root stands
-    return tuple(os.path.realpath(os.path.join(root, line)) for line in lines)
+    return tuple(os.path.realpath(os.path.join(root, answer)) for answer in answers)
 
 
 @functools.lru_cache(maxsize=32)

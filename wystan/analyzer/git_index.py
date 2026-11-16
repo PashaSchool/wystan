@@ -9,9 +9,13 @@ tree's git directory is (also above the scan root, for a subdirectory
 scan): a bounded, regular-file-only, no-follow, non-blocking read of its
 layout (``git_index_layout``), used only to decide this refusal, never put
 into a map. Only that inspection can allow git to read the index; the
-clone's config never does. Refused: no index, not a regular file, larger
-than :data:`MAX_INDEX_BYTES`, not parsable, an object format the engine
-does not know, a split (``link``) or sparse (``sdir``) index. A refused
+clone's config never does. The git directory and the object format are
+found from the file system (``git_dir_discovery``) and confirmed by git,
+one value per call. Refused: an unclear git directory or object format
+(missing, malformed or disagreeing answers), no index, not a regular file,
+larger than :data:`MAX_INDEX_BYTES`, not parsable, an ``EOIE`` that does
+not agree with the walk (:data:`LAYOUT_AMBIGUOUS`; ``git_index_eoie``), a
+split (``link``), sparse (``sdir``) or other mandatory extension. A refused
 index means no dirty-tree detection, recorded in ``scan_meta.index_unread``.
 """
 
@@ -23,7 +27,15 @@ import os
 import stat
 from pathlib import Path
 
-from wystan.analyzer.git_index_layout import index_layout
+from wystan.analyzer.git_dir_discovery import (
+    configured_object_format,
+    discovered_git_dir,
+    has_unsafe_characters,
+    is_plain_directory,
+    one_value,
+)
+from wystan.analyzer.git_index_eoie import check_eoie
+from wystan.analyzer.git_index_layout import AmbiguousIndex, index_layout
 from wystan.analyzer.path_identity import is_within
 from wystan.analyzer.repo_boundary import boundary_of
 from wystan.analyzer.repo_open import (
@@ -39,27 +51,47 @@ MAX_INDEX_BYTES = 256 << 20
 #: git's object format -> object id length in bytes.
 _OID_BYTES_BY_FORMAT = {"sha1": 20, "sha256": 32}
 _SPLIT, _SPARSE = b"link", b"sdir"
+#: The refusal of an index git could read differently from the engine.
+LAYOUT_AMBIGUOUS = "index_layout_ambiguous"
 _NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def repository_facts(root: str) -> tuple[str, str] | None:
-    """(git directory, object format) as git finds them (no index read)."""
+def _single_answer(root: str, flag: str) -> str | None:
+    """git's one-value answer to ``rev-parse <flag>``: exactly one line,
+    no other line break, no NUL; ``None`` for anything else."""
     from wystan.analyzer.git_runner import GitError, run_git  # the runner imports this module
 
     try:
-        found = run_git(root, "rev-parse", "--absolute-git-dir", "--show-object-format", check=False)
+        found = run_git(root, "rev-parse", flag, check=False)
     except GitError:
         return None
-    lines = found.text.split("\n")
-    if found.returncode != 0 or len(lines) < 2 or not lines[0].strip():
+    return one_value(found.stdout) if found.returncode == 0 else None
+
+
+class _Unclear(Exception):
+    """The git directory or its object format is not certain: refused."""
+
+
+def repository_facts(root: str) -> tuple[str, str] | None:
+    """(git directory, object format) the index inspection uses: found
+    from the file system, each confirmed by git in a call of its own.
+    ``None`` when neither finds a repository; :class:`_Unclear` with the
+    reason for a missing, malformed or disagreeing answer."""
+    found_dir = discovered_git_dir(root)
+    answered_dir = _single_answer(root, "--absolute-git-dir")
+    if found_dir is None and answered_dir is None:
         return None
-    return lines[0].strip(), lines[1].strip()
-
-
-def git_dir(root: str) -> str | None:
-    """The repository's git directory, as git finds it (no index read)."""
-    facts = repository_facts(root)
-    return facts[0] if facts else None
+    if found_dir is None or answered_dir is None:
+        raise _Unclear(f"git directory unclear (found {found_dir!r}, git answered {answered_dir!r})")
+    if has_unsafe_characters(found_dir) or os.path.realpath(found_dir) != os.path.realpath(answered_dir):
+        raise _Unclear(f"git directory unclear (found {found_dir!r}, git answered {answered_dir!r})")
+    if not is_plain_directory(found_dir):
+        raise _Unclear(f"git directory {found_dir!r} is not a directory")
+    configured = configured_object_format(found_dir, root)
+    answered = _single_answer(root, "--show-object-format")
+    if configured is None or configured != answered:
+        raise _Unclear(f"object format unclear (config {configured!r}, git answered {answered!r})")
+    return found_dir, configured
 
 
 def _open_above_root(index: str, before: os.stat_result) -> int:
@@ -97,16 +129,29 @@ def _inspected_refusal(index: str, identity: tuple[int, int, int, int], oid_byte
         return f"index not readable ({exc.strerror or exc})"
     try:
         layout = index_layout(fd, identity[2], oid_bytes)
+        if layout is not None:
+            check_eoie(fd, identity[2], oid_bytes, layout)
+    except AmbiguousIndex as exc:
+        return f"{LAYOUT_AMBIGUOUS} ({exc})"
     except OSError as exc:
         return f"index not readable ({exc.strerror or exc})"
     finally:
         os.close(fd)
     if layout is None:
         return "index does not parse"
-    if _SPLIT in layout.extensions:
+    return _extension_refusal(layout.extensions)
+
+
+def _extension_refusal(extensions: frozenset[bytes]) -> str | None:
+    if _SPLIT in extensions:
         return "split index (git re-dates its shared index file on every read)"
-    if _SPARSE in layout.extensions:
+    if _SPARSE in extensions:
         return "sparse index (git writes tree objects when it expands it)"
+    # A lowercase first letter marks an extension git must understand; an
+    # unknown one could change how git reads the index.
+    mandatory = sorted(name for name in extensions if name[:1].islower())
+    if mandatory:
+        return f"unknown mandatory index extension {mandatory[0]!r}"
     return None
 
 
@@ -120,8 +165,12 @@ def _shared_index_present(found_dir: str) -> bool:
 def index_refusal(root: str) -> str | None:
     """Why the clone's index must not be read, or ``None`` when it may be:
     only after the engine inspected it and found an ordinary index. Not a
-    repository at all: ``None`` (git refuses the command itself)."""
-    facts = repository_facts(root)
+    repository by both the file system and git: ``None`` (git refuses the
+    command itself). Every unclear answer is a refusal."""
+    try:
+        facts = repository_facts(root)
+    except _Unclear as exc:
+        return str(exc)
     if facts is None:
         return None
     found_dir, found_format = facts
