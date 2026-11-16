@@ -558,7 +558,9 @@ def watch_status(
     repo_path: str = typer.Argument(".", help="Repo to check"),
 ):
     """Check whether a watcher daemon is running for this repo."""
-    from wystan.watch import watcher_status
+    from rich.markup import escape
+
+    from wystan.watch import last_failure, watcher_status
     status = watcher_status(repo_path)
     if status.running:
         import datetime as _dt
@@ -566,6 +568,11 @@ def watch_status(
         console.print(f"[green]✓ Running[/green] (pid {status.pid}, started {started})")
     else:
         console.print("[yellow]Not running[/yellow]")
+    # A detached watcher's stderr is the null device: why it stopped is in
+    # its failure file, removed when a watcher starts again.
+    failure = last_failure(repo_path)
+    if failure is not None:
+        console.print(f"[red]Last error:[/red] {escape(failure)}")
 
 
 @app.command(name="watch-stop")
