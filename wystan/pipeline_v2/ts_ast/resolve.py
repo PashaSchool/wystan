@@ -64,6 +64,7 @@ import posixpath
 from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 
 from wystan.analyzer.import_graph import detect_workspace_package_map
 
@@ -322,7 +323,7 @@ def _base_url_alias_entries(repo_root: Path) -> list[AliasEntry]:
     seen: set[tuple[str, str]] = set()
     for ts_path in _iter_tsconfig_files(repo_root):
         try:
-            text = ts_path.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(ts_path, repo_root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
         except OSError:
             continue
         config = _parse_jsonc_light(text)
@@ -377,7 +378,7 @@ class _RepoContext:
         parsed: dict[str, object] | None = None
         pj = Path(self.repo_root) / pkg_dir / "package.json"
         try:
-            data: object = json.loads(pj.read_text(encoding="utf-8"))
+            data: object = json.loads(read_repo_text_or_raise(pj, self.repo_root, max_bytes=MANIFEST_READ_MAX_BYTES))
             if isinstance(data, dict):
                 parsed = {str(k): v for k, v in data.items()}
         except (OSError, ValueError):

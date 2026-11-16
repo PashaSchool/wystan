@@ -328,13 +328,13 @@ class ConfigAsProductExtractor:
             basename = p.rsplit("/", 1)[-1]
 
             if _is_tauri(p, t) or basename in t.tauri_filenames:
-                conf = read_json(repo_path / p)
+                conf = read_json(repo_path / p, repo_path)
                 if isinstance(conf, dict):
                     _accept(_emit_tauri_anchors(conf, p, t))
                 continue
 
             if basename in t.expo_filenames:
-                conf = read_json(repo_path / p)
+                conf = read_json(repo_path / p, repo_path)
                 if isinstance(conf, dict) and any(
                     key in conf for key in t.expo_detect_keys
                 ):
@@ -342,13 +342,13 @@ class ConfigAsProductExtractor:
                 continue
 
             if basename in t.chrome_filenames:
-                manifest = read_json(repo_path / p)
+                manifest = read_json(repo_path / p, repo_path)
                 if isinstance(manifest, dict) and _is_chrome_mv3(manifest, t):
                     _accept(_emit_chrome_mv3_anchors(manifest, p, t))
                 continue
 
             if basename in t.vscode_filenames or basename in t.raycast_filenames:
-                pkg = read_json(repo_path / p)
+                pkg = read_json(repo_path / p, repo_path)
                 if isinstance(pkg, dict):
                     if basename in t.vscode_filenames:
                         _accept(_emit_vscode_extension_anchors(pkg, p, t))

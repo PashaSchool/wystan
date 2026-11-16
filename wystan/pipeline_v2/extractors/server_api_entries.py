@@ -783,7 +783,7 @@ class ServerApiEntryExtractor:
                 continue
             if _should_skip_path(path):
                 continue
-            text = read_text(ctx.repo_path / path)
+            text = read_text(ctx.repo_path / path, ctx.repo_path)
             if not text or len(text) > _MAX_BYTES:
                 continue
             if not _has_marker(text):

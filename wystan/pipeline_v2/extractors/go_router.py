@@ -358,7 +358,7 @@ class GoRouterExtractor(PatternExtractor):
                 continue
 
             abs_path = ctx.repo_path / rel_path
-            text = read_text(abs_path)
+            text = read_text(abs_path, ctx.repo_path)
             if not text:
                 continue
 

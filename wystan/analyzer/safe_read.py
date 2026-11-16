@@ -31,28 +31,31 @@ import os
 from pathlib import Path
 from typing import Iterator
 
-SYMLINK_CONTAINMENT_ENV = "WYSTAN_SYMLINK_CONTAINMENT"
+# The switch lives with the opener (``repo_open``), which reads it on every
+# open; re-exported here, its historical home.
+from wystan.analyzer.repo_open import SYMLINK_CONTAINMENT_ENV, symlink_containment_enabled
+
 
 __all__ = [
+    "MAX_FILE_BYTES",
+    "REFUSED_BINARY",
+    "REFUSED_MISSING",
+    "REFUSED_NOT_REGULAR",
+    "REFUSED_OPEN_ERROR",
+    "REFUSED_OUTSIDE",
+    "REFUSED_OVER_CAP",
+    "SNIFF_BYTES",
     "SYMLINK_CONTAINMENT_ENV",
-    "symlink_containment_enabled",
-    "path_within_repo",
-    "safe_read_text",
+    "FileBytes",
     "iter_repo_files",
+    "open_repo_file",
+    "path_within_repo",
+    "read_repo_bytes",
+    "repo_path",
+    "safe_read_text",
+    "symlink_containment_enabled",
 ]
 
-
-def symlink_containment_enabled() -> bool:
-    """Default **ON**. Explicit ``0``/``false``/``off``/``no``/``""`` ⇒ every
-    helper is a pure pass-through (byte-identical legacy behaviour;
-    kill-switch). The truthy set mirrors the ``invariant_hooks`` convention;
-    only the ``os.environ.get`` default is ``"1"`` (unset ≡ armed)."""
-    return os.environ.get(SYMLINK_CONTAINMENT_ENV, "1").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def path_within_repo(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str) -> bool:
@@ -102,21 +105,19 @@ def safe_read_text(
     errors: str = "strict",
     max_bytes: int | None = None,
 ) -> str | None:
-    """Read text from ``path`` unless a symlink escapes ``repo_root``.
+    """Read text from ``path`` unless the guarded reader refuses it.
 
-    Returns ``None`` when the path escapes containment (guard on), the read
-    fails (``OSError``), or ``max_bytes`` is set and the file exceeds it.
-    Otherwise mirrors ``Path.read_text(encoding=..., errors=...)`` exactly,
-    so callers that previously did ``try: p.read_text(...); except OSError:
-    continue`` keep byte-identical behaviour by treating ``None`` as skip.
+    Returns ``None`` when the file is missing, a symlink leaves
+    ``repo_root``, the path is not a regular file (a FIFO is never opened),
+    the read fails, or the file exceeds ``max_bytes`` (default
+    ``TEXT_READ_MAX_BYTES``). Otherwise the text ``Path.read_text(encoding,
+    errors)`` gives, so callers that treat ``None`` as "skip" behave as
+    before. A decoding error is raised, as ``read_text`` raised it.
     """
-    p = Path(path)
-    if not path_within_repo(p, repo_root):
-        return None
+    from wystan.analyzer.repo_reader import read_repo_text_or_raise  # late: re-export cycle
+
     try:
-        if max_bytes is not None and p.stat().st_size > max_bytes:
-            return None
-        return p.read_text(encoding=encoding, errors=errors)
+        return read_repo_text_or_raise(path, repo_root, encoding=encoding, errors=errors, max_bytes=max_bytes)
     except OSError:
         return None
 
@@ -139,3 +140,21 @@ def iter_repo_files(root: os.PathLike[str] | str) -> Iterator[Path]:
         if not path_within_repo(p, root_p):
             continue
         yield p
+
+
+# The bounded reader lives in ``repo_reader`` (it uses the containment switch
+# above); its names are re-exported here so the readers import one module.
+from wystan.analyzer.repo_reader import (  # noqa: E402  (after the switch it imports)
+    MAX_FILE_BYTES,
+    REFUSED_BINARY,
+    REFUSED_MISSING,
+    REFUSED_NOT_REGULAR,
+    REFUSED_OPEN_ERROR,
+    REFUSED_OUTSIDE,
+    REFUSED_OVER_CAP,
+    SNIFF_BYTES,
+    FileBytes,
+    open_repo_file,
+    read_repo_bytes,
+    repo_path,
+)

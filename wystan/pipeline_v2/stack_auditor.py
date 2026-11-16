@@ -50,6 +50,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any, Callable
 
 from wystan.llm.cost import CostTracker, deterministic_params
@@ -571,7 +572,7 @@ def read_manifest_excerpts(ctx: "ScanContext") -> dict[str, Any]:
             try:
                 # 256 KB cap — keeps the prompt small and defends
                 # against bizarre 50MB lockfiles slipping through.
-                raw = mpath.read_text(encoding="utf-8", errors="ignore")[
+                raw = read_repo_text_or_raise(mpath, ctx.repo_path, errors="ignore")[
                     :256_000
                 ]
             except OSError:
@@ -820,7 +821,7 @@ def _collect_all_package_deps(ctx: "ScanContext") -> set[str]:
     try:
         root_pkg = ctx.repo_path / "package.json"
         if root_pkg.is_file():
-            data = json.loads(root_pkg.read_text(encoding="utf-8", errors="ignore"))
+            data = json.loads(read_repo_text_or_raise(root_pkg, ctx.repo_path, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES))
             _harvest(data if isinstance(data, dict) else None)
     except (OSError, json.JSONDecodeError):
         pass
@@ -920,7 +921,7 @@ def _read_repo_self_name(ctx: "ScanContext") -> str | None:
     pkg = root / "package.json"
     if pkg.is_file():
         try:
-            data = json.loads(pkg.read_text(encoding="utf-8", errors="ignore"))
+            data = json.loads(read_repo_text_or_raise(pkg, ctx.repo_path, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES))
             n = data.get("name") if isinstance(data, dict) else None
             if isinstance(n, str) and n.strip():
                 norm = n.strip().lower()
@@ -942,7 +943,7 @@ def _read_repo_self_name(ctx: "ScanContext") -> str | None:
     py = root / "pyproject.toml"
     if py.is_file():
         try:
-            text = py.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(py, ctx.repo_path, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
             # Look for ``name = "..."`` in the [project] table only —
             # ``[tool.poetry]`` also has a name but tooling sections are
             # historical and Poetry has shifted to PEP 621.
@@ -966,7 +967,7 @@ def _read_repo_self_name(ctx: "ScanContext") -> str | None:
     cargo = root / "Cargo.toml"
     if cargo.is_file():
         try:
-            text = cargo.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(cargo, ctx.repo_path, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
             in_package = False
             for line in text.splitlines():
                 stripped = line.strip()
@@ -1032,7 +1033,7 @@ def _has_fastapi_call(ctx: "ScanContext") -> bool:
         if checked > 20:
             break
         try:
-            text = entry.read_text(encoding="utf-8", errors="ignore")[:64_000]
+            text = read_repo_text_or_raise(entry, ctx.repo_path, errors="ignore")[:64_000]
         except OSError:
             continue
         if "FastAPI(" in text:

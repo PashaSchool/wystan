@@ -55,6 +55,7 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 from wystan.analyzer.tsconfig_paths import (
@@ -180,10 +181,9 @@ class _LinkerTelemetry:
 
 
 @lru_cache(maxsize=4096)
-def _read_text_cached(abs_path: str) -> str | None:
+def _read_text_cached(abs_path: str, repo_root: str) -> str | None:
     try:
-        with open(abs_path, "r", encoding="utf-8") as fp:
-            return fp.read()
+        return read_repo_text_or_raise(abs_path, repo_root)
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -332,7 +332,7 @@ class NextjsServerActionsLinker:
                 # C4 owns route handlers; not a Server Action surface.
                 continue
             abs_path = str(ctx.repo_path / posix)
-            text = _read_text_cached(abs_path)
+            text = _read_text_cached(abs_path, str(ctx.repo_path))
             if text is None:
                 continue
             if not _has_use_server_directive(text):
@@ -391,7 +391,7 @@ class NextjsServerActionsLinker:
             # to be scanned for cross-file imports of themselves; we DO
             # still want to detect inline-action JSX patterns there.
             abs_path = str(ctx.repo_path / rel)
-            text = _read_text_cached(abs_path)
+            text = _read_text_cached(abs_path, str(ctx.repo_path))
             if text is None:
                 self.telemetry.files_unreadable += 1
                 continue

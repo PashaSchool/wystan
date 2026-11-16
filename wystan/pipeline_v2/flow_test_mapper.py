@@ -47,6 +47,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.analyzer.test_mapper import _filename_match, build_name_index
@@ -152,7 +153,7 @@ def _read_source(rctx: "ReachContext", path: str) -> str | None:
         abs_path = Path(rctx.repo_path) / path
         if abs_path.stat().st_size > _MAX_FILE_BYTES:
             return None
-        return abs_path.read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(abs_path, rctx.repo_path, errors="ignore")
     except (OSError, ValueError):
         return None
 

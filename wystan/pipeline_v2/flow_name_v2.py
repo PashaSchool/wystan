@@ -77,6 +77,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.pipeline_v2.flow_expansion.flow_display_name import (
@@ -383,9 +384,7 @@ def _sniff_methods(repo_path: Path | None, entry_file: str) -> list[str]:
     if repo_path is None or not entry_file:
         return []
     try:
-        text = (Path(repo_path) / entry_file).read_text(
-            encoding="utf-8", errors="ignore",
-        )
+        text = read_repo_text_or_raise(Path(repo_path) / entry_file, repo_path, errors="ignore")
     except OSError:
         return []
     if len(text) > _MAX_SNIFF_BYTES:

@@ -386,10 +386,10 @@ def router_alias_resolve_enabled() -> bool:
     }
 
 
-def _read_jsonc(path) -> object | None:  # noqa: ANN001 — Path
+def _read_jsonc(path, repo_root) -> object | None:  # noqa: ANN001 — Path
     """Tolerant JSON-with-comments read (tsconfig files carry ``//`` +
     ``/* */`` comments and trailing commas). Returns ``None`` on failure."""
-    text = read_text(path)
+    text = read_text(path, repo_root)
     if not text:
         return None
     # Strip block + line comments, then trailing commas — enough for the
@@ -435,7 +435,7 @@ def _build_alias_map(ctx: "ScanContext") -> dict[str, tuple[str, ...]]:
             continue
         if reads >= _MAX_MANIFEST_READS:
             break
-        doc = _read_jsonc(ctx.repo_path / f)
+        doc = _read_jsonc(ctx.repo_path / f, ctx.repo_path)
         reads += 1
         if not isinstance(doc, dict):
             continue
@@ -602,7 +602,7 @@ def _make_path_folder(
         if spec in def_cache:
             return def_cache[spec]
         target = _resolve_spec(spec, rel, tracked_set, alias_map)
-        txt = read_text(repo_path / target) if target else None
+        txt = read_text(repo_path / target, repo_path) if target else None
         def_cache[spec] = txt
         return txt
 
@@ -809,7 +809,7 @@ class _RouterIndex:
                 break
             if rel in scanned:
                 continue
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             reads += 1
             scanned.add(rel)
             if not text or not _ROUTER_GRAMMAR_RE.search(text):
@@ -824,7 +824,7 @@ class _RouterIndex:
                 continue
             scanned.add(rel)
             lazy_reads += 1
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             if not text or not _ROUTER_GRAMMAR_RE.search(text):
                 continue  # a leaf scene component — resolved, not a sub-router
             _scan(rel, text)
@@ -1183,7 +1183,7 @@ class NextPagesReactProfile:
         for rel in cls._iter_manifests(ctx):
             if reads >= _MAX_MANIFEST_READS:
                 break
-            doc = read_json(ctx.repo_path / rel)
+            doc = read_json(ctx.repo_path / rel, ctx.repo_path)
             reads += 1
             if not isinstance(doc, dict):
                 continue
@@ -1210,7 +1210,7 @@ class NextPagesReactProfile:
         for rel in cls._iter_manifests(ctx):
             if reads >= _MAX_MANIFEST_READS:
                 break
-            doc = read_json(ctx.repo_path / rel)
+            doc = read_json(ctx.repo_path / rel, ctx.repo_path)
             reads += 1
             if not isinstance(doc, dict):
                 continue
@@ -1262,7 +1262,7 @@ class NextPagesReactProfile:
                 continue
             if not _is_js_source(p) or _is_excluded_path(p):
                 continue
-            text = read_text(ctx.repo_path / p)
+            text = read_text(ctx.repo_path / p, ctx.repo_path)
             reads += 1
             if text and _RENDER_ENTRY_RE.search(text) and (
                 _REACT_DOM_IMPORT_RE.search(text)

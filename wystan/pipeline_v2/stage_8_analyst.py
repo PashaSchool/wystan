@@ -67,6 +67,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.analyzer.marketing_fetcher import (
@@ -240,7 +241,7 @@ def _read_root_package(repo_path: Path) -> dict[str, Any]:
     if not pj.is_file():
         return {}
     try:
-        raw = json.loads(pj.read_text(encoding="utf-8"))
+        raw = json.loads(read_repo_text_or_raise(pj, repo_path, max_bytes=MANIFEST_READ_MAX_BYTES))
     except (OSError, json.JSONDecodeError):
         return {}
     return {

@@ -48,6 +48,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ def find_consumers_of_module(
         if stat.st_size == 0 or stat.st_size > _MAX_FILE_BYTES:
             continue
         try:
-            text = abs_path.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(abs_path, repo_path, errors="ignore")
         except OSError:
             continue
         if regex.search(text):
@@ -222,7 +223,7 @@ def find_symbols_in_file_using_module(
         return []
     abs_path = repo_path / file_rel
     try:
-        text = abs_path.read_text(encoding="utf-8", errors="ignore")
+        text = read_repo_text_or_raise(abs_path, repo_path, errors="ignore")
     except OSError:
         return []
 
@@ -666,7 +667,7 @@ def find_consumers_of_symbols(
         if stat.st_size == 0 or stat.st_size > _MAX_FILE_BYTES:
             continue
         try:
-            text = abs_path.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(abs_path, repo_path, errors="ignore")
         except OSError:
             continue
         if regex.search(text):
@@ -690,7 +691,7 @@ def find_symbols_in_file_using_symbols(
         return []
     abs_path = repo_path / file_rel
     try:
-        text = abs_path.read_text(encoding="utf-8", errors="ignore")
+        text = read_repo_text_or_raise(abs_path, repo_path, errors="ignore")
     except OSError:
         return []
     tokens = set(symbol_names)

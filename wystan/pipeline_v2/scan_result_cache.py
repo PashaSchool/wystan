@@ -55,6 +55,7 @@ import re
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_bytes_or_raise
 from typing import Any
 
 from wystan.analyzer.git_runner import GitError, run_git
@@ -3993,7 +3994,7 @@ def _untracked_content_hash(repo_path: Path, status_s: str) -> str:
             if fp.is_file():
                 size = fp.stat().st_size
                 if size <= 2 * 1024 * 1024:
-                    h.update(fp.read_bytes())
+                    h.update(read_repo_bytes_or_raise(fp, repo_path))
                 else:
                     h.update(f"size:{size}".encode())
         except OSError:
@@ -4019,7 +4020,7 @@ def _nongit_tree_hash(repo_path: Path) -> str:
         try:
             if path.stat().st_size > _NONGIT_MAX_FILE_BYTES:
                 continue
-            data = path.read_bytes()
+            data = read_repo_bytes_or_raise(path, repo_path)
         except OSError:
             continue
         entries.append((rel.as_posix(), hashlib.sha256(data).hexdigest()))

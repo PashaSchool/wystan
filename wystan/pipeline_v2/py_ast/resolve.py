@@ -41,8 +41,10 @@ sorted, no set-iteration reaches the result.
 from __future__ import annotations
 
 import logging
+import io
 import os
 import re
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from collections import defaultdict
 from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
 
@@ -124,8 +126,7 @@ class PyResolver:
         for name in ("pyproject.toml", "setup.cfg"):
             path = os.path.join(self.repo_root, name)
             try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                    text = fh.read()
+                text = read_repo_text_or_raise(path, self.repo_root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
             except OSError:
                 continue
             # poetry: packages = [{ include = "x", from = "src" }]
@@ -169,22 +170,23 @@ class PyResolver:
             paths += glob.glob(os.path.join(base, "requirements", "*.txt"))
             for path in paths:
                 try:
-                    with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                        for line in fh:
-                            s = line.strip()
-                            if not s or s.startswith(("#", "-", "git+", "http")):
-                                continue
-                            m = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", s)
-                            if m:
-                                deps.add(self._norm_dep(m.group(1)))
+                    # StringIO splits on "\n" only, as iterating the open file did.
+                    lines = io.StringIO(read_repo_text_or_raise(
+                        path, self.repo_root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES))
+                    for line in lines:
+                        s = line.strip()
+                        if not s or s.startswith(("#", "-", "git+", "http")):
+                            continue
+                        m = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", s)
+                        if m:
+                            deps.add(self._norm_dep(m.group(1)))
                 except OSError:
                     continue
         # pyproject.toml [project]/[tool.poetry] dependency tables
         for base in bases:
             path = os.path.join(base, "pyproject.toml")
             try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                    text = fh.read()
+                text = read_repo_text_or_raise(path, self.repo_root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
             except OSError:
                 continue
             # PEP-621 list: dependencies = ["celery>=5", "redis"]

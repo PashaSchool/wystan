@@ -90,6 +90,7 @@ import json
 import os
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import Any, Iterable, Mapping
 
 from wystan.pipeline_v2.journey_lattice import (
@@ -225,7 +226,7 @@ def collect_external_dep_tokens(repo_root: Any) -> frozenset[str]:
         if any(seg in skip_dirs for seg in p.relative_to(root).parts[:-1]):
             continue
         try:
-            doc = json.loads(p.read_text(encoding="utf-8"))
+            doc = json.loads(read_repo_text_or_raise(p, root, max_bytes=MANIFEST_READ_MAX_BYTES))
         except (OSError, ValueError):
             continue
         if isinstance(doc, dict):

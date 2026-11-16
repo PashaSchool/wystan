@@ -186,7 +186,7 @@ class SchemaDomainExtractor:
         strong: set[str] = set()
 
         for fp in prisma_files:
-            text = read_text(repo_path / fp)
+            text = read_text(repo_path / fp, repo_path)
             if text is None:
                 continue
             for name in _names_from_prisma(text, t):
@@ -196,7 +196,7 @@ class SchemaDomainExtractor:
                     strong.add(slug)
 
         for fp in drizzle_files:
-            text = read_text(repo_path / fp)
+            text = read_text(repo_path / fp, repo_path)
             if text is None:
                 continue
             for name in _names_from_drizzle(text, t):
@@ -206,7 +206,7 @@ class SchemaDomainExtractor:
                     strong.add(slug)
 
         for fp in rails_files:
-            text = read_text(repo_path / fp)
+            text = read_text(repo_path / fp, repo_path)
             if text is None:
                 continue
             for name in _names_from_rails(text, t):
@@ -217,7 +217,7 @@ class SchemaDomainExtractor:
                     strong.add(slug)
 
         for fp in django_files:
-            text = read_text(repo_path / fp)
+            text = read_text(repo_path / fp, repo_path)
             if text is None:
                 continue
             for name in _names_from_django(text, t):

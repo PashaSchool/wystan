@@ -68,6 +68,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 from wystan.analyzer.import_graph import _resolve_import
@@ -530,7 +531,7 @@ def whole_file_lines(rctx: "ReachContext", rel_path: str) -> tuple[int, int] | N
         try:
             if not path.is_file() or path.stat().st_size > _MAX_WHOLE_FILE_BYTES:
                 return None
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(path, rctx.repo_path, errors="ignore")
         except OSError:
             return None
     if not text:

@@ -6361,6 +6361,14 @@ def run_finalize_phase(
         scan_meta.setdefault("warnings", []).append(
             f"code-lines settle failed ({exc}); loc includes non-code files")
 
+    # Reads the guarded reader refused (links out of the scanned tree, FIFOs,
+    # files over their cap): they reached their call sites as unreadable
+    # files, so the map shows them here. Absent when nothing was refused.
+    from wystan.analyzer.repo_read_tally import repository_reads_block
+    repository_reads = repository_reads_block(ctx.repo_path)
+    if repository_reads is not None:
+        scan_meta["repository_reads"] = repository_reads
+
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import
     write_stage_input(run_dir, 7, "output", {

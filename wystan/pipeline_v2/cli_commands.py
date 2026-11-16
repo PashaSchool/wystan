@@ -93,6 +93,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_head_or_raise
 from typing import Any, Iterable
 
 from wystan.pipeline_v2.data import load_yaml
@@ -268,8 +269,8 @@ def _test_re(vocab: dict[str, Any]) -> "re.Pattern[str]":
 
 def _read(root: Path, rel: str) -> str:
     try:
-        with open(root / rel, "r", errors="ignore") as fh:
-            return fh.read(_READ_CAP)
+        # Text mode read(N): the same N characters, reading only the head.
+        return read_repo_text_head_or_raise(root / rel, root, _READ_CAP, encoding=None, errors="ignore")
     except OSError:
         return ""
 

@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any
 
 # The module-private P1-strict reader is imported DELIBERATELY (not
@@ -131,13 +132,11 @@ def bare_ws_dir(anchor_id: Any) -> str | None:
     return "/".join(segs)
 
 
-def _read_manifest_text(pkg_dir: Path) -> str | None:
+def _read_manifest_text(pkg_dir: Path, root: Path) -> str | None:
     """Bounded ``package.json`` read; ``None`` on anything unusual."""
     pj = pkg_dir / "package.json"
     try:
-        if not pj.is_file() or pj.stat().st_size > _MAX_MANIFEST_BYTES:
-            return None
-        return pj.read_text(encoding="utf-8", errors="strict")
+        return read_repo_text_or_raise(pj, root, max_bytes=_MAX_MANIFEST_BYTES)
     except OSError:
         return None
     except UnicodeDecodeError:
@@ -161,7 +160,7 @@ def declared_cli_binary(repo_path: Any, ws_dir: str) -> str | None:
     what makes a CLI a product, and a private package ships to nobody.
     """
     root = Path(str(repo_path))
-    text = _read_manifest_text(root / ws_dir)
+    text = _read_manifest_text(root / ws_dir, root)
     if text is None:
         return None
     ok, _evidence, name = _p1_node(text, root, ws_dir, [])

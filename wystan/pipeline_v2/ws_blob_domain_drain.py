@@ -81,6 +81,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any, Callable
 
 from wystan.pipeline_v2.data import load_yaml
@@ -316,8 +317,7 @@ def _is_transport_pkg(pkg: str, tracked: list[str], ctx: Any) -> bool:
             return True
     root = Path(str(_attr(ctx, "repo_path", ".") or "."))
     try:
-        raw = (root / pkg / "package.json").read_text(
-            encoding="utf-8", errors="ignore")
+        raw = read_repo_text_or_raise(root / pkg / "package.json", root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
         data = json.loads(raw)
     except (OSError, ValueError):
         return False
@@ -1154,7 +1154,7 @@ def _count_loc(drain_map: dict[str, str], ctx: Any) -> int:
     total = 0
     for f in drain_map:
         try:
-            text = (root / f).read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(root / f, root, errors="ignore")
         except OSError:
             continue
         total += sum(1 for ln in text.splitlines() if ln.strip())

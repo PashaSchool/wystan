@@ -34,6 +34,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
@@ -194,7 +195,7 @@ def _read_package_json(repo_path: Path) -> dict | None:
     if not pj.is_file():
         return None
     try:
-        return json.loads(pj.read_text(encoding="utf-8"))
+        return json.loads(read_repo_text_or_raise(pj, repo_path, max_bytes=MANIFEST_READ_MAX_BYTES))
     except (OSError, json.JSONDecodeError) as exc:
         logger.debug("marketing_fetcher: cannot parse package.json: %s", exc)
         return None
@@ -307,7 +308,7 @@ def _discover_from_nested_packages(repo_path: Path) -> str | None:
             if not pj_path.is_file():
                 continue
             try:
-                data = json.loads(pj_path.read_text(encoding="utf-8"))
+                data = json.loads(read_repo_text_or_raise(pj_path, repo_path, max_bytes=MANIFEST_READ_MAX_BYTES))
             except (OSError, json.JSONDecodeError):
                 continue
             homepage = data.get("homepage")
@@ -326,7 +327,7 @@ def _read_git_remote_origin(repo_path: Path) -> str | None:
     if not cfg.is_file():
         return None
     try:
-        text = cfg.read_text(encoding="utf-8", errors="ignore")
+        text = read_repo_text_or_raise(cfg, repo_path, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
     except OSError:
         return None
     in_origin = False

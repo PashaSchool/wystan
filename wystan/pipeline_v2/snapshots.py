@@ -63,11 +63,11 @@ import math
 import os
 import re
 import shutil
-import stat
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any, Callable, Iterable, TypeVar
 
 from wystan.analyzer.git_runner import GitFailed, object_name
@@ -438,44 +438,6 @@ def _extract_specs(rel_path: str, text: str) -> list[str]:
     return specs
 
 
-_EXPORT_READ_FLAGS = (
-    os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-)
-
-
-def _read_exported_text(path: Path) -> str | None:
-    """A source file of an exported snapshot, or ``None`` when it is not a
-    regular file, is over the read cap, or cannot be read. The export
-    directory is the engine's own, but it is read with the discipline of a
-    repository read (no link followed, regular file before and after open).
-    Move to ``wystan.analyzer.repo_reader`` once ``fix/guarded-repo-reads``
-    and this branch are both in ``dev``."""
-    try:
-        before = os.lstat(path)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_FILE_BYTES:
-            return None
-        fd = os.open(path, _EXPORT_READ_FLAGS)
-    except OSError:
-        return None
-    try:
-        after = os.fstat(fd)
-        if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-            return None
-        chunks, left = [], before.st_size
-        while left > 0:
-            chunk = os.read(fd, left)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            left -= len(chunk)
-        data = b"".join(chunks)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-    return data.decode("utf-8", errors="ignore")
-
-
 def build_snapshot_import_index(
     scan_root: Path,
     files: list[str] | None = None,
@@ -504,8 +466,14 @@ def build_snapshot_import_index(
         suffix = PurePosixPath(rel).suffix.lower()
         if suffix not in _SCANNED_EXTENSIONS or _is_vendor_or_test(rel):
             continue
-        text = _read_exported_text(scan_root / rel)
-        if text is None:
+        # The guarded reader (dev): regular files inside the snapshot only,
+        # no link followed out of it, bounded.
+        abs_path = scan_root / rel
+        try:
+            if abs_path.stat().st_size > _MAX_FILE_BYTES:
+                continue
+            text = read_repo_text_or_raise(abs_path, scan_root, errors="ignore")
+        except OSError:
             continue
         is_py = suffix in _PY_EXTENSIONS
         for spec in _extract_specs(rel, text):
