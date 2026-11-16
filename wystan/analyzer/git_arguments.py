@@ -36,7 +36,8 @@ FORMS: dict[str, tuple[frozenset[str], tuple[int, int], bool]] = {
     "rev-list": (frozenset({"--count", "--since=", "--objects", "--no-walk", "--missing="}), (1, 1), False),
     "rev-parse": (frozenset({"--show-cdup", "--absolute-git-dir", "--verify", "--quiet",
                              "--is-inside-work-tree", "--show-toplevel", "--git-common-dir",
-                             "--is-bare-repository", "--is-shallow-repository", "--symbolic-full-name"}), (0, 1), False),
+                             "--is-bare-repository", "--is-shallow-repository", "--symbolic-full-name",
+                             "--show-object-format"}), (0, 1), False),
     "status": (frozenset({"--porcelain=v1", "--untracked-files=all", "-z"}), (0, 0), False),
 }
 #: Actions ``config`` and ``cat-file`` must name (each subcommand writes or
