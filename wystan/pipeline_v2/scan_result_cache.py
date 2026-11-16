@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any
 
 from wystan.analyzer.git_runner import GitError, run_git
+from wystan.analyzer.git_submodules import moved_submodules
 from wystan.cache.backend import CacheKind, _safe_component
 from wystan.cache.paths import wystan_base_dir
 
@@ -3944,12 +3945,15 @@ def _dirty_hash(repo_path: Path) -> str:
         return f"{_UNREAD_TREE_PREFIX}{_nongit_tree_hash(repo_path)}"
     status_s = status
     diff_s = diff
+    # git never looks inside a submodule (forced --ignore-submodules=all);
+    # one checked out at another commit is read from its files instead.
+    moved = "".join(f"{p}\0{a}\0{b}\0" for p, a, b in moved_submodules(str(repo_path)))
     # Untracked NEW files appear as "?? path" in status but contribute NOTHING to
     # ``git diff HEAD`` — so their CONTENT is invisible to the key unless hashed
     # explicitly (audit Bug 1): editing an untracked file would keep the key
     # stable and serve a stale result.
     untracked_s = _untracked_content_hash(repo_path, status_s)
-    if not status_s.strip() and not diff_s.strip() and not untracked_s:
+    if not status_s.strip() and not diff_s.strip() and not untracked_s and not moved:
         return ""
     h = hashlib.sha256()
     h.update(b"status\0")
@@ -3958,6 +3962,9 @@ def _dirty_hash(repo_path: Path) -> str:
     h.update(diff_s.encode("utf-8", "replace"))
     h.update(b"\0untracked\0")
     h.update(untracked_s.encode("utf-8"))
+    if moved:
+        h.update(b"\0submodules\0")
+        h.update(moved.encode("utf-8", "surrogateescape"))
     return h.hexdigest()
 
 

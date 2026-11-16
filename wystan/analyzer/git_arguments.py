@@ -24,7 +24,7 @@ FORMS: dict[str, tuple[frozenset[str], int | None]] = {
                              "--full-index", "-M", "-z", "--no-color", "--name-only"}), 2),
     "log": (frozenset({"--max-count=", "--since=", "--until=", "--pretty=", "--name-only", "--name-status",
                        "-z", "--no-renames", "--first-parent"}), None),
-    "ls-files": (frozenset({"-z"}), 0),
+    "ls-files": (frozenset({"-z", "-s"}), 0),
     "ls-tree": (frozenset({"-r", "-t", "-z", "--full-tree", "--name-only"}), 1),
     "rev-list": (frozenset({"--count", "--since=", "--objects", "--no-walk", "--missing="}), None),
     "rev-parse": (frozenset({"--show-cdup", "--absolute-git-dir", "--verify", "--quiet",

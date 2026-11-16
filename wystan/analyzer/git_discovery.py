@@ -33,8 +33,9 @@ _POINTER_FLAGS = (
 )
 
 
-def read_pointer(path: str) -> str | None:
-    """The first line-ish content of a small regular file, or ``None``."""
+def read_pointer(path: str, limit: int = POINTER_FILE_BYTES) -> str | None:
+    """The content (at most ``limit`` bytes) of a small regular file, or
+    ``None``."""
     try:
         before = os.lstat(path)
         if not stat.S_ISREG(before.st_mode):
@@ -46,7 +47,7 @@ def read_pointer(path: str) -> str | None:
         after = os.fstat(fd)
         if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
             return None
-        data = os.read(fd, POINTER_FILE_BYTES)
+        data = os.read(fd, limit)
     except OSError:
         return None
     finally:
