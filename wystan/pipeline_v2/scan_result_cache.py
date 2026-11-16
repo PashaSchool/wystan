@@ -58,8 +58,8 @@ from pathlib import Path
 from wystan.analyzer.repo_reader import read_repo_bytes_or_raise
 from typing import Any
 
-from wystan.analyzer.git_runner import GitError, run_git
-from wystan.analyzer.git_submodules import moved_submodules
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, run_git
+from wystan.analyzer.git_submodules import submodule_states
 from wystan.cache.backend import CacheKind, _safe_component
 from wystan.cache.paths import wystan_base_dir
 
@@ -3952,13 +3952,22 @@ def _dirty_hash(repo_path: Path) -> str:
     diff_s = diff
     # git never looks inside a submodule (forced --ignore-submodules=all);
     # one checked out at another commit is read from its files instead.
-    moved = "".join(f"{p}\0{a}\0{b}\0" for p, a, b in moved_submodules(str(repo_path)))
+    try:
+        moved_list, unknown_list = submodule_states(str(repo_path))
+    except GitAnswerUnavailable:
+        return f"{_UNREAD_TREE_PREFIX}{_nongit_tree_hash(repo_path)}"
+    moved = "".join(f"{p}\0{a}\0{b}\0" for p, a, b in moved_list)
+    # A submodule whose state could not be read (its git directory lies
+    # outside the scan root) is not "clean": the key says so, so an entry
+    # made then is never served as a clean tree's. No submodule, or all
+    # readable: nothing added, the identity is unchanged.
+    unknown = "".join(f"{p}\0" for p in unknown_list)
     # Untracked NEW files appear as "?? path" in status but contribute NOTHING to
     # ``git diff HEAD`` — so their CONTENT is invisible to the key unless hashed
     # explicitly (audit Bug 1): editing an untracked file would keep the key
     # stable and serve a stale result.
     untracked_s = _untracked_content_hash(repo_path, status_s)
-    if not status_s.strip() and not diff_s.strip() and not untracked_s and not moved:
+    if not status_s.strip() and not diff_s.strip() and not untracked_s and not moved and not unknown:
         return ""
     h = hashlib.sha256()
     h.update(b"status\0")
@@ -3970,6 +3979,9 @@ def _dirty_hash(repo_path: Path) -> str:
     if moved:
         h.update(b"\0submodules\0")
         h.update(moved.encode("utf-8", "surrogateescape"))
+    if unknown:
+        h.update(b"\0submodules-unknown\0")
+        h.update(unknown.encode("utf-8", "surrogateescape"))
     return h.hexdigest()
 
 

@@ -22,7 +22,7 @@ import os
 import re
 
 from wystan.analyzer.git_discovery import read_pointer
-from wystan.analyzer.git_runner import GitError, run_git
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, run_git
 from wystan.analyzer.path_identity import is_within
 
 _GITLINK = b"160000"
@@ -128,11 +128,13 @@ def checked_out_commit(work: str, root: str | None = None) -> str | None | _Unkn
 def submodule_states(root: str) -> tuple[list[tuple[str, str, str]], list[str]]:
     """``(moved, unknown)``: ``(path, recorded, checked out)`` for every
     submodule whose HEAD tree, index and checked-out commit do not all agree,
-    and the paths whose state cannot be read inside ``root``; sorted."""
+    and the paths whose state cannot be read inside ``root``; sorted. A
+    listing git cannot give (a refused index, a failure) raises: an empty
+    one would read as "no submodules"."""
     try:
         staged, committed = _gitlinks(root), _gitlinks(root, "HEAD")
-    except GitError:
-        return [], []
+    except GitError as exc:
+        raise GitAnswerUnavailable(f"submodule pointers unavailable: {exc}") from exc
     moved, unknown = [], []
     for path in sorted(set(staged) | set(committed)):
         checked_out = checked_out_commit(os.path.join(root, *path.split("/")), root)
