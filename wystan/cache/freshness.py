@@ -97,12 +97,11 @@ _RANGE_TIMEOUT_SEC = 10.0
 
 
 def _git_rev_parse(repo_path: str) -> str:
-    """HEAD's commit. A failure raises: an empty answer reads as "git
-    unavailable, assume fresh" in the caller."""
-    try:
-        return run_git(repo_path, "rev-parse", "HEAD", timeout=_REV_PARSE_TIMEOUT_SEC).universal_text.strip()
-    except GitError as exc:
-        raise GitAnswerUnavailable(f"HEAD unavailable: {exc}") from exc
+    """HEAD's commit, ``""`` only for no repository or no commit. A failure
+    raises: an empty answer reads as "assume fresh" in the caller."""
+    from wystan.analyzer.git_repository import head_commit_or_empty
+
+    return head_commit_or_empty(repo_path, _REV_PARSE_TIMEOUT_SEC)
 
 
 def _count_commits(from_sha: str, to_sha: str, repo_path: str) -> int:

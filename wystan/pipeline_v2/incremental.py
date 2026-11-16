@@ -87,16 +87,13 @@ def changed_files_since(repo_path: Path, since: str) -> list[str]:
 
 
 def head_sha(repo_path: Path) -> str:
-    """Return the current HEAD SHA. A failure raises: the map records it as
-    its scan commit, and an empty one reads as a legacy map that is always
-    fresh (``cache.freshness``). A scanned repository has a commit
-    (``load_repo`` refuses one without)."""
-    try:
-        out = run_git(repo_path, "rev-parse", "HEAD", timeout=_REV_PARSE_TIMEOUT_SEC)
-    except GitError as exc:
-        logger.warning("incremental: rev-parse HEAD failed (%s)", exc)
-        raise GitAnswerUnavailable(f"HEAD unavailable: {exc}") from exc
-    return out.universal_text.strip()
+    """Return the current HEAD SHA; ``""`` for a tree that is not a git
+    repository (or has no commit yet). A failure raises: the map records it
+    as its scan commit, and an empty one reads as a legacy map that is
+    always fresh (``cache.freshness``)."""
+    from wystan.analyzer.git_repository import head_commit_or_empty
+
+    return head_commit_or_empty(repo_path, _REV_PARSE_TIMEOUT_SEC)
 
 
 def touched_feature_uuids(

@@ -15,8 +15,8 @@ import re
 from collections import deque
 from dataclasses import dataclass
 
-from wystan.analyzer.git_dir_discovery import one_value
-from wystan.analyzer.git_runner import GitError, GitFailed, UnsafeGit, run_git
+from wystan.analyzer.git_dir_discovery import discovered_git_dir, one_value
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, GitFailed, UnsafeGit, run_git
 
 
 class NotARepository(GitError, ValueError):
@@ -112,6 +112,31 @@ def has_commit(repo: GitRepository) -> bool:
     """HEAD names a commit (false on an unborn branch)."""
     result = run_git(repo.root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
     return result.returncode == 0
+
+
+#: ``rev-parse --verify --quiet`` exit status for a revision that does not
+#: exist (an unborn HEAD): an answer, not a failure.
+_NO_SUCH_REVISION = 1
+
+
+def head_commit_or_empty(path: str | os.PathLike[str], timeout: float) -> str:
+    """HEAD's commit; ``""`` only when that is a fact: no repository at all
+    (the file system finds no git directory) or a branch with no commit yet.
+    Any other failure raises :class:`GitAnswerUnavailable`: a scan records
+    this commit, and an empty one reads as a legacy map that is always
+    fresh."""
+    if discovered_git_dir(os.fspath(path)) is None:
+        return ""
+    try:
+        found = run_git(path, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", timeout=timeout, check=False)
+    except GitError as exc:
+        raise GitAnswerUnavailable(f"HEAD unavailable: {exc}") from exc
+    if found.returncode == _NO_SUCH_REVISION and not found.stdout:
+        return ""
+    value = one_value(found.stdout) if found.returncode == 0 else None
+    if value is None:
+        raise GitAnswerUnavailable(f"HEAD unavailable: git rev-parse exited {found.returncode}")
+    return value
 
 
 def head_sha(repo: GitRepository) -> str:
