@@ -35,6 +35,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -80,6 +81,11 @@ _BOUNDARY_FLAGS = _DIR_FLAGS & ~_NO_FOLLOW
 _LINK_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 #: The process (or the system) has no descriptor left.
 _EXHAUSTED_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE})
+#: Seconds to wait before each retry after the process ran out of
+#: descriptors (the first right away): contention among a scan's threads
+#: clears within milliseconds, a real shortage does not. 0.5 s in all, so a
+#: scan that cannot open files fails within a second of the first failure.
+_EXHAUSTED_WAITS = (0.0, 0.01, 0.04, 0.15, 0.3)
 _HAS_DIR_FD = (os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
                and os.stat in os.supports_follow_symlinks)
 
@@ -264,25 +270,29 @@ def _open_once(path: Path, boundary: Boundary) -> int:
 def open_contained(path: Path, boundary: Boundary) -> int:
     """A descriptor of ``path`` opened inside ``boundary`` (module doc).
 
-    Running out of descriptors is never a refusal: the idle held directory
-    descriptors are closed and the open tried once more; if it still fails,
-    ``DescriptorsExhausted`` ends the scan."""
+    Running out of descriptors is never a refusal (``retry_exhausted``)."""
     try:
         return _open_once(path, boundary)
     except OSError as err:
         if err.errno not in _EXHAUSTED_ERRNOS:
             raise
-    release_idle()
     return retry_exhausted(lambda: _open_once(path, boundary), path)
 
 
 def retry_exhausted(open_again: Callable[[], int], path: os.PathLike[str] | str) -> int:
-    """The second open after the process ran out of descriptors: its
-    descriptor, or ``DescriptorsExhausted``."""
-    try:
-        return open_again()
-    except OSError as err:
-        if err.errno in _EXHAUSTED_ERRNOS:
-            raise DescriptorsExhausted(f"no file descriptor left to read {os.fspath(path)!r}: {err}") from err
-        raise
-
+    """Open again after the process ran out of descriptors: close the idle
+    held directory descriptors, then retry, waiting between attempts
+    (``_EXHAUSTED_WAITS``) for other threads to close what their reads hold.
+    The descriptor, or ``DescriptorsExhausted`` once every attempt failed."""
+    for wait in _EXHAUSTED_WAITS:
+        if wait:
+            time.sleep(wait)
+        release_idle()
+        try:
+            return open_again()
+        except OSError as err:
+            if err.errno not in _EXHAUSTED_ERRNOS:
+                raise
+            last = err
+    raise DescriptorsExhausted(
+        f"no file descriptor left to read {os.fspath(path)!r} after {len(_EXHAUSTED_WAITS)} attempts: {last}") from last
