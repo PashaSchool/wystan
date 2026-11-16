@@ -29,9 +29,10 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable, TypeVar
 
 from wystan.analyzer.git_formats import SUBJECTS, TAGGED_SUBJECTS
-from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, run_git
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, run_git, unavailable_reason
 from wystan.models.types import Feature, FeatureMap, Flow
 
 logger = logging.getLogger(__name__)
@@ -361,10 +362,36 @@ _SUBJECTS_TIMEOUT_SEC = 30.0
 _PREFIX_FILES_TIMEOUT_SEC = 60.0
 
 
+#: ``scan_meta`` key naming the enrichment passes that could not ask git
+#: (absent when every pass could): "no commit prefixes" is then told apart
+#: from "could not ask".
+GIT_UNAVAILABLE_KEY = "git_unavailable"
+PASS_COMMIT_PREFIXES = "commit_prefixes"
+PASS_COMMIT_PREFIX_ENRICHMENT = "commit_prefix_enrichment"
+#: Both passes ask ``git log``.
+_PREFIX_SUBCOMMAND = "log"
+
+_PassResult = TypeVar("_PassResult")
+
+
+def _enrichment(unavailable: dict[str, dict[str, Any]], name: str,
+                run_pass: Callable[[], _PassResult]) -> _PassResult | None:
+    """Run an enrichment pass (its absence leaves a valid map). An
+    unavailable git answer stops the pass, not the scan: it contributes
+    nothing (``None``) and is recorded under ``unavailable[name]``."""
+    try:
+        return run_pass()
+    except GitAnswerUnavailable as exc:
+        logger.warning("post_process: %s skipped, git unavailable (%s)", name, exc)
+        unavailable[name] = {"subcommand": _PREFIX_SUBCOMMAND, "reason": unavailable_reason(exc), "count": 1}
+        return None
+
+
 def _log_or_raise(repo_path: str, what: str, *args: str, timeout: float):
-    """``git log`` for a commit-prefix pass. A failed or refused log raises:
-    an empty answer would read as "no prefixes" or "no files" and change
-    the feature set of a map cached as complete."""
+    """``git log`` for a commit-prefix pass. A failed, refused or timed-out
+    log raises: an empty answer would read as "no prefixes" or "no files".
+    The pass boundary (``_enrichment``) turns it into "this pass contributed
+    nothing", recorded in ``scan_meta.git_unavailable``."""
     try:
         r = run_git(repo_path, "log", *args, timeout=timeout, check=False)
     except GitError as exc:
@@ -776,20 +803,28 @@ def run(
     if removed:
         logger.info("post_process: removed %d foreign files", removed)
 
+    unavailable: dict[str, dict[str, Any]] = {}
     commit_prefixes: dict[str, int] = {}
     if repo_path and Path(repo_path).is_dir():
-        commit_prefixes = _mine_commit_prefixes(repo_path)
+        commit_prefixes = _enrichment(unavailable, PASS_COMMIT_PREFIXES, lambda: _mine_commit_prefixes(repo_path)) or {}
 
     features, extract_log = extract_overlooked_top_dirs(features, commit_prefixes)
     for line in extract_log:
         logger.info("post_process: %s", line)
 
     if commit_prefixes and repo_path:
-        features, enrich_log = commit_prefix_enrichment_pass(
-            features, repo_path, commit_prefixes,
-        )
-        for line in enrich_log:
-            logger.info("post_process: %s", line)
+        # The pass moves files between features as it goes: it works on a
+        # copy, so an answer missing halfway contributes nothing, never a
+        # partial result.
+        copied = [f.model_copy(deep=True) for f in features]
+        enriched = _enrichment(unavailable, PASS_COMMIT_PREFIX_ENRICHMENT,
+                               lambda: commit_prefix_enrichment_pass(copied, repo_path, commit_prefixes))
+        if enriched is not None:
+            features, enrich_log = enriched
+            for line in enrich_log:
+                logger.info("post_process: %s", line)
+    if unavailable:
+        feature_map.scan_meta = {**feature_map.scan_meta, GIT_UNAVAILABLE_KEY: unavailable}
 
     features, dropped = drop_noise_features(features)
     for name, reason, n in dropped:

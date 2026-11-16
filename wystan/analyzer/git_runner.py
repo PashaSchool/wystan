@@ -35,7 +35,7 @@ from typing import BinaryIO, Callable, TypeVar
 
 from wystan.analyzer.git_arguments import FORMS, refusal
 from wystan.analyzer.git_index import index_refusal
-from wystan.analyzer.git_process import GitError, GitFailed, GitResult, run_bounded, run_streaming
+from wystan.analyzer.git_process import GitError, GitFailed, GitResult, GitTimeout, run_bounded, run_streaming
 from wystan.analyzer.git_resolution import (
     SAFE_OPTIONS,
     UnsafeGit,
@@ -108,6 +108,17 @@ class GitAnswerUnavailable(GitError):
 
 class UnsafeArgument(GitError, ValueError):
     """A repository-controlled string would be read by git as an option."""
+
+
+def unavailable_reason(exc: GitAnswerUnavailable) -> str:
+    """Why an answer was unavailable, for the scan's record: ``timeout``,
+    ``refused`` (the runner would not run it) or ``failed``."""
+    cause = exc.__cause__
+    if isinstance(cause, GitTimeout):
+        return "timeout"
+    if isinstance(cause, (UnsafeArgument, UnsafeGit)):
+        return "refused"
+    return "failed"
 
 
 def git_command(repo_root: str, *args: str) -> list[str]:
