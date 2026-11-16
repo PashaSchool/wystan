@@ -16,28 +16,28 @@ from __future__ import annotations
 
 from wystan.analyzer.git_formats import PRETTY_ARGUMENTS
 
-#: subcommand -> (allowed options, most positional arguments before ``--``,
-#: whether paths may follow ``--``). Options ending in ``=`` are prefixes.
+#: subcommand -> (allowed options, (fewest, most) positional arguments
+#: before ``--``, whether paths may follow ``--``). Options ending in ``=`` are prefixes.
 #: Positionals are revisions or config names the callers validate
 #: (``git_runner.revision``/``object_name``); only log and diff-tree take
 #: paths, and for every other subcommand a ``--`` is refused, so nothing
 #: after it can reach git as an argument (``symbolic-ref HEAD -- <ref>``
 #: wrote HEAD; symbolic-ref is no longer allowed at all).
-FORMS: dict[str, tuple[frozenset[str], int, bool]] = {
-    "cat-file": (frozenset({"--batch", "--batch-check"}), 0, False),
-    "config": (frozenset({"--get", "--get-regexp", "--null", "--name-only"}), 1, False),
-    "diff-index": (frozenset({"-p", "-M"}), 1, False),
+FORMS: dict[str, tuple[frozenset[str], tuple[int, int], bool]] = {
+    "cat-file": (frozenset({"--batch", "--batch-check"}), (0, 0), False),
+    "config": (frozenset({"--get", "--get-regexp", "--null", "--name-only"}), (1, 1), False),
+    "diff-index": (frozenset({"-p", "-M"}), (1, 1), False),
     "diff-tree": (frozenset({"--numstat", "--no-renames", "--root", "--raw", "-r", "--abbrev=",
-                             "--full-index", "-M", "-z", "--no-color", "--name-only"}), 2, True),
+                             "--full-index", "-M", "-z", "--no-color", "--name-only"}), (1, 2), True),
     "log": (frozenset({"--max-count=", "--since=", "--until=", "--name-only", "--name-status",
-                       "-z", "--no-renames", "--first-parent"}), 1, True),
-    "ls-files": (frozenset({"-z", "-s"}), 0, False),
-    "ls-tree": (frozenset({"-r", "-t", "-z", "--full-tree", "--name-only"}), 1, False),
-    "rev-list": (frozenset({"--count", "--since=", "--objects", "--no-walk", "--missing="}), 1, False),
+                       "-z", "--no-renames", "--first-parent"}), (0, 1), True),
+    "ls-files": (frozenset({"-z", "-s"}), (0, 0), False),
+    "ls-tree": (frozenset({"-r", "-t", "-z", "--full-tree", "--name-only"}), (1, 1), False),
+    "rev-list": (frozenset({"--count", "--since=", "--objects", "--no-walk", "--missing="}), (1, 1), False),
     "rev-parse": (frozenset({"--show-cdup", "--absolute-git-dir", "--verify", "--quiet",
                              "--is-inside-work-tree", "--show-toplevel", "--git-common-dir",
-                             "--is-bare-repository", "--is-shallow-repository", "--symbolic-full-name"}), 1, False),
-    "status": (frozenset({"--porcelain=v1", "--untracked-files=all", "-z"}), 0, False),
+                             "--is-bare-repository", "--is-shallow-repository", "--symbolic-full-name"}), (0, 1), False),
+    "status": (frozenset({"--porcelain=v1", "--untracked-files=all", "-z"}), (0, 0), False),
 }
 #: Actions ``config`` and ``cat-file`` must name (each subcommand writes or
 #: changes mode without one).
@@ -71,7 +71,7 @@ def refusal(subcommand: str, args: tuple[str, ...]) -> str | None:
     """Why ``git <subcommand> <args>`` is not an engine form, or ``None``."""
     if subcommand not in FORMS:
         return "subcommand not allowed"
-    allowed, most_positional, takes_paths = FORMS[subcommand]
+    allowed, (fewest, most), takes_paths = FORMS[subcommand]
     head, paths = _split(args)
     if paths is not None and not takes_paths:
         return f"`git {subcommand}` takes no paths: nothing may follow `--`"
@@ -79,8 +79,8 @@ def refusal(subcommand: str, args: tuple[str, ...]) -> str | None:
     for arg in head:
         if arg.startswith("-") and not _option_allowed(arg, allowed):
             return f"option not allowed: {arg!r}"
-    if len(positional) > most_positional:
-        return f"too many arguments: {positional!r}"
+    if not fewest <= len(positional) <= most:
+        return f"expected {fewest} to {most} arguments, got {positional!r}"
     if any(not arg for arg in positional):
         return "an empty argument"
     required = REQUIRED_ACTIONS.get(subcommand)
