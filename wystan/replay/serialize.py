@@ -77,14 +77,6 @@ _FIELD_EXCLUSIONS: dict[str, frozenset[str]] = {
 }
 
 
-#: Fields left out of a capture while they hold ``None`` (their default), so
-#: captures of ordinary scans keep the shape they had before the field
-#: existed; the decoder's constructor fills the default back in.
-_OMITTED_WHEN_NONE: dict[str, frozenset[str]] = {
-    "wystan.pipeline_v2.stage_0_intake:ScanContext": frozenset({"repository_root"}),
-}
-
-
 def _class_ref(cls: type) -> str:
     return f"{cls.__module__}:{cls.__qualname__}"
 
@@ -131,11 +123,10 @@ def to_jsonable(obj: Any) -> Any:
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         ref = _class_ref(type(obj))
         excluded = _FIELD_EXCLUSIONS.get(ref, frozenset())
-        omitted = _OMITTED_WHEN_NONE.get(ref, frozenset())
         payload = {
             f.name: to_jsonable(getattr(obj, f.name))
             for f in dataclasses.fields(obj)
-            if f.name not in excluded and not (f.name in omitted and getattr(obj, f.name) is None)
+            if f.name not in excluded
         }
         return {"__type__": f"dataclass:{ref}", "value": payload}
     if isinstance(obj, tuple):
