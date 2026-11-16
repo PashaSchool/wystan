@@ -180,6 +180,13 @@ def index_refusal(root: str) -> str | None:
     try:
         info = os.lstat(index)
     except FileNotFoundError:
+        # A refusal, though git would read a missing index as empty: with no
+        # index the engine cannot tell staged from committed, so the
+        # identity keys on the files (``unread:``; a bare repository, with
+        # no work tree, is ``vcs: none``) instead of "clean". A clone always
+        # writes an index, so this is a work tree whose index was removed,
+        # or a bare repository. Neither stops the scan;
+        # ``scan_meta.index_unread`` says "no index file".
         return "no index file"
     except OSError as exc:
         return f"index not readable ({exc.strerror or exc})"

@@ -12,10 +12,18 @@ and seeking over the rest. git reads the extensions from another place only
 through ``EOIE`` with threaded loading; the runner pins
 ``index.threads=1`` and ``git_index_eoie`` refuses any index whose ``EOIE``
 does not agree with this walk.
+
+Every loop the file's bytes steer has a named bound: at most
+MAX_INDEX_ENTRIES entries, each advancing by at least its fixed part; a
+name's NUL searched for within MAX_ENTRY_BYTES (and the entry then
+consumes what was searched); a varint read for at most MAX_VARINT_BYTES;
+at most MAX_EXTENSIONS extension headers; a window refill of at most
+WINDOW_BYTES + MAX_ENTRY_BYTES that fails on a short read.
 """
 
 from __future__ import annotations
 
+import errno
 import os
 import struct
 from collections.abc import Callable
@@ -39,13 +47,23 @@ WINDOW_BYTES = 1 << 20
 #: filesystem's PATH_MAX (1 KiB on macOS, 4 KiB on Linux), so a longer entry
 #: is a crafted file; refusing it keeps the window bounded.
 MAX_ENTRY_BYTES = 64 << 10
-#: The most entries walked: a tree of a million files (chromium's index has
-#: about 400k). Each costs a loop turn; more is refused, which keeps the
-#: inspection of a crafted 256 MiB index (4M minimal entries) well under a
-#: second.
+#: The most entries an index header may declare (2**20 = 1,048,576); a
+#: header declaring more is refused before any entry is read. Why this
+#: value: it is above every real tree the engine targets (chromium's index,
+#: among the largest public ones, has about 400k entries), and it bounds the
+#: walk, which costs one loop turn per entry: 2**20 minimal entries take
+#: about 0.5 s of CPU (versions 2 and 3) and 1.9 s (version 4), where a
+#: 256 MiB file could otherwise declare 4M. A larger tree loses only
+#: dirty-tree detection (``index_unread``), never the scan.
 MAX_INDEX_ENTRIES = 1 << 20
 #: Real indexes carry fewer than ten extensions; more is a crafted file.
 MAX_EXTENSIONS = 64
+#: The longest varint git's ``decode_varint`` (varint.c) accepts. It keeps
+#: the value in a 64-bit ``uintmax_t`` and gives up before a shift that
+#: could overflow, when ``value + 1`` reaches 2**57 (its top 7 bits): the
+#: tenth byte is the last it can read, so an eleventh is never read here.
+MAX_VARINT_BYTES = 10
+_VARINT_OVERFLOW = 1 << (64 - 7)
 
 #: ``visit(window, entry_start, name_start, name_length)`` for callers that
 #: need the entries (none in the scan; the parser's own tests do). For
@@ -75,6 +93,13 @@ class IndexLayout(NamedTuple):
         return frozenset(ext.name for ext in self.chain)
 
 
+def _shrunk(offset: int) -> OSError:
+    """The file ends before the size it was inspected with (replaced or
+    truncated meanwhile): without this a short read would leave the walk
+    at the same offset forever."""
+    return OSError(errno.EIO, f"the index changed while it was inspected (short read at {offset})")
+
+
 class _Window:
     """A bounded view of the file: ``data`` holds bytes from ``base``."""
 
@@ -92,7 +117,7 @@ class _Window:
         while held < want:
             chunk = os.pread(self.fd, want - held, offset + held)
             if not chunk:
-                break
+                raise _shrunk(offset + held)
             chunks.append(chunk)
             held += len(chunk)
         self.data, self.base = b"".join(chunks), offset
@@ -102,16 +127,23 @@ class _Window:
 
 
 def _varint(data: bytes, offset: int) -> tuple[int, int] | None:
-    """git's ``decode_varint`` (offset encoding); (value, next offset)."""
-    if offset >= len(data):
+    """git's ``decode_varint`` (offset encoding); (value, next offset).
+    ``None`` where git's own decoder gives up (its overflow check, so at
+    most MAX_VARINT_BYTES are read: the work is constant, not quadratic in
+    a run of continuation bytes) or the data ends. On overflow git returns
+    0 without consuming the bytes and reads the name from them, which this
+    walk does not model: the index is refused instead."""
+    end = min(len(data), offset + MAX_VARINT_BYTES)
+    if offset >= end:
         return None
     byte = data[offset]
     value, offset = byte & 0x7F, offset + 1
     while byte & 0x80:
-        if offset >= len(data):
+        value += 1
+        if value >= _VARINT_OVERFLOW or offset >= end:
             return None
         byte = data[offset]
-        value = ((value + 1) << 7) | (byte & 0x7F)
+        value = (value << 7) | (byte & 0x7F)
         offset += 1
     return value, offset
 
@@ -125,6 +157,9 @@ def _compressed_entry(data: bytes, o: int, fixed: int, previous: int) -> tuple[i
     flags = (data[o + fixed - 2] << 8) | data[o + fixed - 1]
     name = o + fixed + (_EXTENDED_FLAG_BYTES if flags & _EXTENDED_FLAG else 0)
     decoded = _varint(data, name)
+    # A strip longer than the previous name is git's "malformed name field"
+    # (it dies). For the first entry git ignores the strip; it writes 0
+    # there, and anything else is refused (``previous`` is 0).
     if decoded is None or decoded[0] > previous:
         return None
     strip, suffix = decoded
@@ -205,6 +240,8 @@ def _extension_chain(fd: int, offset: int, end: int) -> tuple[Extension, ...]:
         if len(chain) == MAX_EXTENSIONS:
             raise AmbiguousIndex(f"more than {MAX_EXTENSIONS} extensions")
         header = os.pread(fd, _EXTENSION.size, offset)
+        if len(header) < _EXTENSION.size:
+            raise _shrunk(offset)
         name, size = _EXTENSION.unpack(header)
         if offset + _EXTENSION.size + size > end:
             raise AmbiguousIndex(f"extension {name!r} at {offset} runs past the checksum")
