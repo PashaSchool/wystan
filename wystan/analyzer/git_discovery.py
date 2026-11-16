@@ -9,12 +9,15 @@ directory, symbolic link, valid or not) is a root, and so is each target a
 Git stops at the first valid repository; this walk never stops, so its set
 is at least as wide (for exclusion, wider is the safe direction).
 
-Pointer files are read like any repository file: ``lstat`` must say regular
-file, the open is non-blocking and does not follow links, ``fstat`` must
-agree, and at most ``POINTER_FILE_BYTES`` are read. A FIFO, a device, a
-link or anything else reads as "no pointer" (its ancestor is still a root).
-Replace ``read_pointer`` with ``wystan.analyzer.repo_reader`` once
-``fix/guarded-repo-reads`` and this branch are both in ``dev``.
+Pointer files inside the scan root are read through the engine's guarded
+reader (``repo_reader``, the root as its boundary). Pointer files outside it
+(the ``.git`` entries of ancestors, and the git directories they name) are
+read ONLY by the exclusion walk, whose reads can only widen the set of
+locations no git is taken from: ``lstat`` must say regular file, the open
+is non-blocking and does not follow links, ``fstat`` must agree, at most
+``POINTER_FILE_BYTES`` are read (listed as ``above_scan_root`` in the read
+guard's allowlist). A FIFO, a device, a link or anything else reads as "no
+pointer" (its ancestor is still a root).
 """
 
 from __future__ import annotations
@@ -22,6 +25,10 @@ from __future__ import annotations
 import functools
 import os
 import stat
+
+from wystan.analyzer.path_identity import is_within
+from wystan.analyzer.repo_open import _EXHAUSTED_ERRNOS, DescriptorsExhausted
+from wystan.analyzer.repo_reader import read_repo_bytes
 
 #: A ``.git`` file or ``commondir`` file is one short line; read no more.
 POINTER_FILE_BYTES = 4096
@@ -33,15 +40,26 @@ _POINTER_FLAGS = (
 )
 
 
-def read_pointer(path: str, limit: int = POINTER_FILE_BYTES) -> str | None:
-    """The content (at most ``limit`` bytes) of a small regular file, or
-    ``None``."""
+def read_pointer(path: str, root: str, limit: int = POINTER_FILE_BYTES) -> str | None:
+    """The content (at most ``limit`` bytes) of a small regular file inside
+    the scan root ``root``, read through the guarded reader; ``None`` when it
+    is outside the root, missing, refused or larger."""
+    if not is_within(path, root):
+        return None
+    read = read_repo_bytes(path, root, max_bytes=limit, stop_at_binary=False)
+    return read.data.decode("utf-8", "replace").strip() if read.data is not None else None
+
+
+def _read_outside(path: str, limit: int = POINTER_FILE_BYTES) -> str | None:
+    """A pointer file outside the scan root, for the exclusion walk only."""
     try:
         before = os.lstat(path)
         if not stat.S_ISREG(before.st_mode):
             return None
         fd = os.open(path, _POINTER_FLAGS)
-    except OSError:
+    except OSError as exc:
+        if exc.errno in _EXHAUSTED_ERRNOS:
+            raise DescriptorsExhausted(f"no file descriptor left to read {path}") from exc
         return None
     try:
         after = os.fstat(fd)
@@ -55,12 +73,18 @@ def read_pointer(path: str, limit: int = POINTER_FILE_BYTES) -> str | None:
     return data.decode("utf-8", "replace").strip()
 
 
-def _common_dir(git_dir: str) -> list[str]:
-    pointer = read_pointer(os.path.join(git_dir, _COMMONDIR))
+def _discovery_read(path: str, start: str) -> str | None:
+    """Inside the scan root: the guarded reader; outside: the exclusion
+    walk's own bounded read."""
+    return read_pointer(path, start) if is_within(path, start) else _read_outside(path)
+
+
+def _common_dir(git_dir: str, start: str) -> list[str]:
+    pointer = _discovery_read(os.path.join(git_dir, _COMMONDIR), start)
     return [os.path.normpath(os.path.join(git_dir, pointer))] if pointer else []
 
 
-def _entry_targets(ancestor: str, dot_git: str) -> list[str]:
+def _entry_targets(ancestor: str, dot_git: str, start: str) -> list[str]:
     """What the ``.git`` entry of ``ancestor`` points at, besides itself."""
     try:
         mode = os.lstat(dot_git).st_mode
@@ -68,13 +92,13 @@ def _entry_targets(ancestor: str, dot_git: str) -> list[str]:
         return []
     if stat.S_ISLNK(mode):
         target = os.path.realpath(dot_git)
-        return [target, *_common_dir(target)]
+        return [target, *_common_dir(target, start)]
     if stat.S_ISDIR(mode):
-        return _common_dir(dot_git)
-    pointer = read_pointer(dot_git)
+        return _common_dir(dot_git, start)
+    pointer = _discovery_read(dot_git, start)
     if pointer and pointer.startswith(_GITDIR_PREFIX):
         git_dir = os.path.normpath(os.path.join(ancestor, pointer[len(_GITDIR_PREFIX):].strip()))
-        return [git_dir, *_common_dir(git_dir)]
+        return [git_dir, *_common_dir(git_dir, start)]
     return []
 
 
@@ -87,7 +111,7 @@ def exclusion_roots(start: str) -> tuple[str, ...]:
     while True:
         dot_git = os.path.join(current, _DOT_GIT)
         if os.path.lexists(dot_git):
-            roots += [current, *_entry_targets(current, dot_git)]
+            roots += [current, *_entry_targets(current, dot_git, roots[0])]
         parent = os.path.dirname(current)
         if parent == current:
             return tuple(dict.fromkeys(roots))

@@ -237,7 +237,7 @@ def is_repository_top(path: str) -> bool:
     dot_git = os.path.join(real, ".git")
     if os.path.isdir(dot_git) and not os.path.islink(dot_git):
         return _is_git_dir(dot_git)
-    pointer = read_pointer(dot_git)
+    pointer = read_pointer(dot_git, real)
     return bool(pointer and pointer.startswith("gitdir:")) or _is_git_dir(real)
 
 

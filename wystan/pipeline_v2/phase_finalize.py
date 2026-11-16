@@ -2780,6 +2780,15 @@ def run_finalize_phase(
     index_unread = index_refusal(str(ctx.repo_path))
     if index_unread:
         scan_meta["index_unread"] = index_unread
+    # Submodules whose git directory lies outside the scan root: state
+    # unknown (not read), neither moved nor clean. Absent when there are none.
+    from wystan.analyzer.git_submodules import unread_submodules
+
+    submodules_unread = unread_submodules(str(ctx.repo_path))
+    if submodules_unread:
+        scan_meta["submodules_unread"] = {
+            "paths": submodules_unread, "reason": "git directory outside the scan root",
+        }
 
     # ── LLM-health stamp (fail LOUD on auth-dead scans) ────────────
     # Must run AFTER the last LLM-bearing stage (6.7b above) and BEFORE
