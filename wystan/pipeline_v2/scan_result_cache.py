@@ -3928,8 +3928,12 @@ def _dirty_hash(repo_path: Path) -> str:
     """Hash of uncommitted state; empty string for a clean tree.
 
     Combines ``git status --porcelain=v1`` (untracked + modified + staged
-    status lines) with ``git diff HEAD`` (the actual content diff of tracked
-    modifications, staged + unstaged). A clean checkout → both empty → ``""``.
+    status lines) with the content diff of tracked modifications against
+    HEAD (``diff-index -p -M HEAD``: the text ``git diff HEAD`` printed, read
+    without refreshing the clone's index), plus any submodule checked out at
+    another commit than recorded (read from its files). A clean checkout →
+    all empty → ``""``. An index git cannot read without writing the clone
+    (``git_index``) gives an ``unread:`` hash of the files instead.
     """
     # ``--untracked-files=all`` expands untracked DIRECTORIES into individual
     # file entries so each new file gets its own ``?? path`` line.
