@@ -98,7 +98,22 @@ def main() -> None:
     import sys
 
     sys.argv = [sys.argv[0], *_route_default_to_scan(sys.argv[1:])]
-    app()
+    _run_app()
+
+
+def _run_app() -> None:
+    """``app()``; a run that ran out of file descriptors ends with one line
+    saying so and how to raise the limit, not a traceback."""
+    import sys
+
+    from wystan.analyzer.descriptor_limit import EXIT_OUT_OF_DESCRIPTORS, out_of_descriptors_message
+    from wystan.analyzer.repo_open import DescriptorsExhausted
+
+    try:
+        app()
+    except DescriptorsExhausted as exc:
+        print(out_of_descriptors_message(exc), file=sys.stderr)
+        sys.exit(EXIT_OUT_OF_DESCRIPTORS)
 
 
 
@@ -1328,4 +1343,4 @@ def version():
 
 
 if __name__ == "__main__":
-    app()
+    _run_app()
