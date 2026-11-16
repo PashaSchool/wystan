@@ -84,6 +84,7 @@ from wystan.pipeline_v2.snapshots import (
     percentile,
     run_snapshots,
     select_snapshot_commits,
+    snapshot_wants_content,
 )
 from wystan.pipeline_v2.stage_6_95_history import (
     _entity_specs,
@@ -197,6 +198,8 @@ def stage_6_96_impact(
         [c.sha for c in snaps],
         _compute,
         log=log,
+        # Only the files the import index and manifest readers read.
+        wants_content=snapshot_wants_content,
     )
     telemetry.update(
         {

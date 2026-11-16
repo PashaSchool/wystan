@@ -263,8 +263,14 @@ def run_snapshots(
     *,
     budget_sec: float | None = None,
     log: Any = None,
+    wants_content: Callable[[str, int], bool] | None = None,
 ) -> tuple[dict[str, T], dict[str, Any]]:
     """Materialise each sha's tree in a fresh directory and run ``compute``.
+
+    ``wants_content(path, size)`` picks the files exported with their bytes
+    (default: all, so ``compute`` may read any file); every other file is an
+    empty placeholder. Stage 6.96 passes :func:`snapshot_wants_content`,
+    the files its readers read.
 
     ``compute(tree_root, sha)`` receives the root of the tree at that sha
     (the caller appends any subpath itself). Returns
@@ -322,7 +328,7 @@ def run_snapshots(
             break
         tree_dir = tempfile.mkdtemp(prefix="wystan-impact-")  # mode 0700, ours
         try:
-            report = export_tree(repo_path, object_name(sha), tree_dir, snapshot_wants_content)
+            report = export_tree(repo_path, object_name(sha), tree_dir, wants_content)
             if report.refused:
                 _record_refusals(telemetry, sha, report.refused, _warn)
             results[sha] = compute(Path(tree_dir), sha)
