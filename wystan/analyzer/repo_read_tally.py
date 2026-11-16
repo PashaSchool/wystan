@@ -17,6 +17,9 @@ before the guard too) are not refusals.
 Scope: refusals are recorded under the root the reader was given and taken
 by the scan whose root is that root or lies above it, so a refusal is reported
 whether a site spelled the scan's root as a ``Path``, a ``str``, or a sub-root.
+Roots are compared resolved (``alias -> mono`` and ``mono`` are one root); a
+path is moved onto its resolved root as it was spelled under its own root,
+never resolved itself (that would follow the very link that was refused).
 A scan clears that record when it starts (``begin_scan``); two scans of one
 tree, or of nested trees, running at the same time in one process share it.
 
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import os
 import threading
+from functools import lru_cache
 
 from wystan.analyzer.repo_open import OPEN_PATH_DIR_FD, open_path
 
@@ -54,13 +58,40 @@ REASONS = (REASON_OUTSIDE, REASON_NOT_REGULAR, REASON_OVER_CAP, REASON_OPEN_ERRO
 #: repository with thousands of refused links.
 PATHS_LISTED = 20
 
-#: ``{absolute root a reader was given: {reason: {absolute path}}}``.
+#: ``{resolved root a reader was given: {reason: {absolute path under it}}}``.
 _records: dict[str, dict[str, set[str]]] = {}
+#: Distinct roots whose resolution is kept: a scan hands the reader a few
+#: roots again and again; a long-lived process keeps the recent ones.
+_RESOLVED_ROOTS_KEPT = 256
 _lock = threading.Lock()
 
 
 def _absolute(path: os.PathLike[str] | str) -> str:
     return os.path.abspath(os.fspath(path))
+
+
+@lru_cache(maxsize=_RESOLVED_ROOTS_KEPT)
+def _resolved(absolute: str) -> str:
+    """The root with its links resolved, once per root; its spelling when it
+    cannot be resolved."""
+    try:
+        return os.path.realpath(absolute)
+    except (OSError, ValueError):
+        return absolute
+
+
+def _root(path: os.PathLike[str] | str) -> str:
+    return _resolved(_absolute(path))
+
+
+def _rebased(path: str, spelled_root: str, root: str) -> str:
+    """``path``, spelled under ``spelled_root``, spelled under its resolved
+    ``root`` instead (unchanged when the root was already resolved, or the
+    path is not spelled under it)."""
+    prefix = spelled_root.rstrip(os.sep) + os.sep
+    if spelled_root == root or not path.startswith(prefix):
+        return path
+    return os.path.join(root, path[len(prefix):])
 
 
 def _within(root: str, scan_root: str) -> bool:
@@ -69,8 +100,11 @@ def _within(root: str, scan_root: str) -> bool:
 
 def record_refusal(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, reason: str) -> None:
     """Record that the read of ``path`` under ``repo_root`` was refused."""
+    spelled_root = _absolute(repo_root)
+    root = _resolved(spelled_root)
+    absolute = _rebased(_absolute(path), spelled_root, root)
     with _lock:
-        _records.setdefault(_absolute(repo_root), {}).setdefault(reason, set()).add(_absolute(path))
+        _records.setdefault(root, {}).setdefault(reason, set()).add(absolute)
 
 
 def _take(scan_root: str) -> dict[str, set[str]]:
@@ -87,7 +121,7 @@ def _take(scan_root: str) -> dict[str, set[str]]:
 def begin_scan(scan_root: os.PathLike[str] | str) -> None:
     """Clear the record of the tree a scan starts on."""
     with _lock:
-        _take(_absolute(scan_root))
+        _take(_root(scan_root))
 
 
 def _relative(path: str, scan_root: str) -> str:
@@ -99,7 +133,7 @@ def repository_reads_block(scan_root: os.PathLike[str] | str) -> dict | None:
     """The ``scan_meta.repository_reads`` value of the scan of
     ``scan_root``, or ``None`` when nothing was refused on the ``dir_fd``
     open path (module doc). Takes every record of the scan."""
-    top = _absolute(scan_root)
+    top = _root(scan_root)
     with _lock:
         found = {reason: {_relative(path, top) for path in paths} for reason, paths in _take(top).items()}
     used = open_path()
