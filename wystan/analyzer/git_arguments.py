@@ -19,7 +19,7 @@ from __future__ import annotations
 FORMS: dict[str, tuple[frozenset[str], int | None]] = {
     "cat-file": (frozenset({"--batch", "--batch-check"}), 0),
     "config": (frozenset({"--get", "--get-regexp", "--null", "--name-only"}), 1),
-    "diff": (frozenset({"--name-only", "--numstat", "--no-renames", "--raw", "-z"}), 2),
+    "diff-index": (frozenset({"-p", "-M"}), 1),
     "diff-tree": (frozenset({"--numstat", "--no-renames", "--root", "--raw", "-r", "--abbrev=",
                              "--full-index", "-M", "-z", "--no-color", "--name-only"}), 2),
     "log": (frozenset({"--max-count=", "--since=", "--until=", "--pretty=", "--name-only", "--name-status",

@@ -171,8 +171,10 @@ def numstat_file_keys(root: str, sha: str, parents: tuple[str, ...]) -> list[str
     """The keys of GitPython's ``commit.stats.files``, in its order: the
     numstat half of a ``--raw --numstat`` diff against the first parent."""
     if parents:
+        # diff-tree prints what GitPython's `git diff <p0> <sha>` printed for
+        # two commits, and never refreshes the clone's index.
         out = run_git(
-            root, "diff", "--numstat", "--no-renames", "--raw",
+            root, "diff-tree", "-r", "--numstat", "--no-renames", "--raw",
             object_name(parents[0]), object_name(sha), "--",
         ).text
         lines = out.splitlines()

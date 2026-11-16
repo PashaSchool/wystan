@@ -3933,7 +3933,10 @@ def _dirty_hash(repo_path: Path) -> str:
     # ``--untracked-files=all`` expands untracked DIRECTORIES into individual
     # file entries so each new file gets its own ``?? path`` line.
     status = _git(repo_path, "status", "--porcelain=v1", "--untracked-files=all")
-    diff = _git(repo_path, "diff", "HEAD")
+    # Plumbing: byte-equal to `git diff HEAD` (renames on, stat-only changes
+    # dropped because the patch compares content), but it never refreshes,
+    # so the clone's index is never written.
+    diff = _git(repo_path, "diff-index", "-p", "-M", "HEAD")
     if status is None or diff is None:
         # The working tree could not be read through git (refused: a filter
         # the runner cannot neutralise, or failed). That is not "clean":

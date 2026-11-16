@@ -2772,6 +2772,14 @@ def run_finalize_phase(
     partial = partial_clone_record(ctx.repo_path, impact_telemetry)
     if partial is not None:
         scan_meta["partial_clone"] = partial
+    # An index git cannot read without writing the clone (split, sparse,
+    # oversized, not a file) is not read: no dirty-tree detection. Absent
+    # for an ordinary clone.
+    from wystan.analyzer.git_index import index_refusal
+
+    index_unread = index_refusal(str(ctx.repo_path))
+    if index_unread:
+        scan_meta["index_unread"] = index_unread
 
     # ── LLM-health stamp (fail LOUD on auth-dead scans) ────────────
     # Must run AFTER the last LLM-bearing stage (6.7b above) and BEFORE

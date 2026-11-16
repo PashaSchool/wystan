@@ -73,8 +73,10 @@ def changed_files_since(repo_path: Path, since: str) -> list[str]:
     Empty list when the diff is empty or git fails (logged at warning).
     """
     try:
+        # Plumbing equal to `git diff --name-only <since>..HEAD` (renames
+        # on), which never touches the clone's index.
         out = run_git(
-            repo_path, "diff", "--name-only", f"{revision(since)}..HEAD",
+            repo_path, "diff-tree", "-r", "-M", "--name-only", revision(since), "HEAD",
             timeout=_DIFF_TIMEOUT_SEC,
         )
     except GitError as exc:

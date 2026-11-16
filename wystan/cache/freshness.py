@@ -126,8 +126,10 @@ def _diff_files(
     metric updates.
     """
     try:
+        # Plumbing: what `git diff --name-only A..B` printed (renames on),
+        # without the porcelain that may refresh the clone's index.
         out = run_git(
-            repo_path, "diff", "--name-only", f"{revision(from_sha)}..{revision(to_sha)}",
+            repo_path, "diff-tree", "-r", "-M", "--name-only", revision(from_sha), revision(to_sha),
             timeout=_RANGE_TIMEOUT_SEC,
         ).universal_text
     except GitError:

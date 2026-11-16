@@ -26,16 +26,15 @@ not a plain token makes the command refuse instead of run.
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import logging
 import os
 import re
-import shutil
 import tempfile
-from typing import BinaryIO, Callable, Iterator, TypeVar
+from typing import BinaryIO, Callable, TypeVar
 
 from wystan.analyzer.git_arguments import FORMS, refusal
+from wystan.analyzer.git_index import index_refusal
 from wystan.analyzer.git_process import GitError, GitFailed, GitResult, run_bounded, run_streaming
 from wystan.analyzer.git_resolution import (
     SAFE_OPTIONS,
@@ -57,23 +56,25 @@ __all__ = [
 #: The built-in subcommands the engine runs, and nothing else.
 ALLOWED_SUBCOMMANDS = frozenset(FORMS)
 #: Diff-producing commands never run an external diff or textconv driver
-#: and show a submodule only as a commit pointer; diff and status never look
-#: inside a submodule at all (its own configuration and filters would apply
-#: there). Forced here, so no call site can forget them. Consequence: a
-#: `git diff` file list omits submodule pointer bumps (gitlinks, which the
-#: engine never tracks as files); `log` and `diff-tree` keep them.
+#: and show a submodule only as a commit pointer; the two that look at the
+#: working tree (diff-index, status) never look inside a submodule at all
+#: (its own configuration and filters would apply there; the engine reads a
+#: submodule's HEAD as a file instead, see scan_result_cache). Forced here,
+#: so no call site can forget them. Tree-to-tree diffs (diff-tree, log)
+#: keep submodule pointer changes, as dev's `git diff A B` did. Porcelain
+#: `git diff` is not allowed: it refreshes the clone's index.
 _FORCED_FLAGS = {
-    "diff": ("--no-ext-diff", "--no-textconv", "--submodule=short", "--ignore-submodules=all"),
+    "diff-index": ("--no-ext-diff", "--no-textconv", "--submodule=short", "--ignore-submodules=all"),
     "diff-tree": ("--no-ext-diff", "--no-textconv", "--submodule=short"),
     "log": ("--no-ext-diff", "--no-textconv", "--submodule=short"),
     "status": ("--ignore-submodules=all",),
 }
 #: Commands that hash working-tree files, where git runs the clean filters
 #: the clone's configuration defines.
-_FILTERING_SUBCOMMANDS = frozenset({"diff", "status"})
-#: Commands that rewrite the index as a side effect even when optional
-#: locks are off (git's diff refreshes it with a mandatory lock).
-_INDEX_REFRESHING = frozenset({"diff"})
+_FILTERING_SUBCOMMANDS = frozenset({"diff-index", "status"})
+#: The only commands that read the clone's index; every other one runs
+#: with an index path that does not exist (see :func:`_no_index`).
+_READS_INDEX = frozenset({"diff-index", "ls-files", "status"})
 #: Commands whose output lists untracked files.
 _LISTS_UNTRACKED = frozenset({"status"})
 _FILTER_KEYS = ("clean", "smudge", "process")
@@ -192,30 +193,26 @@ def _user_options(subcommand: str) -> tuple[str, ...]:
     return ("-c", f"core.excludesFile={excludes}") if excludes else ()
 
 
-@contextlib.contextmanager
-def _private_index(root: str, subcommand: str, env: dict[str, str]) -> Iterator[dict[str, str]]:
-    """``GIT_INDEX_FILE`` on a private copy of the index for commands that
-    refresh it whatever ``GIT_OPTIONAL_LOCKS`` says (porcelain ``diff``):
-    the refresh writes the copy, never the scanned clone; the output is the
-    same."""
-    if subcommand not in _INDEX_REFRESHING:
-        yield {}
-        return
-    found = run_bounded(git_command(root, "rev-parse", "--git-path", "index"), env, _CONFIG_TIMEOUT_SEC, 1 << 12)
-    index = os.path.join(root, found.text.strip()) if found.returncode == 0 else ""
-    if not index or not os.path.isfile(index) or os.path.islink(index):
-        yield {}
-        return
-    with tempfile.TemporaryDirectory(prefix="wystan-index-") as private:
-        copy = os.path.join(private, "index")
-        shutil.copyfile(index, copy)
-        yield {"GIT_INDEX_FILE": copy}
+@functools.lru_cache(maxsize=1)
+def _no_index() -> str:
+    """An index path inside a private 0700 directory, never created: git
+    reads it as an empty index and writes nothing for a read command."""
+    return os.path.join(tempfile.mkdtemp(prefix="wystan-no-index-"), "index")
 
 
 def _prepared(root: str, args: tuple[str, ...], stay_inside: bool) -> tuple[str, list[str], dict[str, str]]:
     """(subcommand, argv, environment) of an allowed command on ``root``."""
     subcommand = _check_subcommand(args)
+    if subcommand in _READS_INDEX:
+        why = index_refusal(root)
+        if why:
+            raise UnsafeArgument(f"the clone's index is not read: {why}")
     env = child_environment(root)
+    if subcommand not in _READS_INDEX:
+        # Reading an index can write the clone (a split index's shared file
+        # is re-dated, a sparse index expanded into objects); a command that
+        # needs no index gets none of the clone's.
+        env["GIT_INDEX_FILE"] = _no_index()
     # ``stay_inside``: this path only, never an enclosing repository.
     env.update(ceiling_environment(root, stay_inside))
     if subcommand in _FILTERING_SUBCOMMANDS:
@@ -247,8 +244,7 @@ def run_git(
     Raises :class:`GitError` (``GitFailed`` for a non-zero exit when
     ``check``); ``args[0]`` must be an allowed subcommand."""
     subcommand, argv, env = _prepared(os.fspath(repo_root), args, stay_inside)
-    with _private_index(os.fspath(repo_root), subcommand, env) as index_env:
-        result = run_bounded(argv, {**env, **index_env}, timeout, max_output, stdin)
+    result = run_bounded(argv, env, timeout, max_output, stdin)
     if check and result.returncode != 0:
         raise GitFailed(subcommand, result)
     return result
