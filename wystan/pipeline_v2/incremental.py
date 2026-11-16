@@ -36,7 +36,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from wystan.analyzer.git_runner import GitError, revision, run_git
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, revision, run_git
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +80,9 @@ def changed_files_since(repo_path: Path, since: str) -> list[str]:
             timeout=_DIFF_TIMEOUT_SEC,
         )
     except GitError as exc:
-        logger.warning(
-            "incremental: git diff %s..HEAD failed (%s) — empty changed-set",
-            since, exc,
-        )
-        return []
+        # Not an empty changed-set: that would reuse every feature unchanged.
+        logger.warning("incremental: git diff %s..HEAD unavailable (%s)", since, exc)
+        raise GitAnswerUnavailable(f"files changed since {since!r} unavailable: {exc}") from exc
     return [ln.strip() for ln in out.universal_text.splitlines() if ln.strip()]
 
 

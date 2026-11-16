@@ -47,7 +47,7 @@ from wystan.analyzer.git_resolution import (
 from wystan.analyzer.git_user_config import user_excludes_file
 
 __all__ = [
-    "ALLOWED_SUBCOMMANDS", "DEFAULT_MAX_OUTPUT_BYTES", "DEFAULT_TIMEOUT_SEC",
+    "ALLOWED_SUBCOMMANDS", "DEFAULT_MAX_OUTPUT_BYTES", "DEFAULT_TIMEOUT_SEC", "GitAnswerUnavailable",
     "GitError", "GitFailed", "GitResult", "SAFE_OPTIONS", "UnsafeArgument",
     "UnsafeGit", "child_environment", "git_command", "git_executable",
     "object_name", "revision", "run_git", "safe_search_path",
@@ -98,6 +98,12 @@ T = TypeVar("T")
 
 _HEX_NAME = re.compile(r"[0-9a-fA-F]{4,64}")
 _FORBIDDEN_IN_REVISION = ("\0", "\n", "\r")
+
+
+class GitAnswerUnavailable(GitError):
+    """A git answer the caller needs could not be read (refused or failed).
+    Never the same as an empty answer: a caller must not read it as "no
+    files" or "nothing changed"."""
 
 
 class UnsafeArgument(GitError, ValueError):

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from wystan.analyzer.git_runner import GitError, revision, run_git
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, revision, run_git
 from wystan.models.types import FeatureMap
 
 
@@ -109,8 +109,8 @@ def _count_commits(from_sha: str, to_sha: str, repo_path: str) -> int:
             timeout=_RANGE_TIMEOUT_SEC,
         ).universal_text.strip()
         return int(out)
-    except (GitError, ValueError):
-        return 0
+    except (GitError, ValueError) as exc:
+        raise GitAnswerUnavailable(f"commits between {from_sha} and {to_sha} unavailable: {exc}") from exc
 
 
 def _diff_files(
@@ -132,8 +132,9 @@ def _diff_files(
             repo_path, "diff-tree", "-r", "-M", "--name-only", revision(from_sha), revision(to_sha),
             timeout=_RANGE_TIMEOUT_SEC,
         ).universal_text
-    except GitError:
-        return set(), False
+    except GitError as exc:
+        # Not "nothing changed": the caller must not treat the map as fresh.
+        raise GitAnswerUnavailable(f"files changed between {from_sha} and {to_sha} unavailable: {exc}") from exc
 
     changed = {line.strip() for line in out.splitlines() if line.strip()}
     if not changed:
