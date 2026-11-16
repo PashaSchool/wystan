@@ -29,8 +29,10 @@ _PACKED_REFS_BYTES = 8 << 20
 
 def _gitlinks(root: str, *source: str) -> dict[str, str]:
     """path -> recorded commit of every submodule entry of the index
-    (``ls-files -s``) or of a tree (``ls-tree -r <tree>``)."""
-    args = ("ls-tree", "-r", "-z", "--full-tree", *source) if source else ("ls-files", "-s", "-z")
+    (``ls-files -s``) or of a tree (``ls-tree -r <tree>``). Both are limited
+    to ``root`` and relative to it (no ``--full-tree``), so a scan of a
+    subdirectory compares like with like."""
+    args = ("ls-tree", "-r", "-z", *source) if source else ("ls-files", "-s", "-z")
     out = run_git(root, *args).stdout
     links = {}
     for record in out.split(b"\0"):
