@@ -246,20 +246,20 @@ class RepoClassSignals:
         root = Path(ctx.repo_path)
         shape = ShapeSignals.collect(ctx)
 
-        pkg_json = _read_json_safe(root / "package.json")
+        pkg_json = _read_json_safe(root / "package.json", root)
         self_js = ""
         if isinstance(pkg_json, dict) and isinstance(pkg_json.get("name"), str):
             self_js = pkg_json["name"].split("/")[-1].lower()
 
-        pyproject_text = _read_text_safe(root / "pyproject.toml")
+        pyproject_text = _read_text_safe(root / "pyproject.toml", root)
         self_py = ""
         py_deps: tuple[str, ...] = ()
         if pyproject_text is not None:
             self_py, py_deps = _pyproject_name_and_server_deps(pyproject_text)
 
-        self_go = _go_module_self_name(_read_text_safe(root / "go.mod"))
+        self_go = _go_module_self_name(_read_text_safe(root / "go.mod", root))
 
-        cargo_text = _read_text_safe(root / "Cargo.toml")
+        cargo_text = _read_text_safe(root / "Cargo.toml", root)
         self_rust = ""
         rust_server: tuple[str, ...] = ()
         has_rust_bin = False
@@ -875,7 +875,7 @@ def _cmd_has_package_main(root: Path) -> bool:
             for go_file in sorted(entry.glob("*.go")):
                 if go_file.name.endswith("_test.go"):
                     continue
-                text = _read_text_safe(go_file)
+                text = _read_text_safe(go_file, root)
                 if text is not None and _RE_PACKAGE_MAIN.search(text):
                     return True
     except OSError:

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 from wystan.analyzer.workspace import (
@@ -90,7 +91,7 @@ def _root_workspace(ctx: "ScanContext") -> Workspace:
     return Workspace(
         name=ROOT_WORKSPACE_NAME,
         path=ROOT_WORKSPACE_PATH,
-        package_json=_read_package_json(ctx.repo_path),
+        package_json=_read_package_json(ctx.repo_path, ctx.repo_path),
         stack=ctx.stack,
         files=list(ctx.tracked_files),
     )
@@ -114,7 +115,7 @@ def _workspaces_from_info(
             Workspace(
                 name=pkg.name,
                 path=pkg.path,
-                package_json=_read_package_json(ws_root),
+                package_json=_read_package_json(ws_root, ctx.repo_path),
                 stack=None,  # per-workspace stack is enriched downstream
                 files=list(pkg.files),
             )
@@ -137,11 +138,11 @@ def _normalise_existing(ws: Workspace) -> Workspace:
     )
 
 
-def _read_package_json(root: Path) -> dict[str, object] | None:
+def _read_package_json(root: Path, repo_root: Path) -> dict[str, object] | None:
     """Best-effort parse of ``<root>/package.json``; ``None`` if absent/bad."""
     manifest = root / "package.json"
     try:
-        raw = manifest.read_text(encoding="utf-8")
+        raw = read_repo_text_or_raise(manifest, repo_root, max_bytes=MANIFEST_READ_MAX_BYTES)
     except (OSError, UnicodeDecodeError):
         return None
     try:

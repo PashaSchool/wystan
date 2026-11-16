@@ -98,7 +98,22 @@ def main() -> None:
     import sys
 
     sys.argv = [sys.argv[0], *_route_default_to_scan(sys.argv[1:])]
-    app()
+    _run_app()
+
+
+def _run_app() -> None:
+    """``app()``; a run that ran out of file descriptors ends with one line
+    saying so and how to raise the limit, not a traceback."""
+    import sys
+
+    from wystan.analyzer.descriptor_limit import EXIT_OUT_OF_DESCRIPTORS, out_of_descriptors_message
+    from wystan.analyzer.repo_open import DescriptorsExhausted
+
+    try:
+        app()
+    except DescriptorsExhausted as exc:
+        print(out_of_descriptors_message(exc), file=sys.stderr)
+        sys.exit(EXIT_OUT_OF_DESCRIPTORS)
 
 
 
@@ -374,8 +389,14 @@ def refresh(
     console.print(f"[dim]Loading:[/dim] {map_file}")
     fm = FeatureMap.model_validate_json(map_file.read_text())
 
+    from wystan.analyzer.git_runner import GitAnswerUnavailable
+
     if check_only:
-        report = check_freshness(fm, repo_path)
+        try:
+            report = check_freshness(fm, repo_path)
+        except GitAnswerUnavailable as exc:
+            console.print(f"[red]✗ Freshness unknown:[/red] {exc}")
+            raise typer.Exit(1)
         if not report.is_stale:
             console.print("[green]✓ Feature map is up to date with HEAD[/green]")
         else:
@@ -386,7 +407,12 @@ def refresh(
             )
         return
 
-    result = refresh_feature_map(fm, repo_path)
+    try:
+        result = refresh_feature_map(fm, repo_path)
+    except GitAnswerUnavailable as exc:
+        # A refused or failed git answer is not "no files": stop, cache unchanged.
+        console.print(f"[red]✗ Refresh stopped, map unchanged:[/red] {exc}")
+        raise typer.Exit(1)
 
     if not result.freshness_before.is_stale and not detect_new and not refresh_symbols:
         console.print("[green]✓ Already up to date — no refresh needed[/green]")
@@ -543,7 +569,9 @@ def watch_status(
     repo_path: str = typer.Argument(".", help="Repo to check"),
 ):
     """Check whether a watcher daemon is running for this repo."""
-    from wystan.watch import watcher_status
+    from rich.markup import escape
+
+    from wystan.watch import last_failure, watcher_status
     status = watcher_status(repo_path)
     if status.running:
         import datetime as _dt
@@ -551,6 +579,11 @@ def watch_status(
         console.print(f"[green]✓ Running[/green] (pid {status.pid}, started {started})")
     else:
         console.print("[yellow]Not running[/yellow]")
+    # A detached watcher's stderr is the null device: why it stopped is in
+    # its failure file, removed when a watcher starts again.
+    failure = last_failure(repo_path)
+    if failure is not None:
+        console.print(f"[red]Last error:[/red] {escape(failure)}")
 
 
 @app.command(name="watch-stop")
@@ -1328,4 +1361,4 @@ def version():
 
 
 if __name__ == "__main__":
-    app()
+    _run_app()

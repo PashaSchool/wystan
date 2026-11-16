@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any
 
 from wystan.analyzer.ast_extractor import FileSignature, extract_signatures
@@ -152,7 +153,7 @@ def _hash_current_symbols(
         source = sig.source
         if not source:
             try:
-                source = (root / path).read_text(encoding="utf-8", errors="ignore")
+                source = read_repo_text_or_raise(root / path, root, errors="ignore")
             except OSError:
                 continue
         if not source:

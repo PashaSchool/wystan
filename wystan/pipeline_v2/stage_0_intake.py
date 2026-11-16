@@ -29,11 +29,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from wystan.cache.backend import CacheBackend
     from wystan.pipeline_v2.git_snapshot import GitSnapshot
+    from wystan.pipeline_v2.module_scope import ModuleScopes
     from wystan.pipeline_v2.shared_source import SharedSourceState
     from wystan.pipeline_v2.stage_0_6_shape import ClassificationResult
 
@@ -166,6 +168,12 @@ class ScanContext:
     # across the ``_isolate`` stage boundary. ``None`` → every consumer
     # constructs its cache locally (tests / replay / scoped contexts).
     shared_source: "SharedSourceState | None" = None
+    # Which rows exist only because a nested module was read (see
+    # ``module_scope``). Written once, by the orchestrator, from the
+    # Stage 2 result; ``None`` before Stage 2 and in a repository
+    # without such rows it is empty. Captured with the stage inputs, so
+    # a replayed stage measures and names as the scan did.
+    module_scopes: "ModuleScopes | None" = None
 
     def with_shape(self, result: "ClassificationResult") -> "ScanContext":
         """Return a NEW ScanContext with the shape-classification fields populated.
@@ -263,16 +271,16 @@ _PY_FRAMEWORK_DEPS = (
 )
 
 
-def _read_json(path: Path) -> dict[str, object] | None:
+def _read_json(path: Path, root: Path) -> dict[str, object] | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(read_repo_text_or_raise(path, root, max_bytes=MANIFEST_READ_MAX_BYTES))
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def _read_text(path: Path) -> str | None:
+def _read_text(path: Path, root: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(path, root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES)
     except OSError:
         return None
 
@@ -451,7 +459,7 @@ _DJANGO_SETTINGS_MARKERS = (
 )
 
 
-def _is_django_repo(root: Path, files: list[str], dep_haystack: str) -> bool:
+def _is_django_repo(root: Path, files: list[str], dep_haystack: str, *, scan_root: Path | None = None) -> bool:
     """``True`` only when a genuine Django marker is present.
 
     Order is cheapest-first: dependency manifest substring → root
@@ -471,7 +479,7 @@ def _is_django_repo(root: Path, files: list[str], dep_haystack: str) -> bool:
             continue
         if "/site-packages/" in f"/{norm}" or "/node_modules/" in f"/{norm}":
             continue
-        blob = _read_text(root / rel)
+        blob = _read_text(root / rel, root if scan_root is None else scan_root)
         if blob and any(marker in blob for marker in _DJANGO_SETTINGS_MARKERS):
             return True
     return False
@@ -480,15 +488,18 @@ def _is_django_repo(root: Path, files: list[str], dep_haystack: str) -> bool:
 def _detect_python_stack(
     root: Path,
     files: list[str],
+    *,
+    scan_root: Path | None = None,
 ) -> tuple[str | None, list[str]]:
-    """Return (stack_slug, signals) for a Python-shaped directory."""
+    """Return (stack_slug, signals) for a Python-shaped directory; manifests
+    are read bounded by ``scan_root`` (default ``root``)."""
     signals: list[str] = []
 
     # Read deps from pyproject.toml / requirements.txt without
     # importing tomllib for portability — we only need substring match.
     dep_text_blobs: list[str] = []
     for fname in ("pyproject.toml", "requirements.txt", "Pipfile", "setup.py"):
-        blob = _read_text(root / fname)
+        blob = _read_text(root / fname, root if scan_root is None else scan_root)
         if blob is not None:
             dep_text_blobs.append(blob.lower())
             signals.append(f"{fname} present")
@@ -507,7 +518,7 @@ def _detect_python_stack(
     #   3. a ``settings.py`` actually contains Django config markers
     #      (``INSTALLED_APPS`` / ``DJANGO_SETTINGS_MODULE`` /
     #      ``django.`` import).
-    if _is_django_repo(root, files, haystack):
+    if _is_django_repo(root, files, haystack, scan_root=scan_root):
         signals.append("django dep, manage.py, or django-config settings.py")
         return "django", signals
 
@@ -560,6 +571,8 @@ def _detect_ruby_stack(root: Path) -> tuple[str | None, list[str]]:
 def detect_stack(
     root: Path,
     files: list[str],
+    *,
+    scan_root: Path | None = None,
 ) -> tuple[str | None, list[str]]:
     """Detect the framework / stack of a directory.
 
@@ -576,13 +589,18 @@ def detect_stack(
 
     Signals is a human-readable list of what was found, exposed via
     ``ScanContext.stack_signals`` for debugging misdetections.
+
+    ``scan_root`` is the root of the scan ``root`` lies in (default: ``root``
+    itself); manifests are read bounded by it, so a workspace manifest linked
+    to another part of the scanned tree reads as the file it names.
     """
-    pkg = _read_json(root / "package.json")
+    bound = root if scan_root is None else scan_root
+    pkg = _read_json(root / "package.json", bound)
     stack, signals = _detect_js_stack(root, files, pkg)
     if stack:
         return stack, signals
 
-    py_stack, py_signals = _detect_python_stack(root, files)
+    py_stack, py_signals = _detect_python_stack(root, files, scan_root=bound)
     signals.extend(py_signals)
     if py_stack:
         return py_stack, signals
@@ -618,8 +636,8 @@ def _enrich_workspaces(
     out: list[Workspace] = []
     for pkg in info.packages:
         pkg_root = repo_path / pkg.path
-        pkg_json_data = _read_json(pkg_root / "package.json")
-        stack, _signals = detect_stack(pkg_root, pkg.files)
+        pkg_json_data = _read_json(pkg_root / "package.json", repo_path)
+        stack, _signals = detect_stack(pkg_root, pkg.files, scan_root=repo_path)
         out.append(
             Workspace(
                 name=pkg.name,
@@ -767,6 +785,8 @@ def stage_0_intake(
         if norm_subpath is not None
         else repo_path
     )
+    # The boundary of every guarded read is the root the scan runs on: for a
+    # ``--subpath`` scan the subtree (``analyzer.repo_boundary``).
 
     # Run-id assignment lives here (Stage 0 is the only place that
     # owns "this run started"). Import lazily to keep the stage's

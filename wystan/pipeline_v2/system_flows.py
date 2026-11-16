@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import Any
 
 from wystan.pipeline_v2.data import load_yaml
@@ -111,7 +112,7 @@ class SystemFlowClassifier:
                 continue
             for mf in self.repo.glob(fg):
                 try:
-                    doc = json.loads(mf.read_text(encoding="utf-8", errors="ignore"))
+                    doc = json.loads(read_repo_text_or_raise(mf, self.repo, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES))
                 except (ValueError, OSError):
                     continue
                 for c in (doc.get(ck) or []) if isinstance(doc, dict) else []:
@@ -125,7 +126,7 @@ class SystemFlowClassifier:
         text = ""
         if self.repo:
             try:
-                raw = (self.repo / file_path).read_text(encoding="utf-8", errors="ignore")
+                raw = read_repo_text_or_raise(self.repo / file_path, self.repo, errors="ignore")
                 text = raw[:_MARKER_SCAN_BYTES].lower()
             except OSError:
                 text = ""

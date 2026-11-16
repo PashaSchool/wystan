@@ -61,6 +61,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -815,7 +816,7 @@ def _resolve_py_module(
 
 def _read_text(repo_path: Path, rel: str) -> str | None:
     try:
-        return (repo_path / rel).read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(repo_path / rel, repo_path, errors="ignore")
     except OSError:
         return None
 

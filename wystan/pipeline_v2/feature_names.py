@@ -22,14 +22,23 @@ every name stays as it is.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from typing import Any, Callable, Iterable
 
 from wystan.cache.backend import CacheKind
+from wystan.pipeline_v2.memory_key import memory_key
+from wystan.pipeline_v2.module_scope import ModuleScopes
 from wystan.pipeline_v2.ownership_moves import conservation_report, product_layer_total
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
+from wystan.pipeline_v2.request_scopes import (
+    REPOSITORY_ROOT,
+    feature_scopes,
+    group_by_scope,
+    scope_label,
+    scope_lookup,
+    scoped_product_name,
+)
 from wystan.pipeline_v2.unnameable_demote import demote_unnameable_features
 
 __all__ = [
@@ -174,9 +183,14 @@ def is_supported_name(name: str, row: dict[str, Any]) -> bool:
     return all(covered)
 
 
-def _cache_key(row: dict[str, Any]) -> str:
+def _cache_key(row: dict[str, Any], scope: str = REPOSITORY_ROOT) -> str:
     payload = {"v": _CACHE_VERSION, "role": ROLE, "model": MODEL_ID, "system": SYSTEM_PROMPT, "row": row}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    if scope != REPOSITORY_ROOT:
+        # A module's answer was read beside the module's features only: it is
+        # kept apart from a repository feature with the same evidence.
+        payload["module_scope"] = scope
+    # Any module path hashes, a byte that is not UTF-8 included.
+    return memory_key(payload)
 
 
 def _remembered(cache: Any, key: str) -> dict[str, str] | None:
@@ -275,6 +289,30 @@ def _ask(
     return answers
 
 
+def _ask_per_scope(
+    rows: dict[str, dict[str, Any]], product: str, product_features: list[Any],
+    scope_of: Callable[[str], str],
+    ask: Callable[[dict[str, dict[str, Any]], str, list[Any]], dict[str, dict[str, str]]],
+) -> tuple[dict[str, dict[str, str]], dict[str, int] | None]:
+    """Answers asked per module scope (``request_scopes``, rule S1), and the
+    candidates asked per scope when there was more than one (else ``None``).
+
+    A scope's request lists that scope's product features only and, for a
+    nested module, names the module beside the product. The root scope's
+    request is the one composed when no module exists.
+    """
+    groups = group_by_scope(sorted(rows), scope_of)
+    answers: dict[str, dict[str, str]] = {}
+    for scope, slugs in groups:
+        listed = [f for f in product_features if scope_of(f.name) == scope]
+        answers.update(ask(
+            {slug: rows[slug] for slug in slugs}, scoped_product_name(product, scope), listed,
+        ))
+    if len(groups) < 2:
+        return answers, None
+    return answers, {scope_label(scope): len(slugs) for scope, slugs in groups}
+
+
 class _Applier:
     """Turns agreed answers into changes, each behind its guard."""
 
@@ -356,8 +394,12 @@ def run_feature_names(
     joins_prefix: str,
     llm: dict[str, Any] | None = None,
     client_factory: Callable[[], Any | None] = _default_client_factory,
+    module_scopes: ModuleScopes | None = None,
 ) -> dict[str, Any]:
-    """Rename or reject non-authored product features in place; telemetry."""
+    """Rename or reject non-authored product features in place; telemetry.
+
+    ``module_scopes`` is the scan's record of nested modules: each module's
+    candidates are asked in requests of their own (rule S1)."""
     llm = llm or {}
     telemetry: dict[str, Any] = {
         "applied": False, "reason": None, "model": MODEL_ID, "candidates": 0, "asked": 0,
@@ -371,7 +413,11 @@ def run_feature_names(
         telemetry["reason"] = "no_candidate"
         return telemetry
     cache = llm.get("cache")
-    answers = {slug: known for slug, row in rows.items() if (known := _remembered(cache, _cache_key(row)))}
+    scope_of = scope_lookup(feature_scopes(product_features, developer_features, module_scopes))
+    answers = {
+        slug: known for slug, row in rows.items()
+        if (known := _remembered(cache, _cache_key(row, scope_of(slug))))
+    }
     telemetry["cache_hits"] = len(answers)
     unknown = {slug: row for slug, row in rows.items() if slug not in answers}
     if unknown:
@@ -380,16 +426,25 @@ def run_feature_names(
             telemetry["reason"] = "no_key"
         else:
             telemetry["asked"] = len(unknown)
-            fresh = _ask(unknown, product, product_features, llm, client, telemetry)
+            fresh, by_scope = _ask_per_scope(
+                unknown, product, product_features, scope_of,
+                lambda batch, named, listed: _ask(batch, named, listed, llm, client, telemetry),
+            )
+            if by_scope is not None:
+                # Only when a request was split: without a nested module the
+                # telemetry stays as it was.
+                telemetry["asked_by_scope"] = by_scope
             for slug, answer in fresh.items():
-                _remember(cache, _cache_key(rows[slug]), answer)
+                _remember(cache, _cache_key(rows[slug], scope_of(slug)), answer)
             answers.update(fresh)
     before = product_layer_total(product_features, developer_features)
     counts = (len(user_flows), len(flows))
     _Applier(product_features, rows, violations, joins_prefix, telemetry).apply(answers)
     if telemetry["not_a_capability"]:
         telemetry["removal"] = demote_unnameable_features(
-            product_features, developer_features, user_flows, flows)
+            product_features, developer_features, user_flows, flows,
+            # Rule S2: what leaves a rejected feature stays in its module scope.
+            module_scopes=module_scopes)
     telemetry["conservation"] = conservation_report(
         before, product_layer_total(product_features, developer_features),
         journeys=(counts[0], len(user_flows)), flows=(counts[1], len(flows)),

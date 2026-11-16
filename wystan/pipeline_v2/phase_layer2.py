@@ -575,12 +575,17 @@ def run_layer2_phase(
     # sub-features inherit the anchor's product_feature_id so product paths
     # are byte-stable. Deterministic, no LLM, scale-invariant (grain floor =
     # repo median feature size). Default ON; WYSTAN_STAGE_8_9_SUBDECOMPOSE=0.
+    # The rows of a nested module are measured among themselves, so the
+    # stage is told which rows those are (recorded by Stage 2).
+    module_scopes = getattr(ctx, "module_scopes", None)
     # A flat oversized row has no directory to split along; the route sites
     # let 8.9 group its files by the route group they handle instead.
     # The capture carries them only where an extractor declared route sites,
     # so every other repository's capture is what it was.
     route_sites = list(route_sites or [])
-    stage_8_9_input: dict[str, Any] = {"features": features}
+    stage_8_9_input: dict[str, Any] = {
+        "features": features, "module_scopes": module_scopes,
+    }
     if route_sites:
         stage_8_9_input["route_sites"] = route_sites
         stage_8_9_input["repo_path"] = str(ctx.repo_path)
@@ -588,6 +593,7 @@ def run_layer2_phase(
     with StageLogger(run_dir, 8, "anchor_subdecompose") as log8_9:
         subdecompose_result = subdecompose_workspace_anchors(
             features,
+            module_scopes=module_scopes,
             route_split=RouteSplitInput(route_sites, Path(ctx.repo_path)),
         )
         stage_8_9_telemetry = subdecompose_result.as_telemetry()
@@ -622,6 +628,7 @@ def run_layer2_phase(
         "features": features,
         "ctx": ctx,
         "model_id": model_id,
+        "module_scopes": module_scopes,
     })
     with StageLogger(run_dir, 8, "llm_component_split") as log8_9_5:
         # model_id (the scan's RESOLVED model) — the stage's bare "haiku"
@@ -634,6 +641,7 @@ def run_layer2_phase(
             model=model_id,
             cache_backend=getattr(ctx, "cache_backend", None),
             repo_slug=getattr(ctx, "slug", None) or ctx.repo_path.name,
+            module_scopes=module_scopes,
         )
         stage_8_9_5_telemetry = llm_split_result.as_telemetry()
         log8_9_5.info(

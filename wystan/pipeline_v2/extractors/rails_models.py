@@ -100,7 +100,7 @@ class RailsModelsExtractor(RailsPatternExtractor):
         buckets: dict[str, dict] = {}
 
         for path in files:
-            text = read_text(ctx.repo_path / path)
+            text = read_text(ctx.repo_path / path, ctx.repo_path)
             if not text:
                 continue
             class_matches = class_re.findall(text)

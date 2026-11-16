@@ -61,6 +61,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.pipeline_v2.stage_6_9965_token_journey_rehome import (
@@ -272,7 +273,7 @@ def _transport_fanin(repo: "Path", pkg_root: str, leaf: str,
                for sd in surface_dirs):
             continue
         try:
-            text = f.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(f, repo, errors="ignore")
         except OSError:
             continue
         for line in text.splitlines():

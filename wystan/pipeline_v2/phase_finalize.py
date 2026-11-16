@@ -2765,6 +2765,36 @@ def run_finalize_phase(
             run_dir=run_dir,
         )
     scan_meta["stage_6_96_impact"] = dict(impact_telemetry)
+    # A partial clone scans with what its object store holds (the engine
+    # never fetches) and says so; absent for an ordinary clone.
+    from wystan.pipeline_v2.partial_clone_meta import partial_clone_record
+
+    partial = partial_clone_record(ctx.repo_path, impact_telemetry)
+    if partial is not None:
+        scan_meta["partial_clone"] = partial
+    # An index git cannot read without writing the clone (split, sparse,
+    # oversized, not a file) is not read: no dirty-tree detection. Absent
+    # for an ordinary clone.
+    from wystan.analyzer.git_index import index_refusal
+
+    index_unread = index_refusal(str(ctx.repo_path))
+    if index_unread:
+        scan_meta["index_unread"] = index_unread
+    # Submodules whose git directory lies outside the scan root: state
+    # unknown (not read), neither moved nor clean. Absent when there are none.
+    from wystan.analyzer.git_runner import GitAnswerUnavailable
+    from wystan.analyzer.git_submodules import unread_submodules
+
+    try:
+        submodules_unread = unread_submodules(str(ctx.repo_path))
+        if submodules_unread:
+            scan_meta["submodules_unread"] = {
+                "paths": submodules_unread, "reason": "git directory outside the scan root",
+            }
+    except GitAnswerUnavailable as exc:
+        # The pointer listing itself was refused (an unread index): no
+        # submodule's state is known, which is not "no submodules".
+        scan_meta["submodules_unread"] = {"paths": "all", "reason": str(exc)}
 
     # ── LLM-health stamp (fail LOUD on auth-dead scans) ────────────
     # Must run AFTER the last LLM-bearing stage (6.7b above) and BEFORE
@@ -2956,7 +2986,8 @@ def run_finalize_phase(
     if shared_leaf_consistency_enabled() and anchored_mint_applied:
         try:
             slc_tele = enforce_shared_leaf_consistency(
-                features, product_features, lineage_result.routes_index)
+                features, product_features, lineage_result.routes_index,
+                module_scopes=getattr(ctx, "module_scopes", None))
             scan_meta["shared_leaf_consistency"] = slc_tele
         except Exception as exc:  # noqa: BLE001 — never break a scan
             scan_meta.setdefault("warnings", []).append(
@@ -3832,6 +3863,9 @@ def run_finalize_phase(
                     "keeper_on": keeper_enabled(),
                     "repo_root": ctx.repo_path,
                 },
+                # Rule S2: a journey folds only into a journey of its own
+                # module scope.
+                module_scopes=getattr(ctx, "module_scopes", None),
             )
             _gaps = _sq_tele.get("coverage_gaps")
             # KEY-PRESENCE contract: the pass returns None in off mode (key
@@ -4022,6 +4056,9 @@ def run_finalize_phase(
             try:
                 _hag_tele = apply_home_affinity_gate(
                     user_flows, features, product_features,
+                    # Rule S2: better homes only inside a journey's own
+                    # module scope.
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 _orphan_gap_rows, _og_tele = build_orphan_flow_gaps(
                     user_flows, features, product_features,
@@ -4623,6 +4660,9 @@ def run_finalize_phase(
                     # (mirror of the 6.7d backstop's ``pf_flows``). Ignored
                     # while WYSTAN_TJR_DONOR_GUARD is off.
                     developer_features=features,
+                    # Rule S2: targets only inside a journey's own module
+                    # scope.
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 scan_meta["token_journey_rehome"] = _tjr_tele
                 log_tjr.info(
@@ -4887,6 +4927,7 @@ def run_finalize_phase(
                         "cache": getattr(ctx, "cache_backend", None),
                         "llm_health": llm_health,
                     },
+                    module_scopes=getattr(ctx, "module_scopes", None),
                 )
                 scan_meta["feature_names"] = _fn_tele
                 log_fn.info(
@@ -5722,7 +5763,9 @@ def run_finalize_phase(
             run_orphan_uf_path_attach,
         )
         _oup_tele = run_orphan_uf_path_attach(
-            product_features, features, user_flows, list(bipartite.flows))
+            product_features, features, user_flows, list(bipartite.flows),
+            # Rule S2: only owners of the journey's own module scope vote.
+            module_scopes=getattr(ctx, "module_scopes", None))
         if _oup_tele is not None:
             scan_meta["orphan_uf_path_attach"] = _oup_tele
     except Exception as exc:  # noqa: BLE001 — attach never breaks a scan
@@ -6291,7 +6334,9 @@ def run_finalize_phase(
     try:
         from wystan.pipeline_v2.orphan_uf_path_attach import run_orphan_uf_owner_attach
         scan_meta["orphan_uf_owner_attach"] = run_orphan_uf_owner_attach(
-            product_features, features, user_flows, list(bipartite.flows))
+            product_features, features, user_flows, list(bipartite.flows),
+            # Rule S2: only owners of the journey's own module scope count.
+            module_scopes=getattr(ctx, "module_scopes", None))
     except Exception as exc:  # noqa: BLE001 — attach never breaks a scan
         scan_meta.setdefault("warnings", []).append(
             f"orphan-uf owner-attach failed ({exc}); orphans left"
@@ -6330,6 +6375,14 @@ def run_finalize_phase(
     except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks a scan
         scan_meta.setdefault("warnings", []).append(
             f"code-lines settle failed ({exc}); loc includes non-code files")
+
+    # Reads the guarded reader refused (links out of the scanned tree, FIFOs,
+    # files over their cap): they reached their call sites as unreadable
+    # files, so the map shows them here. Absent when nothing was refused.
+    from wystan.analyzer.repo_read_tally import repository_reads_block
+    repository_reads = repository_reads_block(ctx.repo_path)
+    if repository_reads is not None:
+        scan_meta["repository_reads"] = repository_reads
 
     # ── Stage 7 — output ───────────────────────────────────────────
     from wystan import __version__ as _engine_version  # late import

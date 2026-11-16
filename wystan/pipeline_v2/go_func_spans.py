@@ -22,6 +22,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from wystan.analyzer.safe_read import read_repo_bytes
+
 __all__ = ["func_spans", "handler_span", "resolve_handler_loc"]
 
 #: top-level functions/methods: ``func Name(`` / ``func (recv T) Name(``.
@@ -79,11 +81,15 @@ def func_spans(text: str) -> dict[str, tuple[int, int]]:
 
 
 @lru_cache(maxsize=256)
-def _file_spans(abs_path: str) -> dict[str, tuple[int, int]]:
-    try:
-        text = Path(abs_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+def _file_spans(abs_path: str, repo_root: str) -> dict[str, tuple[int, int]]:
+    """Spans of one file, read through ``analyzer.safe_read`` (a regular
+    file inside the repository, at most ``MAX_FILE_BYTES``); ``{}`` when
+    refused, as when unreadable. No binary sniff: ``dev`` read every file
+    whole. Universal newlines, as ``read_text``."""
+    read = read_repo_bytes(abs_path, repo_root, stop_at_binary=False)
+    if read.data is None:
         return {}
+    text = read.data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     return func_spans(text)
 
 
@@ -109,13 +115,13 @@ def handler_span(
     if not leaf:
         return None
     reg_abs = Path(repo_path) / rel_file
-    sp = _file_spans(str(reg_abs)).get(leaf)
+    sp = _file_spans(str(reg_abs), str(repo_path)).get(leaf)
     if sp:
         return (str(rel_file), sp[0], sp[1])
     for sib in _package_files(str(reg_abs.parent)):
         if sib == str(reg_abs):
             continue
-        sp = _file_spans(sib).get(leaf)
+        sp = _file_spans(sib, str(repo_path)).get(leaf)
         if sp:
             return (sib, sp[0], sp[1])
     return None

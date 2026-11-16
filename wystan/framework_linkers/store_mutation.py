@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import re
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -287,10 +288,9 @@ class _LinkerTelemetry:
 
 
 @lru_cache(maxsize=4096)
-def _read_text_cached(abs_path: str) -> str | None:
+def _read_text_cached(abs_path: str, repo_root: str) -> str | None:
     try:
-        with open(abs_path, "r", encoding="utf-8") as fp:
-            return fp.read()
+        return read_repo_text_or_raise(abs_path, repo_root)
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -345,7 +345,7 @@ def _detect_libraries(ctx: "ScanContext") -> set[str]:
                 continue
             if "/node_modules/" in "/" + posix:
                 continue
-            text = _read_text_cached(str(repo_path / posix))
+            text = _read_text_cached(str(repo_path / posix), str(repo_path))
             if text is None:
                 continue
             try:
@@ -687,7 +687,7 @@ class StoreMutationLinker:
             if "/node_modules/" in "/" + posix:
                 continue
             abs_path = str(ctx.repo_path / posix)
-            text = _read_text_cached(abs_path)
+            text = _read_text_cached(abs_path, str(ctx.repo_path))
             if text is None:
                 continue
 
@@ -762,7 +762,7 @@ class StoreMutationLinker:
         links: list[FrameworkLink] = []
         for rel in caller_files:
             abs_path = str(ctx.repo_path / rel)
-            text = _read_text_cached(abs_path)
+            text = _read_text_cached(abs_path, str(ctx.repo_path))
             if text is None:
                 self.telemetry.files_unreadable += 1
                 continue

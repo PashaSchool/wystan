@@ -9,8 +9,9 @@ Public API:
     run_watcher(repo_path, ...) — foreground loop
     start_daemon(repo_path, ...) — background (fork + nohup)
     stop_daemon(repo_path) — kill background watcher
+    last_failure(repo_path) — why the last background watcher stopped
 """
 
-from wystan.watch.daemon import run_watcher, start_daemon, stop_daemon, watcher_status
+from wystan.watch.daemon import last_failure, run_watcher, start_daemon, stop_daemon, watcher_status
 
-__all__ = ["run_watcher", "start_daemon", "stop_daemon", "watcher_status"]
+__all__ = ["last_failure", "run_watcher", "start_daemon", "stop_daemon", "watcher_status"]

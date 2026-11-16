@@ -70,10 +70,12 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterable
 
 from wystan.models.types import Feature, FeatureFlowEdge, Flow
+from wystan.pipeline_v2.module_scope import ModuleScopes, grain_scopes
 
 if TYPE_CHECKING:
     from wystan.pipeline_v2.run_logger import StageLogger
@@ -480,10 +482,130 @@ def _disambiguated_name(
     return f"{base_no_suffix}-{suffix}-flow" if suffix else f"{base_no_suffix}-flow"
 
 
-def _disambiguate_colliding_flow_names(features: list[Feature]) -> dict[str, int]:
+# First number tried when every qualified name is taken ("x", "x-2").
+_FIRST_ORDINAL = 2
+_NO_COLLISIONS = {
+    "naming_collision_groups": 0,
+    "flows_disambiguated_by_context": 0,
+    "flows_disambiguated_by_ordinal": 0,
+}
+# Telemetry key of the cross-scope step. Written only when a flow was
+# qualified, so a repository without nested modules reports what it
+# always reported.
+_QUALIFIED_BY_MODULE = "flows_qualified_by_module"
+
+
+def _disambiguate_colliding_flow_names(
+    features: list[Feature], module_scopes: ModuleScopes | None = None,
+) -> dict[str, int]:
     """Rename genuinely-distinct flows that share a generic name, IN PLACE.
 
-    Operates on the post-collapse feature list (Steps 0 / 0.5 already removed
+    A flow name is unique inside its module scope (``module_scope``): the
+    flows of the rows a repository has without its nested modules are
+    told apart among themselves (:func:`_disambiguate_within_scope`), and
+    so are the flows of the rows each nested module added. A flow of a
+    module's row whose name is also used outside that scope then takes
+    the module's name (:func:`_qualify_against_other_scopes`).
+
+    Why per scope: the uuid of a flow is made from its name. With one
+    namespace for the whole repository, a new flow in a nested module
+    that happened to share a generic name renamed the old flow (its
+    context was inserted) and so gave it a new uuid; the journeys built
+    on the old id lost a member. The flows of every row that existed
+    before the module was read — rows inside the module's directory
+    included — keep the names, and therefore the uuids, they had.
+    ``flows[]`` names stay unique across the repository.
+
+    Without nested modules there is one scope and this is the historical
+    repository-wide pass. Returns telemetry (collision groups, flows
+    renamed by context, by ordinal and — only when non-zero — by module).
+    """
+    scopes = grain_scopes([feat.paths for feat in features], module_scopes)
+    flows_of: dict[str, list[Flow]] = {}
+    for feat, scope in zip(features, scopes):
+        flows_of.setdefault(scope, []).extend(getattr(feat, "flows", None) or [])
+    telemetry = dict(_NO_COLLISIONS)
+    # Sorted: the repository's own scope ("") first, then modules by path.
+    for scope in sorted(flows_of):
+        for key, count in _disambiguate_within_scope(flows_of[scope]).items():
+            telemetry[key] += count
+    qualified = _qualify_against_other_scopes(flows_of)
+    if qualified:
+        telemetry[_QUALIFIED_BY_MODULE] = qualified
+    return telemetry
+
+
+def _module_qualified_names(base: str, module_root: str) -> list[str]:
+    """Names for a nested-module flow whose name is used elsewhere.
+
+    The module's directory name first, then its whole path (two modules
+    can end in the same word).
+    """
+    leaf = _slugify(module_root.rsplit("/", 1)[-1]).split("-")
+    whole = _slugify(module_root).split("-")
+    names = [
+        _disambiguated_name(base, [t for t in tokens if t], trim=False)
+        for tokens in (leaf, whole)
+    ]
+    return list(dict.fromkeys(names))
+
+
+def _qualify_against_other_scopes(flows_of: dict[str, list[Flow]]) -> int:
+    """Qualify nested-module flows whose name is used outside the module.
+
+    The flows outside every nested module are never renamed here: their
+    names are the ones the repository had before the module was read. A
+    contested flow of a module takes ``<name>-<module>-flow``; whether
+    it is contested is decided from the names as they stand before this
+    step, so two modules sharing a name are both qualified and the
+    outcome does not depend on which is visited first. Returns the
+    number of flows renamed.
+    """
+    in_use: Counter[str] = Counter(
+        _name_key(fl.name) for flows in flows_of.values() for fl in flows
+    )
+    taken = set(in_use)
+    next_ordinal: dict[str, int] = {}
+    renamed = 0
+    for scope in sorted(scope for scope in flows_of if scope):
+        own = Counter(_name_key(fl.name) for fl in flows_of[scope])
+        for fl in flows_of[scope]:
+            key = _name_key(fl.name)
+            if in_use[key] == own[key]:
+                continue  # used inside this module only
+            name = _first_free_flow_name(
+                _module_qualified_names(_strip_flow_suffix(fl.name), scope),
+                taken, next_ordinal,
+            )
+            fl.name = name
+            taken.add(_name_key(name))
+            renamed += 1
+    return renamed
+
+
+def _first_free_flow_name(
+    candidates: list[str], taken: set[str], next_ordinal: dict[str, int],
+) -> str:
+    """First candidate nobody holds; else the last one, numbered.
+
+    ``next_ordinal`` remembers per base the number to try next, so many
+    flows contesting one name cost one step each.
+    """
+    for name in candidates:
+        if _name_key(name) not in taken:
+            return name
+    base = _strip_flow_suffix(candidates[-1])
+    ordinal = next_ordinal.get(base, _FIRST_ORDINAL)
+    while _name_key(f"{base}-{ordinal}-flow") in taken:
+        ordinal += 1
+    next_ordinal[base] = ordinal + 1
+    return f"{base}-{ordinal}-flow"
+
+
+def _disambiguate_within_scope(flows: list[Flow]) -> dict[str, int]:
+    """Make the names of ``flows`` (one module scope) unique, IN PLACE.
+
+    ``flows`` are post-collapse (Steps 0 / 0.5 already removed
     byte-identical duplicates, so every remaining same-named pair is a TRUE
     naming collision between distinct flows). Two deterministic passes:
 
@@ -496,12 +618,12 @@ def _disambiguate_colliding_flow_names(features: list[Feature]) -> dict[str, int
       instead of being forced to an ordinal. Flows whose name is unique are
       untouched (byte-identical output).
 
-      Pass B — recompute the global name multiset; any name STILL shared by
+      Pass B — recompute the name multiset; any name STILL shared by
       >1 flow (same feature + same name, or a context-insertion that happened
       to re-collide with a pre-existing name) gets a minimal stable ordinal
       (``-2``, ``-3``, …) inserted before ``-flow``, ordered by
       ``(entry_point_line, id, original index)``. The first occurrence keeps
-      the no-ordinal form. This guarantees ``flows[]`` names are unique.
+      the no-ordinal form. This guarantees the names are unique.
 
     The Flow objects are SHARED between ``Feature.flows`` and the top-level
     projection built later in this stage, so mutating ``flow.name`` here once
@@ -513,15 +635,8 @@ def _disambiguate_colliding_flow_names(features: list[Feature]) -> dict[str, int
     Returns telemetry (collision groups, flows renamed by context, flows
     renamed by ordinal).
     """
-    flows: list[Flow] = [
-        fl for feat in features for fl in (getattr(feat, "flows", None) or [])
-    ]
     if not flows:
-        return {
-            "naming_collision_groups": 0,
-            "flows_disambiguated_by_context": 0,
-            "flows_disambiguated_by_ordinal": 0,
-        }
+        return dict(_NO_COLLISIONS)
 
     # ── Pass A — context insertion on genuine collisions ────────────────
     groups: dict[str, list[Flow]] = {}
@@ -651,6 +766,7 @@ def stage_5_5_bipartite(
     features: list[Feature],
     *,
     log: "StageLogger | None" = None,
+    module_scopes: ModuleScopes | None = None,
 ) -> Stage5_5Result:
     """Compute the bipartite store + blast-radius metrics.
 
@@ -659,6 +775,11 @@ def stage_5_5_bipartite(
             flows already attached via ``Feature.flows[]``.
         log: optional :class:`StageLogger` for per-edge / per-blast
             structured events.
+        module_scopes: the scan's record of the rows that belong to a
+            nested module (``module_scope.ModuleScopes``, made by
+            Stage 2). Flow names are made unique inside each module
+            scope; ``None`` or empty — the default — is one scope for
+            the whole repository.
 
     Returns:
         A :class:`Stage5_5Result` with the mutated feature list (so
@@ -718,7 +839,7 @@ def stage_5_5_bipartite(
     # (Step 2) so flow.id — and the later lineage uuid + expander short_label /
     # display_name — all derive from the disambiguated name. The flow COUNT is
     # unchanged; only colliding names change; unique names are byte-untouched.
-    disambig = _disambiguate_colliding_flow_names(features)
+    disambig = _disambiguate_colliding_flow_names(features, module_scopes)
 
     # ── Step 1 — reverse-index paths to feature names ───────────────
     path_to_features = _build_path_to_features(features)
@@ -870,6 +991,8 @@ def stage_5_5_bipartite(
         "max_shared_with_flows": max_shared_with_flows,
         "max_shared_with_features": max_shared_with_features,
     }
+    if _QUALIFIED_BY_MODULE in disambig:
+        telemetry[_QUALIFIED_BY_MODULE] = disambig[_QUALIFIED_BY_MODULE]
 
     return Stage5_5Result(
         features=features,

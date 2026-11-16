@@ -40,6 +40,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -73,8 +74,7 @@ def _ondisk_loc(paths: list[str], repo: "Path") -> int:
     total = 0
     for p in paths:
         try:
-            total += len((repo / p).read_text(encoding="utf-8",
-                                              errors="ignore").splitlines())
+            total += len(read_repo_text_or_raise(repo / p, repo, errors="ignore").splitlines())
         except OSError:
             continue
     return total
@@ -111,7 +111,7 @@ def _renders_component(path: str, repo: "Path | None") -> bool:
     if repo is None:
         return True  # no live tree (synthetic) — vacuously "renders"
     try:
-        text = (repo / path).read_text(encoding="utf-8", errors="ignore")
+        text = read_repo_text_or_raise(repo / path, repo, errors="ignore")
     except OSError:
         return True
     if re.search(r"\bdefineComponent\b", text):

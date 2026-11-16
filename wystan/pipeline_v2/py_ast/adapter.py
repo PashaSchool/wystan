@@ -37,6 +37,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_bytes_or_raise
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 # REUSE the canonical shapes + the language-agnostic provenance projector
@@ -239,7 +240,7 @@ def _load_real_fns() -> _PipelineFns | None:
             raw = source
             if raw is None:
                 try:
-                    raw = Path(repo_root, rel).read_bytes()
+                    raw = read_repo_bytes_or_raise(Path(repo_root, rel), repo_root)
                 except OSError:
                     return None
             elif isinstance(raw, str):

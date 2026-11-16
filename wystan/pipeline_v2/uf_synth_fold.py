@@ -566,12 +566,28 @@ def _undressed_pf_display(pf: Any, key: str) -> str:
     return strip_qualifier_tokens(disp, stops) if stops else disp
 
 
+def _family_scopes(
+    eligible: list[Any], members: Mapping[str, list[Any]], module_scopes: Any,
+) -> dict[str, str]:
+    """Rule S2 (:mod:`rehome_scopes`): ``{journey id: module scope}`` from
+    the files of its member flows. Journeys fold only into a journey of
+    their own scope; without a nested module every journey is in the root
+    scope and the families are those the planner always built."""
+    from wystan.pipeline_v2.rehome_scopes import flow_files
+    from wystan.pipeline_v2.request_scopes import scopes_of_items
+
+    ids = [_uf_id(u) for u in eligible]
+    files = [[p for fl in members.get(uid, []) for p in flow_files(fl)] for uid in ids]
+    return dict(zip(ids, scopes_of_items(files, module_scopes)))
+
+
 def plan_uf_synth(
     user_flows: list[Any],
     flows: list[Any],
     product_features: list[Any],
     verbs: frozenset[str],
     fold_exempt_ids: frozenset[str] = frozenset(),
+    module_scopes: Any = None,
 ) -> UfSynthPlan:
     """Compute the L-C1..L-C4 plan. Deterministic (input order + stable winner
     tiebreaks). Applies at most one fold per UF.
@@ -586,6 +602,12 @@ def plan_uf_synth(
     quietly UNDOES the lattice split and re-mints the giant catch-all
     (RefApp UF-022 7 -> 47, giant-catchall 2 -> 5). Empty set (every caller
     outside the Seg A world) = byte-identical planning.
+
+    ``module_scopes`` (rule S2): the echo and same-head families are formed
+    per product feature AND module scope, so a journey of a nested module
+    never folds into a repository journey (nor the reverse) and a
+    repository journey's family is the one it has without the module.
+    ``None`` or an empty record: one scope, byte-identical planning.
     """
     plan = UfSynthPlan()
     pf_disp: dict[str, str] = {}
@@ -640,11 +662,12 @@ def plan_uf_synth(
                 plan.rename[_uf_id(uf)] = fixed
                 plan.reasons[_uf_id(uf)] = "lc2_verb_stutter"
 
-    by_pf: dict[str, list[Any]] = defaultdict(list)
+    scope_of = _family_scopes(eligible, members, module_scopes)
+    by_pf: dict[tuple[str, str], list[Any]] = defaultdict(list)
     for uf in eligible:
         pfid = str(getattr(uf, "product_feature_id", "") or "")
         if pfid:  # a UF with no PF binding cannot echo a PF
-            by_pf[pfid].append(uf)
+            by_pf[(pfid, scope_of[_uf_id(uf)])].append(uf)
 
     def _has_lead_verb(name: str) -> bool:
         toks = _toks(name)
@@ -688,7 +711,7 @@ def plan_uf_synth(
             _uf_id(u),
         ))
 
-    for pf_id, ufs in by_pf.items():
+    for (pf_id, _scope), ufs in by_pf.items():
         disp = pf_disp.get(pf_id, "")
 
         # L-C1 — fold a PF-IDENTITY echo (noun-phrase == PF display, never the
@@ -771,6 +794,7 @@ def apply_uf_synth_fold(
     verbs: frozenset[str],
     fold_exempt_ids: frozenset[str] = frozenset(),
     max_winner_members: int | None = None,
+    module_scopes: Any = None,
 ) -> dict[str, Any]:
     """Apply the plan IN PLACE: rename (L-C2), fold echoes/families into the
     winner (union member_flow_ids — conservation), drop folded rows. Only ever
@@ -781,10 +805,12 @@ def apply_uf_synth_fold(
     was a readable 19 at regrain time, then bar-blind folds grew it to an
     unreadable 32 AFTER the split pass had already run. ``None`` (every
     caller outside the Seg A world) = unlimited, byte-identical behavior.
+    ``module_scopes`` — see :func:`plan_uf_synth` (rule S2).
     Returns telemetry."""
     plan = plan_uf_synth(
         user_flows, flows, product_features, verbs,
         fold_exempt_ids=fold_exempt_ids,
+        module_scopes=module_scopes,
     )
     by_id = {_uf_id(u): u for u in user_flows}
     folds_refused_bar = 0

@@ -73,12 +73,14 @@ import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any, Mapping
 
 from wystan.pipeline_v2.cli_commands import (  # noqa: F401 — re-export
     CLI_ANCHOR_SUPPLY_ENV,
     CliCluster,
     cli_anchor_supply_enabled,
+    cli_tool_name,
     cluster_of_paths,
     detect_cli_clusters,
     detect_cli_clusters_cached,
@@ -1572,7 +1574,7 @@ def _files_loc(
     total = 0
     for rel in rel_paths:
         if rel not in cache:
-            cache[rel] = count_file_loc(repo_root / rel, rel)
+            cache[rel] = count_file_loc(repo_root, rel)
         total += cache[rel]
     return total
 
@@ -3034,8 +3036,8 @@ def run_anchored_mint(
                 if p.stat().st_size > 1_500_000:  # nav_parent's read cap
                     _d_text_cache[rel] = None
                 else:
-                    _d_text_cache[rel] = p.read_text(
-                        encoding="utf-8", errors="ignore")
+                    _d_text_cache[rel] = read_repo_text_or_raise(
+                        p, Path(getattr(ctx, "repo_path", ".")), errors="ignore")
             except OSError:
                 _d_text_cache[rel] = None
         return _d_text_cache[rel]
@@ -3221,6 +3223,11 @@ def run_anchored_mint(
             tele["headless_standalone_denied"] = (
                 tele.get("headless_standalone_denied", 0) + 1)
             return None
+        # The standalone tile is named after the unit; a command tool's
+        # unit is named after its package directory, the tool is not.
+        _tool = _cli_tool_tile(f)
+        if _tool is not None:
+            return _tool
         mintable.add(cid)
         bar_by_anchor[cid] = None
         tele["walk_evidence_dev_mint"] = (
@@ -3323,6 +3330,9 @@ def run_anchored_mint(
         hydrogen/meilisearch/novu/twenty/hoppscotch at ``lineage``) and
         never reaches this rung — those boards stay byte-identical.
 
+        One more caller since KS121: ``_cli_tool_tile``, for a unit that
+        was granted a standalone tile under a name that is not the tool's.
+
         Returns ``(cid, provenance)`` or ``None`` (caller keeps its own
         honest disposition — the rung never deletes a fallback path).
         """
@@ -3336,9 +3346,7 @@ def run_anchored_mint(
         cid = c.canonical_id
         owned = frozenset(owned_by_dev.get(f.name) or ())
         anchor = anchor_by_id.get(cid)
-        base = (c.bin_name or (c.module.rsplit("/", 1)[-1]
-                               if c.module not in ("", ".") else "")
-                or f.name)
+        base = cli_tool_name(c) or f.name
         if anchor is None:
             anchor_by_id[cid] = SpineAnchor(
                 canonical_id=cid,
@@ -3360,6 +3368,40 @@ def run_anchored_mint(
         tele["cli_anchor_supply_devs"] = (
             tele.get("cli_anchor_supply_devs", 0) + 1)
         return cid, "mint:cli-anchor"
+
+    def _cli_tool_tile(f: "Feature") -> tuple[str, str] | None:
+        """The command tool's anchor for a unit that was about to stand
+        alone under its own name.
+
+        A flowful unit whose flow entries no anchor claims is granted a
+        standalone tile ``dev:<unit>`` in a repository that has pages. For
+        the unit that registers a tool's commands the unit name is the
+        package directory (``cmd``, ``commands``), which is not what the
+        product calls anything: the tile was minted, found to have no user
+        surface, judged plumbing and removed, and the tool had no product
+        feature. It also never reached the command-group pass, which reads
+        only features anchored at a tool. Where the tile is refused (a
+        headless repository, a unit under the standalone floor) the unit
+        reaches the walk annex and is named after the tool: this makes the
+        granted case end the same way, wherever the tool's module sits.
+
+        A unit already named as the tool keeps its standalone tile: the
+        two anchors would carry one name, and its board is left as it is.
+
+        Returns ``None`` for a unit that registers no command of a tool,
+        and for one that bears the tool's name.
+        """
+        c = _cli_by_dev.get(f.name)
+        if c is None:
+            return None
+        tool = cli_tool_name(c)
+        if not tool or normalize_anchor_key(f.name) == normalize_anchor_key(tool):
+            return None
+        _got = _cli_supply(f)
+        if _got is not None:
+            tele["cli_supply_standalone_renamed"] = (
+                tele.get("cli_supply_standalone_renamed", 0) + 1)
+        return _got
 
     def _walk_evidence_dispose(
         f: "Feature", entries: list[str],

@@ -28,24 +28,28 @@ equals, see :mod:`wystan.pipeline_v2.scan_id_order`.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any, Callable
 
 from wystan.cache.backend import CacheKind
 
+from wystan.pipeline_v2.memory_key import memory_key
 from wystan.pipeline_v2.personas import _default_client_factory, _persona_batch
 from wystan.pipeline_v2.scan_id_order import places_among_equals
 
 __all__ = ["NameWriter", "build_name_writer"]
 
-NameWriter = Callable[[list[dict[str, Any]]], dict[str, str]]
+# ``writer(rows)`` asks about items of the repository; ``writer(rows,
+# scope=<module root>)`` about items of one nested module (rule S1).
+NameWriter = Callable[..., dict[str, str]]
 
 ROLE = "product_name_writer"
 _BATCH_SIZE = 40
 # Bump when the prompt or the meaning of a stored answer changes.
 _ITEM_CACHE_VERSION = 1
 _ITEM_ROLE = ROLE + ":item"
+# The repository's own scope: its items' keys are the keys they always had.
+_ROOT_SCOPE = ""
 
 _SYSTEM = """You name the product features and user flows of a software product
 for its product owner. You are given, per item, the text the product shows its
@@ -81,7 +85,9 @@ def _batches(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
 _POSITION_FIELD = "id"
 
 
-def _key_of(model_id: str, item: dict[str, Any], place: int = 0) -> str:
+def _key_of(
+    model_id: str, item: dict[str, Any], place: int = 0, scope: str = _ROOT_SCOPE,
+) -> str:
     payload = {
         "v": _ITEM_CACHE_VERSION, "role": _ITEM_ROLE, "model": model_id,
         "system": _SYSTEM, "item": item,
@@ -90,32 +96,43 @@ def _key_of(model_id: str, item: dict[str, Any], place: int = 0) -> str:
         # Only an item that has an equal before it carries its place, so
         # every other item keeps the key it always had.
         payload["place_among_equals"] = place
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
+    if scope != _ROOT_SCOPE:
+        # Places are counted inside one scope's call, so a module item with
+        # the evidence of a repository item would get its place and its key:
+        # it would read that answer and never be asked. Its module keeps it
+        # apart; a repository item's key does not know modules exist.
+        payload["module_scope"] = scope
+    # Any module path hashes, a byte that is not UTF-8 included.
+    return memory_key(payload)
 
 
-def _item_key(model_id: str, item: dict[str, Any], place: int = 0) -> str:
+def _item_key(
+    model_id: str, item: dict[str, Any], place: int = 0, scope: str = _ROOT_SCOPE,
+) -> str:
     """Memory key of one item's answer: its evidence, without its position.
 
-    ``place`` tells apart items whose evidence is equal (0 for the first).
+    ``place`` tells apart items whose evidence is equal (0 for the first);
+    ``scope`` is the nested module the item belongs to (none: the repository).
     """
     evidence = {k: v for k, v in item.items() if k != _POSITION_FIELD}
-    return _key_of(model_id, evidence, place)
+    return _key_of(model_id, evidence, place, scope)
 
 
-def _positional_key(model_id: str, item: dict[str, Any]) -> str:
-    """The key answers were stored under while the id was part of it."""
-    return _key_of(model_id, item)
+def _positional_key(model_id: str, item: dict[str, Any], scope: str = _ROOT_SCOPE) -> str:
+    """The key answers were stored under while the id was part of it. A
+    module item carries its module here too: no older answer is a module's."""
+    return _key_of(model_id, item, scope=scope)
 
 
-def _item_keys(model_id: str, items: list[dict[str, Any]]) -> dict[str, str]:
+def _item_keys(
+    model_id: str, items: list[dict[str, Any]], scope: str = _ROOT_SCOPE,
+) -> dict[str, str]:
     """``{item id: memory key}``, one key per item also when evidence is equal."""
     by_id = {item["id"]: item for item in items}
     evidence = {item_id: _item_key(model_id, item) for item_id, item in by_id.items()}
     places = places_among_equals(by_id, evidence.__getitem__)
     return {
-        item_id: _item_key(model_id, item, places[item_id])
+        item_id: _item_key(model_id, item, places[item_id], scope)
         for item_id, item in by_id.items()
     }
 
@@ -178,13 +195,17 @@ def build_name_writer(
     if client is None:
         return None
 
-    def write(items: list[dict[str, Any]]) -> dict[str, str]:
+    def write(items: list[dict[str, Any]], scope: str = _ROOT_SCOPE) -> dict[str, str]:
         names: dict[str, str] = {}
-        keys = _item_keys(model_id, items)
+        keys = _item_keys(model_id, items, scope)
+        # The whole-request memory is keyed by the request text only, so a
+        # module's request does not use it: its answers are kept per item,
+        # under the module's keys, and read from there.
+        request_cache = cache if scope == _ROOT_SCOPE else None
         unanswered: list[dict[str, Any]] = []
         for item in items:
             known, name = _recall(
-                cache, keys[item["id"]], _positional_key(model_id, item),
+                cache, keys[item["id"]], _positional_key(model_id, item, scope),
             )
             if not known:
                 unanswered.append(item)
@@ -194,7 +215,7 @@ def build_name_writer(
             user = "Items:\n" + json.dumps(batch, ensure_ascii=False) + "\n\nEmit the JSON now."
             parsed, _ = _persona_batch(
                 role=ROLE, client=client, model=model_id, system=_SYSTEM, user=user,
-                cost_tracker=cost_tracker, cache=cache, llm_health=llm_health,
+                cost_tracker=cost_tracker, cache=request_cache, llm_health=llm_health,
                 candidates_for_log=[item["id"] for item in batch],
             )
             proposed = (parsed or {}).get("names")

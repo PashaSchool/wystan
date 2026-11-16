@@ -35,8 +35,9 @@ Cohort selector (probe-canon pt.1 — CAUSAL, not density-first):
   census: openstatus 57 → 21 cohort rows under this condition, every
   named twenty target kept at share 0.99-1.0).
 * product-layer twin rows are filtered out (``layer == "developer"``).
-* flow-density (flows/KLOC < repo flowful median /
-  ``_OVERSIZED_MEDIAN_MULT``) is a SECONDARY filter only: it EXCLUDES
+* flow-density (flows/KLOC below ``module_scope.sparse_below`` of the
+  flowful median of the row's module scope) is a SECONDARY filter only:
+  it EXCLUDES
   healthy-density features (probe: density-first over-fires — 717
   qualifiers / 22 repos incl. anti-cases). It never includes anything
   the causal gate did not select. HEALTH-scoped, not repo-scoped:
@@ -86,7 +87,6 @@ import hashlib
 import logging
 import math
 import os
-import statistics
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -97,6 +97,13 @@ from wystan.analyzer.validation import is_test_file
 from wystan.cache.backend import CacheKind
 from wystan.llm.cost import CostTracker
 from wystan.pipeline_v2.llm_health import LlmHealth
+from wystan.pipeline_v2.module_scope import (
+    ModuleScopes,
+    grain_rulers,
+    grain_scopes,
+    peer_medians,
+    sparse_below,
+)
 from wystan.pipeline_v2.stage_3_flows import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_WORKERS,
@@ -126,10 +133,6 @@ from wystan.pipeline_v2.stage_3_flows import (
 from wystan.pipeline_v2.stage_5_5_bipartite import _flow_id
 from wystan.pipeline_v2.stage_5_postprocess import _flow_spec_to_flow
 from wystan.pipeline_v2.stage_6_97_feature_loc import count_file_loc
-from wystan.pipeline_v2.stage_8_9_anchor_subdecompose import (
-    _OVERSIZED_MEDIAN_MULT,
-    _OVERSIZED_SHARE,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +209,7 @@ _BLOB_ORIGIN_MAJORITY = 0.5
 
 def _blob_unit_paths(
     stage3_unit_snapshot: dict[str, list[str]],
+    module_scopes: ModuleScopes | None = None,
 ) -> tuple[frozenset[str], list[str]]:
     """Union of paths owned by OVERSIZED stage-3 units + their names.
 
@@ -214,29 +218,36 @@ def _blob_unit_paths(
     → 12-flow call windows), never where fine-grained units were
     derived at full visibility and later merged (openstatus api-key —
     unit-boundary drift, an honest already-answered surface). A unit
-    is oversized by the SAME Stage-8.9 contract Stage 3's chunking
-    imports (``_OVERSIZED_MEDIAN_MULT`` / ``_OVERSIZED_SHARE`` over
-    the snapshot's own sizes — constants imported, never duplicated).
+    is oversized by the SAME ruler Stage 3's chunking used on it
+    (``module_scope.grain_rulers`` over the snapshot's own sizes): among
+    the units of its own module scope. Measured over the whole
+    repository, a large nested module raised the cut above every other
+    unit, and the rows split out of those units were never given flows.
     """
-    sizes = [len(p) for p in stage3_unit_snapshot.values() if p]
-    if not sizes:
-        return frozenset(), []
-    median = max(2, int(statistics.median(sizes)))
-    total_owned = len({
-        p for paths in stage3_unit_snapshot.values() for p in paths
-    })
-    cut = max(
-        _OVERSIZED_MEDIAN_MULT * median,
-        math.ceil(_OVERSIZED_SHARE * total_owned),
+    names = list(stage3_unit_snapshot)
+    rulers = grain_rulers(
+        [stage3_unit_snapshot[name] for name in names], module_scopes,
     )
     blob_units = sorted(
-        name for name, paths in stage3_unit_snapshot.items()
-        if len(paths) > cut
+        name for name, ruler in zip(names, rulers)
+        if ruler is not None and len(stage3_unit_snapshot[name]) > ruler.cut
     )
     union: set[str] = set()
     for name in blob_units:
         union.update(stage3_unit_snapshot[name])
     return frozenset(union), blob_units
+
+
+def _flow_density(
+    feature: Any, repo_path: Path, loc_cache: dict[str, int],
+) -> float | None:
+    """Flows per KLOC of a flowful row; ``None`` when it has no flows or
+    no countable line."""
+    flows_n = len(getattr(feature, "flows", None) or [])
+    if flows_n <= 0:
+        return None
+    kloc = _feature_kloc(feature, repo_path, loc_cache)
+    return flows_n / kloc if kloc > 0 else None
 
 
 def _feature_kloc(
@@ -252,7 +263,7 @@ def _feature_kloc(
         cached = loc_cache.get(rel)
         if cached is None:
             try:
-                cached = count_file_loc(repo_path / rel, rel)
+                cached = count_file_loc(repo_path, rel)
             except Exception:  # noqa: BLE001 — a bad file is 0 loc
                 cached = 0
             loc_cache[rel] = cached
@@ -304,32 +315,37 @@ def select_rederive_cohort(
         ps = _non_test_pathset(paths)
         snapshot_sets[name] = ps
         all_unit_sets.add(ps)
-    blob_paths, sel_blob_units = _blob_unit_paths(stage3_unit_snapshot)
+    module_scopes = getattr(ctx, "module_scopes", None)
+    blob_paths, sel_blob_units = _blob_unit_paths(
+        stage3_unit_snapshot, module_scopes,
+    )
     sel.blob_units = sel_blob_units
 
-    dev_features = [
-        f for f in features
-        if getattr(f, "layer", "developer") == "developer"
-    ]
+    dev_features = sorted(
+        (
+            f for f in features
+            if getattr(f, "layer", "developer") == "developer"
+        ),
+        key=lambda x: x.name,
+    )
 
-    # Secondary filter ruler — flows/KLOC median over the repo's own
-    # FLOWFUL dev features. No flowful features ⇒ no ruler ⇒ the
-    # secondary filter abstains (it may only EXCLUDE, never include).
+    # Secondary filter ruler — flows/KLOC median over the FLOWFUL dev
+    # features of the row's own module scope (a module of dense, small
+    # handlers must not make a healthy row elsewhere look starved). No
+    # flowful peer ⇒ no ruler ⇒ the secondary filter abstains (it may
+    # only EXCLUDE, never include).
     loc_cache: dict[str, int] = {}
-    densities: list[float] = []
-    for f in sorted(dev_features, key=lambda x: x.name):
-        flows_n = len(getattr(f, "flows", None) or [])
-        if flows_n <= 0:
-            continue
-        kloc = _feature_kloc(f, repo_path, loc_cache)
-        if kloc > 0:
-            densities.append(flows_n / kloc)
-    median_density = statistics.median(densities) if densities else 0.0
-    sel.flowful_median_density = round(median_density, 4)
-    density_ceiling = median_density / _OVERSIZED_MEDIAN_MULT
+    densities = [_flow_density(f, repo_path, loc_cache) for f in dev_features]
+    owned = [list(getattr(f, "paths", None) or []) for f in dev_features]
+    peer_density = peer_medians(densities, owned, module_scopes)
+    # Telemetry keeps its meaning: the median among the rows outside
+    # every nested module, which is all rows when there is none.
+    scopes = grain_scopes(owned, module_scopes)
+    sel.flowful_median_density = round(next(
+        (m for m, scope in zip(peer_density, scopes) if not scope), 0.0,
+    ), 4)
 
-
-    for f in sorted(dev_features, key=lambda x: x.name):
+    for f, density, median_density in zip(dev_features, densities, peer_density):
         current = _non_test_pathset(getattr(f, "paths", None))
         if not current:
             continue
@@ -371,11 +387,12 @@ def select_rederive_cohort(
 
         # Secondary filter: healthy flow-density never re-runs (the
         # anti-case law — zero extra LLM calls on healthy features).
-        if median_density > 0 and flows_n > 0:
-            kloc = _feature_kloc(f, repo_path, loc_cache)
-            if kloc > 0 and (flows_n / kloc) >= density_ceiling:
-                sel.excluded_healthy_density += 1
-                continue
+        if (
+            median_density > 0 and density is not None
+            and density >= sparse_below(median_density)
+        ):
+            sel.excluded_healthy_density += 1
+            continue
 
         # Existing MIN_EXPORTS flow gate (locale-birth killer) — the
         # SAME ``_passes_flow_gate`` Stage 3 applies, not a duplicate.

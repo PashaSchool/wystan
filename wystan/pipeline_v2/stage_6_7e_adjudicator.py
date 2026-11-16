@@ -66,6 +66,7 @@ import json
 import logging
 import os
 import re
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any, Callable, Iterable, Mapping
 
 from wystan.cache.backend import CacheKind
@@ -565,7 +566,7 @@ def _read_capped(repo_root: Any, rel: str, cache: dict[str, str]) -> str:
             from pathlib import Path
             fp = Path(str(repo_root)) / rel
             if fp.is_file() and fp.stat().st_size <= _RUNG_SOURCE_MAX_FILE_BYTES:
-                text = fp.read_text(encoding="utf-8", errors="ignore")
+                text = read_repo_text_or_raise(fp, repo_root, errors="ignore")
         except OSError:
             text = ""
     cache[rel] = text

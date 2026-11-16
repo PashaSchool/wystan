@@ -70,11 +70,16 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
+from wystan.analyzer.repo_reader import SNIFF_BYTES, read_repo_bytes, repo_path, require_repo_root
 from wystan.pipeline_v2.non_code_file import non_code_class
 from wystan.pipeline_v2.owner_oracle import elect_primary_owners
 from wystan.pipeline_v2.ownership_v2 import ownership_v2_enabled
 from wystan.pipeline_v2.stage_6_9_test_strip import is_test_path
 from wystan.pipeline_v2.stage_6_9b_generated_strip import is_generated_path
+
+#: The signature a call written for the old ``(abs_path, rel_path)`` form is
+#: told about.
+COUNT_FILE_LOC_SIGNATURE = "count_file_loc(repo_root, rel_path)"
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from wystan.models.types import Feature
@@ -84,6 +89,7 @@ __all__ = [
     "stage_6_97_enabled",
     "apply_feature_loc",
     "count_file_loc",
+    "count_loc_of_bytes",
     "prefetch_loc_cache",
 ]
 
@@ -161,7 +167,6 @@ _REPORT_EXTS = {
     ".csv", ".tsv", ".coverage",
 }
 
-_SNIFF_BYTES = 8192
 
 
 def stage_6_97_enabled() -> bool:
@@ -194,25 +199,45 @@ def _is_source_ext(path: str) -> bool:
     return ext in _SOURCE_EXTS
 
 
-def count_file_loc(abs_path: Path, rel_path: str) -> int:
+def _excluded_from_count(rel_path: str) -> bool:
+    """Test, generated, lockfile, minified or binary-named: counts 0 unread."""
+    return is_test_path(rel_path) or is_generated_path(rel_path) or _is_excluded_name(rel_path)
+
+
+def count_file_loc(repo_root: Path, rel_path: str) -> int:
     """Line count for ONE file per the engine's LOC convention; 0 when
     the file is excluded (test / generated / lockfile / binary / missing
-    / empty)."""
-    if is_test_path(rel_path) or is_generated_path(rel_path):
+    / empty).
+
+    The repository is untrusted. The caller passes its root; ``rel_path``
+    must be relative to it (an absolute path or one with ``..`` counts 0).
+    The file is read through ``analyzer.safe_read.read_repo_bytes``
+    (contained in the root, regular files only, at most ``MAX_FILE_BYTES``,
+    NUL sniff before the rest is read). A refused file counts 0, as an
+    unreadable one always did. A first argument that is not a directory
+    (a call written for the old ``(abs_path, rel_path)`` form) raises
+    ``TypeError``.
+    """
+    require_repo_root(repo_root, COUNT_FILE_LOC_SIGNATURE)
+    path = repo_path(repo_root, rel_path)
+    if path is None or _excluded_from_count(rel_path):
         return 0
-    if _is_excluded_name(rel_path):
+    read = read_repo_bytes(path, repo_root)
+    return 0 if read.data is None else _count_text_lines(rel_path, read.data)
+
+
+def count_loc_of_bytes(rel_path: str, data: bytes) -> int:
+    """:func:`count_file_loc` on bytes already read safely (the ledger's
+    one read of a file): the same exclusions and the same count."""
+    return 0 if _excluded_from_count(rel_path) else _count_text_lines(rel_path, data)
+
+
+def _count_text_lines(rel_path: str, data: bytes) -> int:
+    """Executable lines of the bytes: the NUL sniff, then the text
+    ``Path.read_text`` gave (UTF-8 with replacement, universal newlines)."""
+    if b"\x00" in data[:SNIFF_BYTES]:  # NUL sniff — extensionless binaries
         return 0
-    try:
-        with open(abs_path, "rb") as fp:
-            head = fp.read(_SNIFF_BYTES)
-    except OSError:
-        return 0
-    if b"\x00" in head:  # NUL sniff — extensionless binaries
-        return 0
-    try:
-        text = abs_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return 0
+    text = data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     # Late import: tools ← pipeline_v2 is the existing dependency
     # direction for the strip predicates; the LOC scanner lives in
     # tools and imports stage_6_9b, so import at call time to keep
@@ -248,9 +273,10 @@ class _PrewarmedCache(dict):
         self.prewarmed = prewarmed
 
 
-def _file_loc_cached(abs_path: Path, rel: str, cache: dict[str, int]) -> int:
+def _file_loc_cached(repo_root: Path, rel: str, cache: dict[str, int]) -> int:
     """Per-FILE memoised line count (the scan-wide cache is keyed by the
     normalised relative file path)."""
+    require_repo_root(repo_root, "_file_loc_cached(repo_root, rel, cache)")
     if rel in cache:
         return cache[rel]
     n: int | None = None
@@ -258,7 +284,7 @@ def _file_loc_cached(abs_path: Path, rel: str, cache: dict[str, int]) -> int:
     if prewarmed is not None:
         n = prewarmed.get(rel)
     if n is None:
-        n = count_file_loc(abs_path, rel)
+        n = count_file_loc(repo_root, rel)
     cache[rel] = n
     return n
 
@@ -298,11 +324,11 @@ def _expand_feature_files(
                 child_rel = child.relative_to(repo_root).as_posix()
                 if not _is_source_ext(child_rel):
                     continue
-                n = _file_loc_cached(child, child_rel, cache)
+                n = _file_loc_cached(repo_root, child_rel, cache)
                 if n > 0:
                     out[child_rel] = n
         else:
-            n = _file_loc_cached(abs_path, rel, cache)
+            n = _file_loc_cached(repo_root, rel, cache)
             if n > 0:
                 out[rel] = n
     return out
@@ -399,7 +425,7 @@ def prefetch_loc_cache(
                 abs_path = root / rel
                 if abs_path.is_dir():
                     continue
-                _file_loc_cached(abs_path, rel, cache)
+                _file_loc_cached(root, rel, cache)
         except Exception:  # noqa: BLE001 — prefetch is best-effort
             continue
     return cache
@@ -817,7 +843,7 @@ def _non_code_owned(
     for rel in sorted(owner_by_file):
         if ink_class_of(rel):
             continue
-        cls = non_code_class(root / rel, rel)
+        cls = non_code_class(root, rel)
         if cls is not None:
             found[rel] = cls
     return found
@@ -960,4 +986,4 @@ def _stamp_member_file_loc(
         if abs_path.is_dir():
             mf.loc = 0
             continue
-        mf.loc = _file_loc_cached(abs_path, rel, cache)
+        mf.loc = _file_loc_cached(repo_root, rel, cache)

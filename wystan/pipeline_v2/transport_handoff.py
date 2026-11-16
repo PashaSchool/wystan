@@ -96,6 +96,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any, Iterable, Mapping
 
 from wystan.pipeline_v2.overturn_ledger import propose_pf_now
@@ -816,9 +817,7 @@ _IDENT_RE = re.compile(r"([A-Za-z0-9_$]+)")
 def _read_text(repo_root: Path, rel: str) -> str | None:
     try:
         p = repo_root / rel
-        if p.stat().st_size > _MAX_PARSE_BYTES:
-            return None
-        return p.read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(p, repo_root, errors="ignore", max_bytes=_MAX_PARSE_BYTES)
     except OSError:
         return None
 

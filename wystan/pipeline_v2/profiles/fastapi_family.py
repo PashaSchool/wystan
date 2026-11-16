@@ -291,7 +291,7 @@ class _DomainIndex:
         own_routes: dict[str, int] = {}
         composition: dict[str, int] = {}
         for rel in py_files:
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             if not text:
                 continue
             p = posix(rel)
@@ -512,7 +512,7 @@ class FastApiFamilyProfile:
             )
             if not is_manifest:
                 continue
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             reads += 1
             if text and (_DEP_RE.search(text) or _SELF_NAME_RE.search(text)):
                 return True
@@ -528,7 +528,7 @@ class FastApiFamilyProfile:
             p = posix(rel)
             if _is_excluded_path(p):
                 continue
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             reads += 1
             if text:
                 if _FASTAPI_IMPORT_RE.search(text) and (
@@ -616,7 +616,7 @@ class FastApiFamilyProfile:
         entries: list[FlowEntry] = []
         seen: set[tuple[str, str, str]] = set()
         for rel in self._domain_index(ctx).router_modules:
-            text = read_text(ctx.repo_path / rel)
+            text = read_text(ctx.repo_path / rel, ctx.repo_path)
             if not text:
                 continue
             router_prefix: dict[str, str] = {}

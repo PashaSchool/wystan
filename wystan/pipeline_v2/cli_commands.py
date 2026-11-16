@@ -93,6 +93,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_head_or_raise
 from typing import Any, Iterable
 
 from wystan.pipeline_v2.data import load_yaml
@@ -102,6 +103,7 @@ __all__ = [
     "CliCluster",
     "CommandSite",
     "cli_anchor_supply_enabled",
+    "cli_tool_name",
     "cluster_of_paths",
     "detect_cli_clusters",
     "detect_cli_clusters_cached",
@@ -267,8 +269,8 @@ def _test_re(vocab: dict[str, Any]) -> "re.Pattern[str]":
 
 def _read(root: Path, rel: str) -> str:
     try:
-        with open(root / rel, "r", errors="ignore") as fh:
-            return fh.read(_READ_CAP)
+        # Text mode read(N): the same N characters, reading only the head.
+        return read_repo_text_head_or_raise(root / rel, root, _READ_CAP, encoding=None, errors="ignore")
     except OSError:
         return ""
 
@@ -809,6 +811,17 @@ def supplied_tile_admits(
     if not tree:
         return False
     return all(p == tree or p.startswith(tree + "/") for p in paths)
+
+
+def cli_tool_name(cluster: "CliCluster") -> str:
+    """What the tool is called: the binary its manifest declares, else the
+    directory of the manifest. Empty for a manifest at the repository root
+    that declares no binary, where only the unit's own name is left."""
+    if cluster.bin_name:
+        return cluster.bin_name
+    if cluster.module in ("", "."):
+        return ""
+    return cluster.module.rsplit("/", 1)[-1]
 
 
 def cluster_of_paths(

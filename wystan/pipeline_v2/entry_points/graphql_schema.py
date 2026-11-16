@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any
 
 from wystan.pipeline_v2.entry_points.record import KIND_OPERATION, LABEL_DESCRIPTION, EntryPoint
@@ -62,7 +63,7 @@ def _sdl_descriptions(repo_path: Path, files: list[str]) -> dict[str, str]:
         try:
             if path.is_symlink() or path.stat().st_size > _MAX_FILE_BYTES:
                 continue
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(path, repo_path, errors="ignore")
         except OSError:
             continue
         for root in _SDL_ROOT.finditer(text):

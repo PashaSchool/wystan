@@ -34,6 +34,7 @@ from wystan.pipeline_v2.data import load_stack_yaml
 from wystan.pipeline_v2.extractors._util import (
     is_noise,
     posix,
+    read_manifest_text,
     read_text,
     slugify,
 )
@@ -152,7 +153,7 @@ _APP_FRAMEWORK_DEPS = (
 
 def _read_package_json(repo_path: Path) -> dict:
     """Read root ``package.json`` if present; return ``{}`` on any error."""
-    text = read_text(repo_path / "package.json")
+    text = read_manifest_text(repo_path / "package.json", repo_path)
     if not text:
         return {}
     try:
@@ -611,7 +612,7 @@ class JsLibraryExtractor:
             entry_texts: list[str] = []
             for cand in ("index.ts", "index.js", "index.mjs", "index.cts", "index.cjs"):
                 barrel_path = repo / f"{ws_prefix}{source_root}/{cand}"
-                barrel_text = read_text(barrel_path)
+                barrel_text = read_text(barrel_path, repo)
                 if barrel_text:
                     entry_texts.append(barrel_text)
                     break
@@ -621,7 +622,7 @@ class JsLibraryExtractor:
                 or ["index.ts", "src/index.ts"],
             )
             if cfg_entry:
-                cfg_text = read_text(cfg_entry)
+                cfg_text = read_text(cfg_entry, repo)
                 if cfg_text:
                     entry_texts.append(cfg_text)
 
@@ -696,7 +697,7 @@ class JsLibraryExtractor:
                     barrel_files.append(t)
 
             for barrel_rel in barrel_files:
-                barrel_text = read_text(repo / barrel_rel) or ""
+                barrel_text = read_text(repo / barrel_rel, repo) or ""
                 star_targets = _parse_entry_star_reexports(barrel_text)
                 if not star_targets:
                     continue
@@ -760,7 +761,7 @@ class JsLibraryExtractor:
         ]
         entry_file = _find_entry_file(ws_base, entry_candidates)
         if entry_file:
-            entry_text = read_text(entry_file) or ""
+            entry_text = read_text(entry_file, ctx.repo_path) or ""
             reexported = _parse_entry_reexports(entry_text)
             # Entry file path relative to repo (for rationale + anchor).
             try:

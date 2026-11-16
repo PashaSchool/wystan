@@ -52,12 +52,14 @@ import json
 import logging
 import os
 import re
-import subprocess
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_bytes_or_raise
 from typing import Any
 
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, run_git
+from wystan.analyzer.git_submodules import submodule_states
 from wystan.cache.backend import CacheKind, _safe_component
 from wystan.cache.paths import wystan_base_dir
 
@@ -1035,7 +1037,7 @@ ENV_OUTPUT_FLAGS = (
     # between the 6.86 mint window and the Stage 6.7 UF family — the
     # single existing mint sees the new flows naturally (no new mint
     # channel). Healthy flow-density is a secondary EXCLUDE-only filter
-    # (< repo flowful median / _OVERSIZED_MEDIAN_MULT); chunk
+    # (below half the flowful median of the row's peers); chunk
     # eligibility is ratio-triggered (exports/paths prompt caps)
     # independent of the global oversized cut; locale-births die on the
     # existing MIN_EXPORTS gate. Reshapes flows[] /
@@ -3761,10 +3763,22 @@ ENV_OUTPUT_FLAGS = (
 #: that is another feature's slug is not taken as a name.
 #: KS117 (2026-11-12): ``developer_features`` is written as the ids of the
 #: developer rows of ``features`` instead of a second copy of them (D5).
+#: KS118 (2026-11-12): ``go-package`` also reads the Go layout from every
+#: ``go.mod`` below the repository root; the rows that exist only because of
+#: it form a module scope (own flow names, own "oversized" ruler, joined by
+#: name only inside it); every row a repository had before is unchanged.
+#: KS120 (2026-11-12): the same rule as KS118, rebuilt; 118 and 119 are
+#: skipped because maps of two rejected builds were written under them.
+#: KS121 (2026-11-12): the unit that registers a command tool's commands
+#: takes the tool's anchor where it would stand alone under its package name;
+#: the file lane counts a product feature that lives wholly in a nested
+#: module only for files of that module.
 #: KS122 (2026-11-12): the journey refiner and the name writer remember an
 #: answer under a key without the scan ordinals (the question sent to the
 #: model is unchanged; the refiner's answer is stored by local id and mapped
 #: back); 118-121 are other branches'.
+#: KS123 (2026-11-13): the nested-module scope rules (KS118-121) and the
+#: content-keyed name memory (KS122) in one build; no rule changed.
 #: KS125 (2026-11-13): Stage 8.9 splits a flat oversized row by the route
 #: group its files handle when it has no directory to split along; 123 and
 #: 124 are other branches'.
@@ -3777,7 +3791,10 @@ ENV_OUTPUT_FLAGS = (
 #: KS128 (2026-11-13): born-row record and anchor rule changed the map.
 #: KS129 (2026-11-13): a split's residual parent seeds no lattice journey.
 #: KS130 (2026-11-13): the KS129 rule is withdrawn; maps of 129 are not this engine's.
-KEY_SCHEMA_VERSION = 130
+#: KS131 (2026-11-14): the nested-module scope rules (KS123) merged with KS130.
+#: KS132 (2026-11-15): veto, name writer and feature naming ask per module scope (rule S1).
+#: KS133 (2026-11-15): nothing is re-homed or folded across module scopes (rule S2).
+KEY_SCHEMA_VERSION = 133
 
 #: Directory / file-size guards for the non-git tree-hash fallback. Kept
 #: scale-invariant (not tuned to any one repo) — they only bound work.
@@ -3885,20 +3902,22 @@ def engine_version() -> str:
 # ── repo content identity ────────────────────────────────────────────────
 
 
+#: Prefix of a dirty hash computed from the files because git could not
+#: read the working tree; it never equals a hash git produced.
+_UNREAD_TREE_PREFIX = "unread:"
+#: The content identity is three quick reads; a repository that needs
+#: longer is keyed as "unknown" rather than holding the scan.
+_IDENTITY_GIT_TIMEOUT_SEC = 30.0
+
+
 def _git(repo_path: Path, *args: str, binary: bool = False) -> Any | None:
     """Run a git command scoped to ``repo_path``; ``None`` on any failure."""
     try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_path), *args],
-            capture_output=True,
-            check=True,
-            timeout=30,
-            text=not binary,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
+        out = run_git(repo_path, *args, timeout=_IDENTITY_GIT_TIMEOUT_SEC)
+    except GitError as exc:
         logger.debug("scan_result_cache: git %s failed (%s)", args, exc)
         return None
-    return out.stdout
+    return out.stdout if binary else out.universal_text
 
 
 def _is_git_repo(repo_path: Path) -> bool:
@@ -3910,21 +3929,45 @@ def _dirty_hash(repo_path: Path) -> str:
     """Hash of uncommitted state; empty string for a clean tree.
 
     Combines ``git status --porcelain=v1`` (untracked + modified + staged
-    status lines) with ``git diff HEAD`` (the actual content diff of tracked
-    modifications, staged + unstaged). A clean checkout → both empty → ``""``.
+    status lines) with the content diff of tracked modifications against
+    HEAD (``diff-index -p -M HEAD``: the text ``git diff HEAD`` printed, read
+    without refreshing the clone's index), plus any submodule checked out at
+    another commit than recorded (read from its files). A clean checkout →
+    all empty → ``""``. An index git cannot read without writing the clone
+    (``git_index``) gives an ``unread:`` hash of the files instead.
     """
     # ``--untracked-files=all`` expands untracked DIRECTORIES into individual
     # file entries so each new file gets its own ``?? path`` line.
     status = _git(repo_path, "status", "--porcelain=v1", "--untracked-files=all")
-    diff = _git(repo_path, "diff", "HEAD")
-    status_s = status or ""
-    diff_s = diff or ""
+    # Plumbing: byte-equal to `git diff HEAD` (renames on, stat-only changes
+    # dropped because the patch compares content), but it never refreshes,
+    # so the clone's index is never written.
+    diff = _git(repo_path, "diff-index", "-p", "-M", "HEAD")
+    if status is None or diff is None:
+        # The working tree could not be read through git (refused: a filter
+        # the runner cannot neutralise, or failed). That is not "clean":
+        # key on the files themselves so no stale result is served.
+        return f"{_UNREAD_TREE_PREFIX}{_nongit_tree_hash(repo_path)}"
+    status_s = status
+    diff_s = diff
+    # git never looks inside a submodule (forced --ignore-submodules=all);
+    # one checked out at another commit is read from its files instead.
+    try:
+        moved_list, unknown_list = submodule_states(str(repo_path))
+    except GitAnswerUnavailable:
+        return f"{_UNREAD_TREE_PREFIX}{_nongit_tree_hash(repo_path)}"
+    moved = "".join(f"{p}\0{a}\0{b}\0" for p, a, b in moved_list)
+    # A submodule whose state could not be read (its git directory lies
+    # outside the scan root) is not "clean": the key says so, so an entry
+    # made then is never served as a clean tree's. No submodule, or all
+    # readable: nothing added, the identity is unchanged.
+    unknown = "".join(f"{p}\0" for p in unknown_list)
     # Untracked NEW files appear as "?? path" in status but contribute NOTHING to
     # ``git diff HEAD`` — so their CONTENT is invisible to the key unless hashed
     # explicitly (audit Bug 1): editing an untracked file would keep the key
     # stable and serve a stale result.
     untracked_s = _untracked_content_hash(repo_path, status_s)
-    if not status_s.strip() and not diff_s.strip() and not untracked_s:
+    if not status_s.strip() and not diff_s.strip() and not untracked_s and not moved and not unknown:
         return ""
     h = hashlib.sha256()
     h.update(b"status\0")
@@ -3933,6 +3976,12 @@ def _dirty_hash(repo_path: Path) -> str:
     h.update(diff_s.encode("utf-8", "replace"))
     h.update(b"\0untracked\0")
     h.update(untracked_s.encode("utf-8"))
+    if moved:
+        h.update(b"\0submodules\0")
+        h.update(moved.encode("utf-8", "surrogateescape"))
+    if unknown:
+        h.update(b"\0submodules-unknown\0")
+        h.update(unknown.encode("utf-8", "surrogateescape"))
     return h.hexdigest()
 
 
@@ -3957,7 +4006,7 @@ def _untracked_content_hash(repo_path: Path, status_s: str) -> str:
             if fp.is_file():
                 size = fp.stat().st_size
                 if size <= 2 * 1024 * 1024:
-                    h.update(fp.read_bytes())
+                    h.update(read_repo_bytes_or_raise(fp, repo_path))
                 else:
                     h.update(f"size:{size}".encode())
         except OSError:
@@ -3983,7 +4032,7 @@ def _nongit_tree_hash(repo_path: Path) -> str:
         try:
             if path.stat().st_size > _NONGIT_MAX_FILE_BYTES:
                 continue
-            data = path.read_bytes()
+            data = read_repo_bytes_or_raise(path, repo_path)
         except OSError:
             continue
         entries.append((rel.as_posix(), hashlib.sha256(data).hexdigest()))

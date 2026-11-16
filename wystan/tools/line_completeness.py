@@ -51,6 +51,7 @@ import json
 import math
 import os
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any, Iterable
 
 from wystan.models.types import developer_layer
@@ -172,11 +173,12 @@ def enumerate_source_files(repo_root: Path) -> list[str]:
     """
     tracked: list[str]
     try:
-        from git import Repo  # GitPython — engine dependency
-
         from wystan.analyzer.git import get_tracked_files
+        from wystan.analyzer.git_repository import open_repository
 
-        tracked = get_tracked_files(Repo(str(repo_root)))
+        tracked = get_tracked_files(
+            open_repository(repo_root, search_parent_directories=False),
+        )
     except Exception:  # noqa: BLE001 — non-git fixture trees
         from wystan.pipeline_v2.stage_0_intake import _walk_tracked_files
 
@@ -203,9 +205,7 @@ def _load_executable_map(
     out: dict[str, set[int]] = {}
     for rel in files:
         try:
-            text = (repo_root / rel).read_text(
-                encoding="utf-8", errors="replace",
-            )
+            text = read_repo_text_or_raise(repo_root / rel, repo_root, errors="replace")
         except OSError:
             out[rel] = set()
             continue

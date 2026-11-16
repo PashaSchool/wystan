@@ -363,7 +363,7 @@ class DjangoExtractor:
                 continue
             if _is_excluded(rel_path, c.excludes):
                 continue
-            text = read_text(ctx.repo_path / rel_path)
+            text = read_text(ctx.repo_path / rel_path, ctx.repo_path)
             if not text:
                 continue
             rel_posix = posix(rel_path)

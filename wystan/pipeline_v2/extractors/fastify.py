@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 from wystan.pipeline_v2.extractors._pattern_base import PatternExtractor
@@ -212,9 +213,7 @@ class FastifyRouteExtractor(PatternExtractor):
 
         for rel in _candidate_files(ctx):
             try:
-                text = (repo / rel).read_text(
-                    encoding="utf-8", errors="ignore",
-                )[: self._MAX_FILE_BYTES]
+                text = read_repo_text_or_raise(repo / rel, repo, errors="ignore")[: self._MAX_FILE_BYTES]
             except OSError:
                 continue
             if "fastify" not in text.lower() and ".register(" not in text \

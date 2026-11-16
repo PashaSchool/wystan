@@ -59,6 +59,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.pipeline_v2.data import load_stack_yaml
@@ -1145,7 +1146,7 @@ def build_nav_tree(
         if not rel.endswith(_CODE_EXTS):
             continue
         try:
-            text = (repo_root / rel).read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(repo_root / rel, repo_root, errors="ignore")
         except (OSError, UnicodeError):
             continue
         if not text or len(text) > _MAX_BYTES:

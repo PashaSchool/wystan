@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_bytes_or_raise
 
 from wystan.models.types import SymbolRange
 
 
-def hash_file(abs_path: Path) -> str | None:
-    """SHA-256 of file content. Returns None for missing/unreadable files."""
+def hash_file(abs_path: Path, repo_root: Path) -> str | None:
+    """SHA-256 of a repository file's content (read through the guarded
+    reader). Returns None for missing, unreadable or refused files."""
     try:
-        data = abs_path.read_bytes()
+        data = read_repo_bytes_or_raise(abs_path, repo_root)
     except OSError:
         return None
     return hashlib.sha256(data).hexdigest()
@@ -30,7 +32,7 @@ def hash_files(files: list[str], repo_path: str) -> dict[str, str]:
     root = Path(repo_path)
     result: dict[str, str] = {}
     for rel in files:
-        h = hash_file(root / rel)
+        h = hash_file(root / rel, root)
         if h is not None:
             result[rel] = h
     return result

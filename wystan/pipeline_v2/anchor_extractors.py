@@ -38,6 +38,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Callable, Literal
 
 from wystan.analyzer.safe_read import path_within_repo
@@ -264,6 +265,7 @@ def _humanise(key: str) -> str:
 
 def _grep_strings(
     files: list[str],
+    repo_root: Path,
     patterns: tuple[re.Pattern[str], ...],
     *,
     cap: int = MAX_GREP_STRINGS,
@@ -278,7 +280,7 @@ def _grep_strings(
     out: list[tuple[str, str]] = []
     for full in files:
         try:
-            txt = Path(full).read_text(encoding="utf-8", errors="ignore")
+            txt = read_repo_text_or_raise(full, repo_root, errors="ignore")
         except OSError:
             continue
         for rx in patterns:
@@ -329,7 +331,7 @@ def extract_i18n_anchors(repo_root: Path) -> list[ProductAnchor]:
             break
         rel = _relpath(full, repo_root)
         try:
-            data = json.loads(Path(full).read_text(encoding="utf-8"))
+            data = json.loads(read_repo_text_or_raise(full, repo_root))
         except (OSError, ValueError):
             continue
 
@@ -392,7 +394,7 @@ def extract_nav_anchors(repo_root: Path) -> list[ProductAnchor]:
         return any(marker in base for marker in _NAV_FILENAME_MARKERS)
 
     files = _walk(repo_root, _SOURCE_SUFFIXES, _is_nav)
-    pairs = _grep_strings(files, (_NAV_RX,), cap=MAX_NAV_STRINGS)
+    pairs = _grep_strings(files, repo_root, (_NAV_RX,), cap=MAX_NAV_STRINGS)
     return [
         ProductAnchor(
             text,
@@ -411,7 +413,7 @@ def extract_analytics_anchors(repo_root: Path) -> list[ProductAnchor]:
     the maintainer's own product vocabulary — strong product signal.
     """
     files = _walk(repo_root, _SOURCE_SUFFIXES)
-    pairs = _grep_strings(files, _ANALYTICS_RX, cap=MAX_ANALYTICS_STRINGS)
+    pairs = _grep_strings(files, repo_root, _ANALYTICS_RX, cap=MAX_ANALYTICS_STRINGS)
     return [
         ProductAnchor(text, "analytics", _relpath(full, repo_root))
         for text, full in pairs
@@ -430,7 +432,7 @@ def extract_test_anchors(repo_root: Path) -> list[ProductAnchor]:
         return any(marker in low for marker in _TEST_PATH_MARKERS)
 
     files = _walk(repo_root, _SOURCE_SUFFIXES, _is_test)
-    pairs = _grep_strings(files, (_TEST_RX,))
+    pairs = _grep_strings(files, repo_root, (_TEST_RX,))
     return [
         ProductAnchor(text, "test", _relpath(full, repo_root))
         for text, full in pairs

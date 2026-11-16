@@ -23,6 +23,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Iterable
 
 from wystan.pipeline_v2.product_strings import (
@@ -178,9 +179,7 @@ def _read_catalog(repo_path: Path, rel: str) -> str | None:
     if not path_within_repo(path, repo_path):
         return None
     try:
-        if not path.is_file() or path.stat().st_size > _MAX_CATALOG_BYTES:
-            return None
-        return path.read_text(encoding="utf-8", errors="replace")
+        return read_repo_text_or_raise(path, repo_path, errors="replace", max_bytes=_MAX_CATALOG_BYTES)
     except OSError:
         return None
 

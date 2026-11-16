@@ -53,6 +53,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.pipeline_v2.flow_name_v2 import _symbol_name, _slugify
@@ -165,7 +166,7 @@ def detect_py_registries(
             p = root / src
             if p.stat().st_size > _MAX_BYTES:
                 continue
-            tree = ast.parse(p.read_text(encoding="utf-8", errors="ignore"))
+            tree = ast.parse(read_repo_text_or_raise(p, root, errors="ignore"))
         except (OSError, SyntaxError):
             continue
         module_index = edge_by_src[src]
@@ -247,7 +248,7 @@ def detect_ts_registries(
             p = root / rel
             if p.stat().st_size > _MAX_BYTES:
                 continue
-            text = p.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(p, root, errors="ignore")
         except OSError:
             continue
         # Pass-scoped prefilter: b1/b2/b3 need switch/dynamic-import

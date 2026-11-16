@@ -46,6 +46,7 @@ from wystan.pipeline_v2.product_name_laws import (
 )
 from wystan.pipeline_v2.product_strings import _read_text
 from wystan.pipeline_v2.product_name_writer import NameWriter, build_name_writer
+from wystan.pipeline_v2.request_scopes import REPOSITORY_ROOT, group_by_scope, scopes_of_items
 from wystan.pipeline_v2.spine_anchors import load_spine_vocab
 from wystan.pipeline_v2.ui_text import UiLabel, UiTextIndex, collect_ui_text
 
@@ -123,6 +124,9 @@ class NameTarget:
     routes: list[str] = field(default_factory=list)
     members: list[str] = field(default_factory=list)
     """Names of the code units inside the item."""
+    scope: str = REPOSITORY_ROOT
+    """Module scope of the item's files (rule S1): the writer is asked about
+    it only beside items of the same scope."""
     apply: Callable[[str, str, list[str]], None] = lambda name, confidence, evidence: None
 
     def prompt_row(self, parent: str | None, note: str | None = None) -> dict[str, Any]:
@@ -330,8 +334,7 @@ class _Namer:
         notes: dict[str, str | None] = {target.key: None for target in targets}
         pending = list(targets)
         for attempt in range(2):
-            rows = [t.prompt_row(parents.get(t.group), notes[t.key]) for t in pending]
-            proposed = self._writer(rows) if rows else {}
+            proposed = self._ask_writer(pending, parents, notes)
             retry: list[NameTarget] = []
             for target in pending:
                 name = proposed.get(target.key)
@@ -360,6 +363,24 @@ class _Namer:
                 retry.append(target)
             pending = retry
         return accepted
+
+    def _ask_writer(
+        self, pending: list[NameTarget], parents: dict[str, str], notes: dict[str, str | None],
+    ) -> dict[str, str]:
+        """The writer's proposals, asked per module scope (rule S1).
+
+        The root scope's items go in the order and batches they had when no
+        nested module existed; each module's items go in requests of their
+        own. With one scope this is the one call it always was.
+        """
+        proposed: dict[str, str] = {}
+        for scope, group in group_by_scope(pending, lambda target: target.scope):
+            rows = [t.prompt_row(parents.get(t.group), notes[t.key]) for t in group]
+            # The repository's call is the call it always was; a module's
+            # call says which module, so its answers are remembered apart.
+            asked = self._writer(rows) if scope == REPOSITORY_ROOT else self._writer(rows, scope=scope)
+            proposed.update(asked)
+        return proposed
 
     def _settle(self, target: NameTarget) -> None:
         """Rungs 2 to 4 for a target the writer did not name."""
@@ -553,6 +574,17 @@ def _flow_target(
     )
 
 
+def _member_files(members: list[Any]) -> list[str]:
+    """Every file a journey's member flows touch: what the journey is made of,
+    shared files included (they still say which program it is in)."""
+    files: list[str] = []
+    for flow in members:
+        files.extend(flow.paths or [])
+        if flow.entry_point_file:
+            files.append(flow.entry_point_file)
+    return files
+
+
 def _operations_in(paths: Iterable[str], operations_by_file: dict[str, set[str]]) -> set[str]:
     """API operations served by the files in ``paths``."""
     return set().union(*(operations_by_file.get(path, set()) for path in paths))
@@ -592,11 +624,14 @@ def run_product_language_names(
     page_reach: dict[str, frozenset[str]] | None = None,
     pages_without_imports: Iterable[str] = (),
     writer: NameWriter | None = None,
+    module_scopes: Any = None,
 ) -> dict[str, Any]:
     """Rename product features and user flows in place; returns telemetry.
 
     ``pages_without_imports`` are pages that import no code of the
-    repository: their empty reach does not count against reach coverage."""
+    repository: their empty reach does not count against reach coverage.
+    ``module_scopes`` is the scan's record of nested modules: the writer is
+    asked about each module's items in requests of their own."""
     nav_pairs = list(nav_pairs)
     page_reach = page_reach or {}
     # A name the author wrote (a command's description) is not ours to judge
@@ -682,8 +717,10 @@ def run_product_language_names(
     for dev in developer_features:
         if dev.product_feature_id:
             members_of.setdefault(dev.product_feature_id, []).append(dev.name)
-    for target, feature in zip(feature_targets, product_features):
+    feature_scopes = scopes_of_items([owned_paths[f.name] for f in product_features], module_scopes)
+    for target, feature, scope in zip(feature_targets, product_features, feature_scopes):
         target.members = sorted(members_of.get(feature.name, []))
+        target.scope = scope
 
     feature_namer = _Namer(ctx, writer)
     feature_namer.reserve("pf", (f.display_name or f.name for f in authored_features))
@@ -700,10 +737,12 @@ def run_product_language_names(
     }
     flow_namer = _Namer(ctx, writer)
     shared = _paths_shared_between_user_flows(flows_of)
-    flow_namer.run(
-        [_flow_target(uf, flows_of.get(uf.id, []), index, shared) for uf in user_flows],
-        parents,
-    )
+    flow_targets = [_flow_target(uf, flows_of.get(uf.id, []), index, shared) for uf in user_flows]
+    flow_scopes = scopes_of_items(
+        [_member_files(flows_of.get(uf.id, [])) for uf in user_flows], module_scopes)
+    for target, scope in zip(flow_targets, flow_scopes):
+        target.scope = scope
+    flow_namer.run(flow_targets, parents)
     return {
         "keyed": writer is not None,
         "author_named": {"product_features": len(authored_features), "user_flows": len(authored_flows)},
@@ -761,6 +800,7 @@ def name_product_layer(
         files_without_ui=route_files_without_ui(ctx.repo_path, routes_index),
         page_reach=page_reach, pages_without_imports=quiet_pages,
         writer=build_name_writer(**llm),
+        module_scopes=getattr(ctx, "module_scopes", None),
     )
     telemetry["entry_points"] = _entry_point_report(ctx, routes_index, index)
     # A second opinion on the features about to be removed: some are
@@ -769,6 +809,8 @@ def name_product_layer(
     # What has no product-language name is not shown as product.
     telemetry["features_removed"] = demote_unnameable_features(
         product_features, developer, user_flows, flows,
+        # Rule S2: what leaves a removed feature stays in its module scope.
+        module_scopes=getattr(ctx, "module_scopes", None),
     )
     if name_flows:
         telemetry["flows_removed"] = drop_unnameable_flows(user_flows, flows)
@@ -792,6 +834,7 @@ def _veto(
             violations=lambda name: product_name_violations(name, KIND_FEATURE, laws),
             joins_prefix=JOINS_PREFIX,
             llm={key: llm.get(key) for key in ("cost_tracker", "cache", "llm_health")},
+            module_scopes=getattr(ctx, "module_scopes", None),
         )
     except Exception as exc:  # noqa: BLE001 - without a verdict the removal goes ahead as before
         return {"applied": False, "reason": f"failed: {exc}"[:200]}

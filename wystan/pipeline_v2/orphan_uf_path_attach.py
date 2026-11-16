@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from collections import Counter
+from collections.abc import Iterable
 from typing import Any
 
 __all__ = [
@@ -40,6 +41,50 @@ ORPHAN_UF_PATH_ATTACH_ENV = "WYSTAN_ORPHAN_UF_PATH_ATTACH"
 _STRONG_SHARE = 0.6
 
 
+class _ScopeFilter:
+    """Rule S2 (:mod:`rehome_scopes`): an orphan journey is attached only to
+    a product feature of its own module scope, so an owner of another scope
+    does not vote. A repository journey is then judged as if the nested
+    modules' features did not exist. Without a nested module every journey
+    and feature is in the root scope and no vote is left out."""
+
+    def __init__(
+        self, product_features: list[Any], developer_features: list[Any] | None,
+        user_flows: list[Any] | None, flow_by_id: dict[str, Any], module_scopes: Any,
+    ) -> None:
+        from wystan.pipeline_v2.rehome_scopes import (
+            REPOSITORY_ROOT,
+            journey_scopes,
+            product_feature_scopes,
+        )
+
+        self._root = REPOSITORY_ROOT
+        self._is_active = bool(module_scopes)
+        self._feature = product_feature_scopes(
+            product_features or [], developer_features or [], module_scopes)
+        self._journey = journey_scopes(list(user_flows or []), flow_by_id, module_scopes)
+
+    def votes(self, owners: Counter, journey: Any) -> Counter:
+        """``owners`` without the features of another scope than ``journey``'s."""
+        if not self._is_active:
+            return owners
+        scope = self._journey.get(id(journey), self._root)
+        return Counter({
+            pf: n for pf, n in owners.items() if self._feature.get(pf, self._root) == scope
+        })
+
+
+def _flows_by_id(flows: Iterable[Any]) -> dict[str, Any]:
+    """``{id | uuid | name: flow}``: member ids are "uuid or name"."""
+    by_id: dict[str, Any] = {}
+    for fl in flows:
+        for key in (getattr(fl, "id", None), getattr(fl, "uuid", None),
+                    getattr(fl, "name", None)):
+            if key:
+                by_id.setdefault(str(key), fl)
+    return by_id
+
+
 def orphan_uf_path_attach_enabled() -> bool:
     """#3A — default **ON** since flip-pack #18 (KEY_SCHEMA 53, 2026-08-04):
     live hoppscotch(6)+unkey(4) + the offline world breadth (18 attaches
@@ -55,10 +100,12 @@ def run_orphan_uf_path_attach(
     developer_features: list[Any] | None,
     user_flows: list[Any] | None,
     flows: list[Any] | None,
+    module_scopes: Any = None,
 ) -> dict[str, Any] | None:
     """Attach None journeys to a PF by strong path ownership (in place);
     telemetry for ``scan_meta.orphan_uf_path_attach``; ``None`` when the
-    flag is off."""
+    flag is off. ``module_scopes`` (rule S2): only owners of the journey's
+    own module scope vote."""
     if not orphan_uf_path_attach_enabled():
         return None
     tele: dict[str, Any] = {
@@ -83,12 +130,9 @@ def run_orphan_uf_path_attach(
                 file2pf.setdefault(str(p), pf)
     # member_flow_ids = "uuid or name" (models/types:1134); uuids are
     # stamped at the exit — in this rail's slot live mids can be NAMES.
-    flow_by_id: dict[str, Any] = {}
-    for fl in (flows or []):
-        for key in (getattr(fl, "id", None), getattr(fl, "uuid", None),
-                    getattr(fl, "name", None)):
-            if key:
-                flow_by_id.setdefault(str(key), fl)
+    flow_by_id = _flows_by_id(flows or [])
+    in_scope = _ScopeFilter(
+        product_features, developer_features, user_flows, flow_by_id, module_scopes)
     for uf in sorted(
         (u for u in (user_flows or [])
          if not getattr(u, "synthesized", False)
@@ -107,6 +151,7 @@ def run_orphan_uf_path_attach(
                 own = file2pf.get(str(p or ""))
                 if own:
                     owners[own] += 1
+        owners = in_scope.votes(owners, uf)
         if not owners:
             tele["unresolvable_left"] += 1
             continue
@@ -126,6 +171,7 @@ def run_orphan_uf_owner_attach(
     developer_features: list[Any] | None,
     user_flows: list[Any] | None,
     flows: list[Any] | None = None,
+    module_scopes: Any = None,
 ) -> dict[str, Any]:
     """Attach parentless journeys by who owns their member flows (in place).
 
@@ -148,6 +194,10 @@ def run_orphan_uf_owner_attach(
     journey orphaned by a dissolved container is then judged against the
     feature its code finally went to. Journeys whose flows no product feature
     owns stay without a parent and are counted as ``code_unowned``.
+
+    ``module_scopes`` (rule S2): only owners of the journey's own module
+    scope count; a member flow owned by another scope's feature counts as
+    owned by none.
     """
     tele: dict[str, Any] = {
         "attached": {}, "considered": 0, "code_unowned": 0, "split_left": 0,
@@ -174,6 +224,11 @@ def run_orphan_uf_owner_attach(
             _index(fl, owner)
     for fl in (flows or ()):
         _index(fl, owner_of_dev.get(str(getattr(fl, "primary_feature", "") or "")))
+    member_flows = _flows_by_id(
+        [fl for dev in developer_features or () for fl in getattr(dev, "flows", None) or ()]
+        + list(flows or ()))
+    in_scope = _ScopeFilter(
+        product_features, developer_features, user_flows, member_flows, module_scopes)
     for uf in sorted(
         (u for u in (user_flows or [])
          if not getattr(u, "product_feature_id", None)),
@@ -185,11 +240,16 @@ def run_orphan_uf_owner_attach(
         tele["considered"] += 1
         owners = Counter(flow_owner.get(mid) for mid in members)
         owners.pop(None, None)
+        scoped = in_scope.votes(owners, uf)
+        # A member owned by another scope's feature is weighed as if it
+        # were not there (rule S2): it neither votes nor dilutes the share.
+        counted = len(members) - (sum(owners.values()) - sum(scoped.values()))
+        owners = scoped
         if not owners:
             tele["code_unowned"] += 1
             continue
         top, count = sorted(owners.items(), key=lambda item: (-item[1], item[0]))[0]
-        if count / len(members) >= _STRONG_SHARE:
+        if count / counted >= _STRONG_SHARE:
             uf.product_feature_id = top
             tele["attached"].setdefault(top, []).append(
                 str(getattr(uf, "name", "") or ""))

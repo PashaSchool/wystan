@@ -5,9 +5,9 @@ Three small, composable pieces — all deterministic, $0 LLM:
   1. :func:`select_snapshot_commits` — pick N commits evenly spaced over
      the scan window from the commit list ALREADY in memory
      (``ScanContext.commits``; no new ``git log``).
-  2. :func:`run_snapshots` — materialise each snapshot with
-     ``git worktree add --detach``, run a caller-supplied computation
-     against the checked-out tree, and ALWAYS clean the worktree up.
+  2. :func:`run_snapshots` — write each snapshot's tree from raw blobs
+     into a fresh directory (no checkout, no filters), run a
+     caller-supplied computation against it, and ALWAYS remove it.
      Robust by contract: per-snapshot failure skips that point with a
      logged warning (never fails the scan); a wall-clock budget skips
      the remaining snapshots when exceeded.
@@ -51,8 +51,7 @@ with ``WYSTAN_IMPACT_PER_SNAPSHOT_SEC``.
 Multi-subpath scans (follow-up noted)
 =====================================
 Each per-subpath run currently selects + materialises its own
-snapshots (cheap: the worktree checkout is the dominant cost and
-hard-links pack data). Sharing one worktree set across the subpath
+snapshots (the tree export is the dominant cost). Sharing one export set across the subpath
 runs of a single multi-scan is a known optimisation, deferred until
 the multi-runner grows a cross-subpath context to host it.
 """
@@ -64,13 +63,15 @@ import math
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any, Callable, Iterable, TypeVar
 
+from wystan.analyzer.git_runner import GitFailed, object_name
+from wystan.analyzer.git_tree_export import MissingObjects, export_tree
 from wystan.analyzer.import_graph import (
     _resolve_import,
     detect_monorepo_packages,
@@ -223,14 +224,36 @@ def resolve_snapshot_budget_sec(n_snapshots: int) -> float:
     return per * max(1, n_snapshots)
 
 
-def _git(repo_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(repo_path), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=600,
-    )
+#: Files whose bytes the snapshot readers use: the import index reads
+#: TS/JS/Python sources up to the reverse-import size cap; the alias and
+#: workspace readers read tsconfig/jsconfig (and their ``extends`` targets),
+#: package.json and pnpm-workspace.yaml. Every other file is exported as an
+#: empty placeholder: listed as in a checkout (``list_snapshot_files``), and
+#: never read for content. A source over the cap reads as empty, which gives
+#: the import index what the size skip gave on a checkout: no imports.
+_MANIFEST_SUFFIXES = frozenset({".json", ".jsonc", ".yaml", ".yml"})
+
+
+def snapshot_wants_content(path: str, size: int) -> bool:
+    suffix = PurePosixPath(path).suffix.lower()
+    return size <= _MAX_FILE_BYTES and (suffix in _SCANNED_EXTENSIONS or suffix in _MANIFEST_SUFFIXES)
+
+
+#: Refused tree paths named in one warning; the count is always complete.
+_REFUSALS_SHOWN = 5
+
+
+def _record_refusals(telemetry: dict[str, Any], sha: str, refused: list, warn: Callable[[str], None]) -> None:
+    """A tree entry the export would not write (unsafe name, collision) is
+    counted in telemetry (the key exists only when one happened) and named
+    in the run log."""
+    telemetry["impact_export_refused"] = telemetry.get("impact_export_refused", 0) + len(refused)
+    shown = ", ".join(f"{path!r} ({why})" for path, why in refused[:_REFUSALS_SHOWN])
+    warn(f"impact: snapshot {sha[:12]}: {len(refused)} tree path(s) not written: {shown}")
+
+
+def _skip_detail(exc: Exception) -> object:
+    return (exc.stderr or exc) if isinstance(exc, GitFailed) else exc
 
 
 def run_snapshots(
@@ -240,39 +263,32 @@ def run_snapshots(
     *,
     budget_sec: float | None = None,
     log: Any = None,
+    wants_content: Callable[[str, int], bool] | None = None,
 ) -> tuple[dict[str, T], dict[str, Any]]:
-    """Materialise each sha as a detached worktree and run ``compute``.
+    """Materialise each sha's tree in a fresh directory and run ``compute``.
 
-    ``compute(worktree_root, sha)`` receives the CHECKED-OUT tree root
+    ``wants_content(path, size)`` picks the files exported with their bytes
+    (default: all, so ``compute`` may read any file); every other file is an
+    empty placeholder. Stage 6.96 passes :func:`snapshot_wants_content`,
+    the files its readers read.
+
+    ``compute(tree_root, sha)`` receives the root of the tree at that sha
     (the caller appends any subpath itself). Returns
     ``(results_by_sha, telemetry)`` where telemetry carries
     ``impact_snapshots`` (completed), ``impact_skipped_snapshots``
     (failed + budget-skipped), ``impact_budget_exceeded`` and
     ``budget_sec``.
 
-    Worktree REUSE (perf wave 2, R5a): ONE detached worktree is created
-    lazily at the first snapshot and re-pointed at each subsequent sha
-    with ``git checkout --detach --force`` inside it — N checkouts
-    instead of N ``worktree add`` + N ``worktree remove`` subprocess
-    pairs. Content per sha is identical to a fresh worktree: a detached
-    checkout materialises exactly the tracked tree at that sha,
-    ``compute`` never writes into the tree, and consecutive checkouts
-    remove files tracked at the previous sha but absent at the next
-    (verified by the content-parity unit test). Any add/checkout/compute
-    failure tears the worktree down and the next sha re-creates it
-    fresh, so one bad snapshot can never poison the rest of the series.
+    The tree is written from raw blobs (``git_tree_export.export_tree``),
+    not checked out: a checkout would run the clone's content filters and
+    hooks in a working-tree context of its own. Nothing is registered in
+    the clone (no ``git worktree``), so there is nothing to prune.
 
     Robustness contract (never fails the scan):
-      - ``git worktree prune`` first — clears stale registrations from
-        a previously interrupted run before we add new worktrees.
-      - any per-snapshot failure → worktree teardown (``git worktree
-        remove --force`` + ``rmtree`` fallback) + skip with a warning;
-        the next snapshot starts from a fresh worktree.
-      - the wall budget is checked BEFORE each checkout; once exceeded,
+      - any per-snapshot failure (export or compute) → skip with a
+        warning; its directory is removed and the next sha starts fresh.
+      - the wall budget is checked BEFORE each export; once exceeded,
         every remaining snapshot is skipped and telemetry notes it.
-      - a ``finally``-guaranteed closing teardown + ``git worktree
-        prune`` drop the reused worktree and any registration the
-        teardown could not remove.
     """
     if budget_sec is None:
         budget_sec = resolve_snapshot_budget_sec(len(shas))
@@ -297,67 +313,35 @@ def run_snapshots(
             log.info(f"WARN {msg}")
         logger.warning(msg)
 
-    try:
-        _git(repo_path, "worktree", "prune")
-    except (subprocess.SubprocessError, OSError) as exc:
-        # Not fatal — `worktree add` may still succeed.
-        _warn(f"impact: initial `git worktree prune` failed: {exc}")
-
     t0 = time.monotonic()
-    wt_dir: str | None = None  # the ONE reused worktree (lazy, see docstring)
-
-    def _teardown_worktree() -> None:
-        nonlocal wt_dir
-        if wt_dir is None:
-            return
+    for sha in shas:
+        elapsed = time.monotonic() - t0
+        if budget_sec > 0 and elapsed > budget_sec:
+            telemetry["impact_budget_exceeded"] = True
+            remaining = len(shas) - len(results) - telemetry["impact_skipped_snapshots"]
+            telemetry["impact_skipped_snapshots"] += remaining
+            _warn(
+                f"impact: wall budget {budget_sec:.0f}s exceeded after "
+                f"{elapsed:.1f}s — skipping {remaining} remaining "
+                f"snapshot(s)",
+            )
+            break
+        tree_dir = tempfile.mkdtemp(prefix="wystan-impact-")  # mode 0700, ours
         try:
-            _git(repo_path, "worktree", "remove", "--force", wt_dir)
-        except (subprocess.SubprocessError, OSError):
-            pass
-        shutil.rmtree(wt_dir, ignore_errors=True)
-        wt_dir = None
-
-    try:
-        for sha in shas:
-            elapsed = time.monotonic() - t0
-            if budget_sec > 0 and elapsed > budget_sec:
-                telemetry["impact_budget_exceeded"] = True
-                remaining = len(shas) - len(results) - (
-                    telemetry["impact_skipped_snapshots"]
-                )
-                telemetry["impact_skipped_snapshots"] += remaining
-                _warn(
-                    f"impact: wall budget {budget_sec:.0f}s exceeded after "
-                    f"{elapsed:.1f}s — skipping {remaining} remaining "
-                    f"snapshot(s)",
-                )
-                break
-            try:
-                if wt_dir is None:
-                    wt_dir = tempfile.mkdtemp(prefix="wystan-impact-")
-                    _git(
-                        repo_path, "worktree", "add",
-                        "--detach", "--force", wt_dir, sha,
-                    )
-                else:
-                    _git(Path(wt_dir), "checkout", "--detach", "--force", sha)
-                results[sha] = compute(Path(wt_dir), sha)
-                telemetry["impact_snapshots"] += 1
-            except Exception as exc:  # noqa: BLE001 — never fail the scan
-                telemetry["impact_skipped_snapshots"] += 1
-                detail: object = exc
-                if isinstance(exc, subprocess.CalledProcessError):
-                    detail = (exc.stderr or "").strip() or exc
-                _warn(f"impact: snapshot {sha[:12]} skipped: {detail}")
-                # A failed add/checkout/compute leaves the worktree state
-                # unknown — drop it; the next sha re-creates it fresh.
-                _teardown_worktree()
-    finally:
-        _teardown_worktree()
-        try:
-            _git(repo_path, "worktree", "prune")
-        except (subprocess.SubprocessError, OSError) as exc:
-            _warn(f"impact: closing `git worktree prune` failed: {exc}")
+            report = export_tree(repo_path, object_name(sha), tree_dir, wants_content)
+            if report.refused:
+                _record_refusals(telemetry, sha, report.refused, _warn)
+            results[sha] = compute(Path(tree_dir), sha)
+            telemetry["impact_snapshots"] += 1
+        except Exception as exc:  # noqa: BLE001 — never fail the scan
+            telemetry["impact_skipped_snapshots"] += 1
+            if isinstance(exc, MissingObjects):
+                # A partial clone: the engine never fetches, so the snapshot
+                # is absent and says why (key present only when it happens).
+                telemetry["impact_skipped_missing_objects"] = telemetry.get("impact_skipped_missing_objects", 0) + 1
+            _warn(f"impact: snapshot {sha[:12]} skipped: {_skip_detail(exc)}")
+        finally:
+            shutil.rmtree(tree_dir, ignore_errors=True)
     _info(
         f"impact: snapshots done ok={telemetry['impact_snapshots']} "
         f"skipped={telemetry['impact_skipped_snapshots']} "
@@ -372,7 +356,7 @@ def run_snapshots(
 def list_snapshot_files(scan_root: Path) -> list[str]:
     """Sorted relative paths of every regular file under ``scan_root``.
 
-    A detached worktree contains exactly the tracked tree, so a
+    An exported snapshot contains exactly the tracked tree, so a
     filesystem walk IS the tracked-file list at that commit (no extra
     git call). ``.git`` entries and symlinks are skipped. Forward-slash
     relative paths, sorted — deterministic.
@@ -482,11 +466,13 @@ def build_snapshot_import_index(
         suffix = PurePosixPath(rel).suffix.lower()
         if suffix not in _SCANNED_EXTENSIONS or _is_vendor_or_test(rel):
             continue
+        # The guarded reader (dev): regular files inside the snapshot only,
+        # no link followed out of it, bounded.
         abs_path = scan_root / rel
         try:
             if abs_path.stat().st_size > _MAX_FILE_BYTES:
                 continue
-            text = abs_path.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(abs_path, scan_root, errors="ignore")
         except OSError:
             continue
         is_py = suffix in _PY_EXTENSIONS

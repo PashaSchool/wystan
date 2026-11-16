@@ -49,6 +49,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -591,7 +592,7 @@ def _scan_imports_for_deps(
             if not full.is_file():
                 continue
             # Cap read size to avoid choking on giant assets.
-            text = full.read_text(encoding="utf-8", errors="ignore")[:200_000]
+            text = read_repo_text_or_raise(full, repo_root, errors="ignore")[:200_000]
         except OSError:
             continue
         if not text:

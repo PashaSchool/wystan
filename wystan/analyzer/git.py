@@ -1,11 +1,33 @@
+import logging
+import os
 import re
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from git import Repo, InvalidGitRepositoryError
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from wystan.models.types import Commit, FileBlame
+from wystan.analyzer.git_formats import FAST_RECORD
+from wystan.analyzer.git_history import (
+    count_commits_since,
+    head_commits,
+    numstat_file_keys,
+    split_records,
+)
+from wystan.analyzer.git_partial import history_offline, partial_clone_filter
+from wystan.analyzer.git_repository import (
+    GitRepository,
+    NotARepository,
+    has_commit,
+    head_blob_paths,
+    open_repository,
+    origin_url,
+    repository_root,
+)
+from wystan.analyzer.git_runner import GitError, run_git
+from wystan.models.types import Commit
+
+logger = logging.getLogger(__name__)
 
 # Regex to extract PR numbers from commit messages.
 # Handles two common GitHub merge strategies:
@@ -68,13 +90,13 @@ def extract_pr_number(message: str) -> int | None:
     return None
 
 
-def get_remote_url(repo: Repo) -> str:
+def get_remote_url(repo: GitRepository) -> str:
     """
     Returns the GitHub base URL for the repo (without .git suffix), or empty string.
     Normalizes SSH remotes to HTTPS: git@github.com:org/repo.git → https://github.com/org/repo
     """
     try:
-        url = repo.remotes.origin.url
+        url = _origin_url(repo)
         if url.startswith("git@"):
             url = re.sub(r"^git@([^:]+):", r"https://\1/", url)
         url = url.rstrip("/")
@@ -83,6 +105,14 @@ def get_remote_url(repo: Repo) -> str:
         return url
     except Exception:
         return ""
+
+
+def _origin_url(repo) -> str:
+    if isinstance(repo, GitRepository):
+        return origin_url(repo)
+    # Any other handle (a caller's GitPython Repo) answers from its parsed
+    # config; no git runs.
+    return repo.remotes.origin.url
 
 
 def normalize_subpath(src: str | None) -> str | None:
@@ -124,18 +154,14 @@ def scope_files_to_subpath(
     return out
 
 
-def load_repo(path: str) -> Repo:
+def load_repo(path: str) -> GitRepository:
+    """The working tree containing ``path``, through the hardened runner."""
     try:
-        repo = Repo(path, search_parent_directories=True)
-    except InvalidGitRepositoryError:
+        repo = open_repository(path, search_parent_directories=True)
+    except NotARepository:
         raise ValueError(f"'{path}' is not a git repository")
 
-    if repo.head.is_detached:
-        return repo
-
-    try:
-        repo.head.commit
-    except ValueError:
+    if not has_commit(repo):
         raise ValueError(
             f"Repository at '{path}' has no commits yet. "
             "Make at least one commit before running analysis."
@@ -144,15 +170,14 @@ def load_repo(path: str) -> Repo:
     return repo
 
 
-def estimate_commits(repo: Repo, days: int, max_commits: int = DEFAULT_MAX_COMMITS) -> int:
+def estimate_commits(repo: GitRepository, days: int, max_commits: int = DEFAULT_MAX_COMMITS) -> int:
     """
     Quickly estimates the number of commits in the date range.
     Uses git rev-list --count which is near-instant regardless of repo size.
     """
-    since = f"--since={days} days ago"
     try:
-        count = repo.git.rev_list("--count", since, "HEAD")
-        return min(int(count), max_commits)
+        count = count_commits_since(repository_root(repo), f"{days} days ago")
+        return min(count, max_commits)
     except Exception:
         return 0
 
@@ -175,7 +200,7 @@ def estimate_duration(commit_count: int, use_llm: bool = False, use_flows: bool 
 
 
 def get_commits(
-    repo: Repo,
+    repo: GitRepository,
     days: int = 365,
     max_commits: int = DEFAULT_MAX_COMMITS,
     src: str | None = None,
@@ -186,8 +211,8 @@ def get_commits(
     ``commit.stats.files.keys()`` walk (4586 git subprocess calls on
     supabase, 240s wall) with a single ``git log --name-only`` invocation
     that streams all commits + their changed files in one pass (~6s on
-    the same repo, ~40× speedup). Falls back to the GitPython walk on
-    any subprocess failure so unusual repo states (shallow clones,
+    the same repo, ~40× speedup). Falls back to the per-commit walk on
+    any git failure so unusual repo states (shallow clones,
     detached HEADs, custom worktrees) still work.
 
     Args:
@@ -200,9 +225,53 @@ def get_commits(
             from computing over the whole monorepo. ``None`` preserves
             the whole-repo behaviour (back-compat).
     """
+    return read_history(repo, days=days, max_commits=max_commits, src=src)[0]
+
+
+def read_history(
+    repo: GitRepository, *, days: int = 365, max_commits: int = DEFAULT_MAX_COMMITS, src: str | None = None,
+) -> tuple[list[Commit], dict | None]:
+    """``get_commits`` and, for a partial clone whose normal read failed,
+    what the offline read could not provide (``git_partial``)."""
+    root = repository_root(repo)
     fast = _get_commits_fast(repo, days=days, max_commits=max_commits, src=src)
     if fast is not None:
-        return fast
+        commits, note = fast, None
+    elif root and partial_clone_filter(root):
+        records, note = history_offline(root, max_commits, days, normalize_subpath(src))
+        commits = _commits_from_records(records, days, normalize_subpath(src))
+    else:
+        commits, note = _walk_commits(repo, days=days, max_commits=max_commits, src=src), None
+    _remember_note(_note_key(repo), note)
+    return commits, note
+
+
+#: The last few history notes, so a caller of ``get_commits`` (one history
+#: read) can still learn what a partial clone could not provide.
+_HISTORY_NOTES: OrderedDict = OrderedDict()
+_HISTORY_NOTES_KEPT = 16
+
+
+def _remember_note(key: tuple, note: dict | None) -> None:
+    _HISTORY_NOTES[key] = note
+    _HISTORY_NOTES.move_to_end(key)
+    while len(_HISTORY_NOTES) > _HISTORY_NOTES_KEPT:
+        _HISTORY_NOTES.popitem(last=False)
+
+
+def _note_key(repo) -> str:
+    top = getattr(repo, "working_tree_dir", None) or getattr(repo, "git_dir", None) or repository_root(repo)
+    return os.path.realpath(top)
+
+
+def history_note(repo: GitRepository) -> dict | None:
+    """What the last history read of this repository could not provide
+    (``None``: everything was read, or no read happened)."""
+    return _HISTORY_NOTES.get(_note_key(repo))
+
+
+def _walk_commits(repo: GitRepository, *, days: int, max_commits: int, src: str | None) -> list[Commit]:
+    """The per-commit walk GitPython did: slow, kept for unusual states."""
 
     # Fallback — the original per-commit walk. Slow on large histories
     # but maximally compatible.
@@ -214,15 +283,24 @@ def get_commits(
     ) as progress:
         progress.add_task("Reading git history (fallback)...", total=None)
 
-        for commit in repo.iter_commits(max_count=max_commits):
+        root = repository_root(repo)
+        shallow_logged = False
+        for commit in head_commits(root, max_commits):
             commit_date = datetime.fromtimestamp(
-                commit.committed_date, tz=timezone.utc
+                commit.committed, tz=timezone.utc
             )
             age_days = (datetime.now(tz=timezone.utc) - commit_date).days
             if age_days > days:
                 break
 
-            files_changed = list(commit.stats.files.keys())
+            if commit.shallow_boundary and not shallow_logged:
+                # Recorded once per walk: the parent of a boundary commit is
+                # not in the clone, so it is diffed as git's shallow view
+                # (a root), as the fast path lists it.
+                logger.warning("git history: shallow_clone at %s; boundary commits diffed as roots", root)
+                shallow_logged = True
+            diff_parents = () if commit.shallow_boundary else commit.parents
+            files_changed = numstat_file_keys(root, commit.sha, diff_parents)
             if src is not None:
                 files_changed = scope_files_to_subpath(files_changed, src)
                 if not files_changed:
@@ -231,9 +309,9 @@ def get_commits(
                     continue
             msg = commit.message.strip()
             commits.append(Commit(
-                sha=commit.hexsha[:8],
+                sha=commit.sha[:8],
                 message=msg,
-                author=str(commit.author.name),
+                author=commit.author,
                 date=commit_date,
                 files_changed=files_changed,
                 is_bug_fix=is_bug_fix(msg),
@@ -243,197 +321,101 @@ def get_commits(
     return commits
 
 
-# Field separator inside the pretty-format header. ASCII Unit Separator
-# — never appears in commit data.
-_FIELD_DELIM = "\x1f"
-# Body-end marker — we append this to the pretty format AFTER %B so we
-# know where the multiline body ends and the file list begins. Without
-# this, body lines and file paths are indistinguishable (both are
-# newline-separated when ``--name-only`` runs).
-_BODY_END = "\x1e"  # ASCII Record Separator — never appears in commit data.
-# Compiled at module load — boundary between commit records when ``-z``
-# is in effect. After a NUL, the next byte sequence ``<40hex>\x1f`` is
-# the start of the next commit's header.
-import re as _re
-_COMMIT_BOUNDARY_RE = _re.compile(r"\x00(?=[0-9a-fA-F]{40}\x1f)")
+# The single history read of a scan; past this the per-commit fallback runs.
+_LOG_TIMEOUT_SEC = 120.0
+#: ``%H %ct %an %B``, each field NUL-terminated (``git_history.split_records``).
+_FAST_FORMAT = FAST_RECORD
+_FAST_FIELDS = 4
+#: Pathspec magic: the path is relative to the top of the working tree.
+_TOP_PATHSPEC = ":(top)"
 
 
 def _get_commits_fast(
-    repo: Repo,
+    repo: GitRepository,
     *,
     days: int,
     max_commits: int,
     src: str | None = None,
 ) -> list[Commit] | None:
-    """Stream commit metadata + file lists via ``git log --name-only``.
+    """Stream commit metadata + file lists via one ``git log --name-only -z``.
 
-    Returns ``None`` on any subprocess failure — the caller falls back
-    to the per-commit GitPython walk. Stops parsing when the per-commit
-    cutoff (``days``) is reached so we don't pay to scan deep history
-    on long-lived repos.
-
-    Output format ("``%H``" is the full SHA; we slice to 8 chars to
-    match the legacy format; ``%ct`` is committer-time as unix epoch
-    seconds; ``%an`` author name; ``%B`` raw body)::
-
-        <SHA><FD><ct><FD><an><FD><body><CD>
-        file/one.ts
-        file/two.py
-
-        <SHA><FD>...
+    Returns ``None`` on any git failure — the caller falls back to the
+    per-commit walk. Stops parsing when the per-commit cutoff (``days``)
+    is reached so we don't pay to scan deep history on long-lived repos.
+    ``-- <subpath>`` makes ``git log`` list only commits that touched the
+    subtree; ``--name-only`` still prints every file of such a commit, so
+    the list is filtered and relativized in memory.
     """
-    import subprocess
-
     try:
-        repo_path = repo.working_tree_dir or repo.git_dir
+        repo_path = repository_root(repo)
     except Exception:
         return None
     if not repo_path:
         return None
-
-    pretty = (
-        f"%H{_FIELD_DELIM}%ct{_FIELD_DELIM}%an{_FIELD_DELIM}%B{_BODY_END}"
-    )
-    cmd = [
-        "git", "log",
-        f"--max-count={max_commits}",
-        f"--since={days}.days.ago",
-        f"--pretty=format:{pretty}",
-        "--name-only",
-        "-z",  # NUL-separates commit records + filenames cleanly.
-    ]
-    # Scope to a subpath: ``-- <subpath>`` makes ``git log`` only list
-    # commits that touched the subtree. ``--name-only`` still prints
-    # ALL files in each such commit, so we additionally filter +
-    # relativize the file list in memory below. The pathspec must come
-    # last, after a ``--`` separator.
+    cmd = ["log", f"--max-count={max_commits}", f"--since={days}.days.ago",
+           f"--pretty=format:{_FAST_FORMAT}", "--name-only", "-z"]
     norm_src = normalize_subpath(src)
     if norm_src is not None:
-        cmd += ["--", norm_src]
-
+        # git may run from the named subdirectory: the pathspec is the
+        # top-relative subpath either way.
+        cmd += ["--", f"{_TOP_PATHSPEC}{norm_src}"]
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=120.0,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        result = run_git(repo_path, *cmd, timeout=_LOG_TIMEOUT_SEC, check=False)
+    except GitError:
         return None
     if result.returncode != 0:
         return None
+    # Read as dev's text-mode read did (universal newlines).
+    return _commits_from_log(result.universal_text, days, norm_src)
 
-    raw = result.stdout
-    if not raw:
-        return []
 
+def _commits_from_log(raw: str, days: int, norm_src: str | None) -> list[Commit]:
+    """Commits of a fast-path log, newest first, until the ``days`` cutoff."""
+    records = ((sha, ct, author, body, names)
+               for (sha, ct, author, body), names in split_records(raw, _FAST_FIELDS, with_files=True))
+    return _commits_from_records(records, days, norm_src)
+
+
+def _commits_from_records(records, days: int, norm_src: str | None) -> list[Commit]:
+    """``(sha, committed, author, body, names)`` records as Commits, newest
+    first, until the ``days`` cutoff."""
     commits: list[Commit] = []
     now = datetime.now(tz=timezone.utc)
-    cutoff = days
-
-    # Split on the NUL that PRECEDES the next commit's 40-hex SHA + FD.
-    # The first chunk has no preceding NUL (it starts directly with the
-    # first commit's SHA), and the last chunk ends without a trailing
-    # boundary — that's fine.
-    chunks = _COMMIT_BOUNDARY_RE.split(raw)
-
-    for chunk in chunks:
-        if not chunk:
-            continue
-        # Each chunk: <sha><FD><ct><FD><an><FD><body><BODY_END>\n
-        #             <file1>\n<file2>\n...
-        # The body itself may contain newlines — that's why we need
-        # the explicit BODY_END marker before files start. Files are
-        # newline-separated AFTER the body ends.
-        body_end_pos = chunk.find(_BODY_END)
-        if body_end_pos == -1:
-            # Malformed record — skip.
-            continue
-        header = chunk[:body_end_pos]
-        files_block = chunk[body_end_pos + 1:]  # +1 to skip BODY_END
-
-        parts = header.split(_FIELD_DELIM, 3)
-        if len(parts) < 4:
-            continue
-        sha, ct_raw, author, body = parts
+    for sha, ct_raw, author, body, names in records:
         try:
-            ct = int(ct_raw)
+            commit_date = datetime.fromtimestamp(int(ct_raw), tz=timezone.utc)
         except ValueError:
             continue
-        commit_date = datetime.fromtimestamp(ct, tz=timezone.utc)
-        age_days = (now - commit_date).days
-        if age_days > cutoff:
-            # Newest-first ordering — once we cross the cutoff every
-            # subsequent commit is older.
-            break
-
-        # Files are NUL-separated when ``-z`` is in effect; a leading
-        # newline survives from the body's trailing newline. Split on
-        # NUL and strip residual whitespace.
-        files_changed = [
-            f.strip() for f in files_block.split("\x00")
-            if f.strip()
-        ]
+        if (now - commit_date).days > days:
+            break  # newest first: every later commit is older
+        files_changed = [f.strip() for f in names if f.strip()]
         if norm_src is not None:
             files_changed = scope_files_to_subpath(files_changed, norm_src)
             if not files_changed:
-                # ``-- <subpath>`` already ensured this commit touched the
-                # subtree, but a rename-only commit can surface with an
-                # empty in-subtree set after relativization — skip it.
+                # A rename-only commit can surface with an empty in-subtree
+                # set after relativization — skip it.
                 continue
-        msg = body.strip()
-        try:
-            commits.append(Commit(
-                sha=sha[:8],
-                message=msg,
-                author=author,
-                date=commit_date,
-                files_changed=files_changed,
-                is_bug_fix=is_bug_fix(msg),
-                pr_number=extract_pr_number(msg),
-            ))
-        except Exception:
-            # A malformed record shouldn't poison the whole list.
-            continue
-
+        commit = _commit(sha, body.strip(), author, commit_date, files_changed)
+        if commit is not None:
+            commits.append(commit)
     return commits
 
 
-def get_file_blame(repo: Repo, file_path: str) -> FileBlame | None:
-    """Returns blame information for a file."""
+def _commit(sha: str, msg: str, author: str, date: datetime, files: list[str]) -> Commit | None:
     try:
-        blame = repo.blame("HEAD", file_path)
-        authors = set()
-        latest_date = None
-
-        for blame_commit, _ in blame:
-            authors.add(str(blame_commit.author.name))
-            commit_date = datetime.fromtimestamp(
-                blame_commit.committed_date, tz=timezone.utc
-            )
-            if latest_date is None or commit_date > latest_date:
-                latest_date = commit_date
-
-        return FileBlame(
-            path=file_path,
-            authors=list(authors),
-            last_modified=latest_date or datetime.now(tz=timezone.utc),
-            total_commits=len(blame),
-        )
+        return Commit(sha=sha[:8], message=msg, author=author, date=date, files_changed=files,
+                      is_bug_fix=is_bug_fix(msg), pr_number=extract_pr_number(msg))
     except Exception:
-        return None
+        return None  # a malformed record shouldn't poison the whole list
 
 
-def get_tracked_files(repo: Repo, src: str | None = None) -> list[str]:
+def get_tracked_files(repo: GitRepository, src: str | None = None) -> list[str]:
     """
     Returns all tracked files in the repository.
 
     Args:
-        repo: GitPython Repo instance.
+        repo: the repository handle from ``load_repo`` (any object with
+            ``working_tree_dir`` is accepted; only its path is read).
         src: Optional subdirectory to restrict analysis to (e.g. 'src/').
              Files outside this path are excluded.
     """
@@ -471,11 +453,8 @@ def get_tracked_files(repo: Repo, src: str | None = None) -> list[str]:
     src_prefix = Path(src) if src else None
 
     files = []
-    for item in repo.tree().traverse():
-        if item.type != "blob":
-            continue
-
-        path = Path(item.path)
+    for item_path in head_blob_paths(repository_root(repo)):
+        path = Path(item_path)
 
         # Filter to subdirectory if --src is specified
         if src_prefix and not path.is_relative_to(src_prefix):
@@ -488,6 +467,6 @@ def get_tracked_files(repo: Repo, src: str | None = None) -> list[str]:
         if path.name in skip_filenames:
             continue
 
-        files.append(item.path)
+        files.append(item_path)
 
     return files

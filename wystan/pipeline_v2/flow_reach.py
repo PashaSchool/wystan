@@ -58,6 +58,7 @@ import re
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 from wystan.analyzer.ast_extractor import (
@@ -276,7 +277,7 @@ def _go_module_path(repo_root: Path) -> str | None:
     if not gomod.exists():
         return None
     try:
-        for line in gomod.read_text(encoding="utf-8", errors="ignore").splitlines():
+        for line in read_repo_text_or_raise(gomod, repo_root, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES).splitlines():
             line = line.strip()
             if line.startswith("module "):
                 return line.removeprefix("module ").strip()
@@ -439,7 +440,7 @@ def _file_edges(
     # files that landed in BFS frontier; bounded by max_paths).
     abs_path = repo_path / rel_path
     try:
-        source = abs_path.read_text(encoding="utf-8", errors="ignore")
+        source = read_repo_text_or_raise(abs_path, repo_path, errors="ignore")
     except OSError:
         return []
 

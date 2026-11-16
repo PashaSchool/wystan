@@ -242,7 +242,7 @@ def _manifests(ctx: "ScanContext") -> list[dict]:
     whose frontend dir is not a detected workspace (RefApp ``frontend/``).
     Bounded, deterministic (sorted tracked order)."""
     out: list[dict] = []
-    root = read_json(Path(ctx.repo_path) / "package.json")
+    root = read_json(Path(ctx.repo_path) / "package.json", ctx.repo_path)
     if isinstance(root, dict):
         out.append(root)
     for ws in ctx.workspaces or []:
@@ -256,7 +256,7 @@ def _manifests(ctx: "ScanContext") -> list[dict]:
             continue
         if any(seg in _skip_segments() for seg in f.lower().split("/")[:-1]):
             continue
-        doc = read_json(Path(ctx.repo_path) / f)
+        doc = read_json(Path(ctx.repo_path) / f, ctx.repo_path)
         reads += 1
         if isinstance(doc, dict):
             out.append(doc)
@@ -646,7 +646,7 @@ def _hop_reexport_barrel(
     no-hop). Bounded chain, cycle-safe, deterministic."""
     seen = {entry}
     for _ in range(_MAX_BARREL_HOPS):
-        text = read_text(repo_root / entry)
+        text = read_text(repo_root / entry, repo_root)
         if not text or len(text) > _MAX_BYTES:
             break
         specs: list[str] = []
@@ -1001,7 +1001,7 @@ def _collect_react_router(ctx: "ScanContext") -> list[_Entry]:
             continue
         if _should_skip_path(path):
             continue
-        text = read_text(Path(ctx.repo_path) / path)
+        text = read_text(Path(ctx.repo_path) / path, ctx.repo_path)
         if not text or len(text) > _MAX_BYTES:
             continue
         if not any(mk in text for mk in gr.file_markers):
@@ -1362,7 +1362,7 @@ def _collect_route_tables(ctx: "ScanContext") -> list[_Entry]:
             continue
         if _rt_should_skip(path, gr):
             continue
-        text = read_text(repo_root / path)
+        text = read_text(repo_root / path, repo_root)
         if not text or len(text) > _MAX_BYTES:
             continue
         tables.extend(_rt_find_tables(path, text))
@@ -1556,7 +1556,7 @@ def _collect_file_routes(ctx: "ScanContext") -> list[_Entry]:
             continue
         if _tf_should_skip(raw, gr):
             continue
-        text = read_text(repo_root / raw)
+        text = read_text(repo_root / raw, repo_root)
         if not text or len(text) > _MAX_BYTES:
             continue
         if "createFileRoute" not in text:
@@ -1635,7 +1635,7 @@ class FileRouteDeclarations:
             return True  # vue-pages: the file IS the page declaration
         if not self._tf_exts or not p.endswith(self._tf_exts):
             return False
-        text = read_text(self._root / p)
+        text = read_text(self._root / p, self._root)
         if not text or len(text) > _MAX_BYTES:
             return False
         return "createFileRoute" in text
