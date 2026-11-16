@@ -26,12 +26,18 @@ MAX_INDEX_BYTES = 256 << 20
 _SIGNATURE = b"DIRC"
 _HEADER = struct.Struct(">4sII")
 _EXTENSION = struct.Struct(">4sI")
-#: Fixed part of an index entry before its flags (ctime..sha1, 20-byte id).
-_ENTRY_FIXED = 62
+#: Fixed part of an index entry before the object id (ctime..size) and the
+#: flags after it; the id is 20 bytes (sha1) or 32 (sha256).
+_STAT_BYTES = 40
+_FLAG_BYTES = 2
+#: ``extensions.objectFormat`` -> object id length in bytes.
+_OID_BYTES_BY_FORMAT = {"sha1": 20, "sha256": 32}
+_DEFAULT_FORMAT = "sha1"
+#: A repository config is small; read no more of it.
+_CONFIG_READ_BYTES = 1 << 20
 _EXTENDED_FLAG = 0x4000
 _SPLIT, _SPARSE = b"link", b"sdir"
 _GITDIR_PREFIX = "gitdir:"
-_OID_BYTES = 20
 
 
 def git_dir_of(root: str) -> str | None:
@@ -46,14 +52,15 @@ def git_dir_of(root: str) -> str | None:
     return None
 
 
-def _entry_end(data: bytes, start: int, version: int) -> int | None:
+def _entry_end(data: bytes, start: int, version: int, oid_bytes: int) -> int | None:
     """Offset past one entry: fixed part, optional extended flags, then the
     path (v2/v3: NUL-padded to a multiple of 8, git's ``ondisk_ce_size``;
     v4: a prefix-strip varint and a NUL-terminated suffix, no padding)."""
-    if start + _ENTRY_FIXED > len(data):
+    fixed = _STAT_BYTES + oid_bytes + _FLAG_BYTES
+    if start + fixed > len(data):
         return None
-    flags = struct.unpack_from(">H", data, start + _ENTRY_FIXED - 2)[0]
-    header = _ENTRY_FIXED + (2 if version >= 3 and flags & _EXTENDED_FLAG else 0)
+    flags = struct.unpack_from(">H", data, start + fixed - _FLAG_BYTES)[0]
+    header = fixed + (2 if version >= 3 and flags & _EXTENDED_FLAG else 0)
     offset = start + header
     if version >= 4:
         while offset < len(data) and data[offset] & 0x80:
@@ -67,27 +74,27 @@ def _entry_end(data: bytes, start: int, version: int) -> int | None:
     return start + ((header + (end - offset) + 8) & ~7)
 
 
-def _skip_entries(data: bytes, version: int, count: int) -> int | None:
+def _skip_entries(data: bytes, version: int, count: int, oid_bytes: int) -> int | None:
     """Offset just past the entries, or ``None`` when they do not parse."""
     offset: int | None = _HEADER.size
     for _ in range(count):
-        offset = _entry_end(data, offset, version)
+        offset = _entry_end(data, offset, version, oid_bytes)
         if offset is None:
             return None
     return offset
 
 
-def index_extensions(data: bytes) -> set[bytes] | None:
+def index_extensions(data: bytes, oid_bytes: int = _OID_BYTES_BY_FORMAT[_DEFAULT_FORMAT]) -> set[bytes] | None:
     """Extension signatures of an index file's bytes, ``None`` if unparsable."""
     if len(data) < _HEADER.size:
         return None
     signature, version, count = _HEADER.unpack_from(data)
     if signature != _SIGNATURE or version not in (2, 3, 4):
         return None
-    offset = _skip_entries(data, version, count)
+    offset = _skip_entries(data, version, count, oid_bytes)
     if offset is None:
         return None
-    found, end = set(), len(data) - _OID_BYTES
+    found, end = set(), len(data) - oid_bytes
     while offset + _EXTENSION.size <= end:
         name, size = _EXTENSION.unpack_from(data, offset)
         found.add(name)
@@ -95,10 +102,26 @@ def index_extensions(data: bytes) -> set[bytes] | None:
     return found
 
 
+def object_format(git_dir: str) -> str | None:
+    """``extensions.objectFormat`` of the repository's config (``sha1`` when
+    unset), read as a file; ``None`` for a value the engine cannot parse."""
+    text = read_pointer(os.path.join(git_dir, "config"), _CONFIG_READ_BYTES) or ""
+    section, found = "", _DEFAULT_FORMAT
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped.strip("[]").strip().lower()
+        elif section == "extensions" and "=" in stripped:
+            key, _, value = stripped.partition("=")
+            if key.strip().lower() == "objectformat":
+                found = value.split("#")[0].split(";")[0].strip().strip('"').lower()
+    return found if found in _OID_BYTES_BY_FORMAT else None
+
+
 @functools.lru_cache(maxsize=64)
-def _refusal(index: str, size: int, mtime_ns: int) -> str | None:
+def _refusal(index: str, size: int, mtime_ns: int, oid_bytes: int) -> str | None:
     with open(index, "rb") as fh:
-        extensions = index_extensions(fh.read(size))
+        extensions = index_extensions(fh.read(size), oid_bytes)
     if extensions is None:
         return "index does not parse"
     if _SPLIT in extensions:
@@ -139,4 +162,7 @@ def index_refusal(root: str) -> str | None:
         return "index is not a regular file"
     if info.st_size > MAX_INDEX_BYTES:
         return f"index larger than {MAX_INDEX_BYTES} bytes"
-    return _refusal(index, info.st_size, info.st_mtime_ns)
+    found_format = object_format(git_dir)
+    if found_format is None:
+        return "unknown object format (extensions.objectFormat)"
+    return _refusal(index, info.st_size, info.st_mtime_ns, _OID_BYTES_BY_FORMAT[found_format])
