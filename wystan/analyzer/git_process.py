@@ -14,6 +14,8 @@ import threading
 from dataclasses import dataclass
 from typing import BinaryIO, Callable, TypeVar
 
+from wystan.analyzer.repo_open import _EXHAUSTED_ERRNOS, DescriptorsExhausted
+
 T = TypeVar("T")
 
 #: Bytes read from the child per call; large enough that a big ``git log``
@@ -25,6 +27,15 @@ _STDERR_KEPT_BYTES = 4096
 
 class GitError(RuntimeError):
     """A git call did not produce a usable result."""
+
+
+def _start_failed(exc: OSError) -> BaseException:
+    """The process ran out of descriptors (``DescriptorsExhausted``, a
+    ``BaseException`` no caller may take for a git failure), or git could
+    not start."""
+    if exc.errno in _EXHAUSTED_ERRNOS:
+        return DescriptorsExhausted(f"no file descriptor left to start git: {exc}")
+    return GitError(f"cannot start git: {exc}")
 
 
 class GitTimeout(GitError):
@@ -82,6 +93,13 @@ def _read_capped(proc: subprocess.Popen[bytes], max_output: int) -> bytes | None
         chunks.append(chunk)
 
 
+def _stderr_file():
+    try:
+        return tempfile.TemporaryFile()
+    except OSError as exc:
+        raise _start_failed(exc) from exc
+
+
 def _feed(proc: subprocess.Popen[bytes], data: bytes) -> threading.Thread:
     """Write ``data`` to the child's stdin from a thread, so a child that
     prints while it reads cannot deadlock against us."""
@@ -106,14 +124,14 @@ def run_bounded(
     """Run ``argv`` with ``env`` only, ``stdin`` (if any) as its input; kill
     it at ``timeout`` seconds or past ``max_output`` bytes of stdout."""
     expired = threading.Event()
-    with tempfile.TemporaryFile() as err_file:
+    with _stderr_file() as err_file:
         try:
             proc = subprocess.Popen(
                 argv, stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=err_file, env=env,
             )
         except OSError as exc:
-            raise GitError(f"cannot start git: {exc}") from exc
+            raise _start_failed(exc) from exc
         writer = None if stdin is None else _feed(proc, stdin)
 
         def _expire() -> None:
@@ -150,14 +168,14 @@ def run_streaming(
     bounds what it reads); kill the child at ``timeout`` seconds. A non-zero
     exit or an exception in ``consume`` fails the call."""
     expired = threading.Event()
-    with tempfile.TemporaryFile() as err_file:
+    with _stderr_file() as err_file:
         try:
             proc = subprocess.Popen(
                 argv, stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=err_file, env=env,
             )
         except OSError as exc:
-            raise GitError(f"cannot start git: {exc}") from exc
+            raise _start_failed(exc) from exc
         writer = None if stdin is None else _feed(proc, stdin)
 
         def _expire() -> None:
