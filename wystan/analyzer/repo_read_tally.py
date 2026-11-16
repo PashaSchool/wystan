@@ -14,9 +14,11 @@ a binary file stopped at its head, a directory where a file was expected, and a
 file over a call site's own work bound below the guard's caps (it was skipped
 before the guard too) are not refusals.
 
-Scope: one record per boundary (the scanned tree) per process. A scan clears
-its boundary's record when it starts (``begin_scan``); two scans of one
-repository running at the same time in one process share one record.
+Scope: refusals are recorded under the root the reader was given and taken
+by the scan whose root is that root or lies above it, so a refusal is reported
+whether a site spelled the scan's root as a ``Path``, a ``str``, or a sub-root.
+A scan clears that record when it starts (``begin_scan``); two scans of one
+tree, or of nested trees, running at the same time in one process share it.
 
 The block is emitted only when something was refused or the process uses the
 fallback open path (``repo_open``): an ordinary repository's map keeps every
@@ -28,7 +30,6 @@ from __future__ import annotations
 import os
 import threading
 
-from wystan.analyzer.repo_boundary import Boundary, boundary_of
 from wystan.analyzer.repo_open import OPEN_PATH_DIR_FD, open_path
 
 __all__ = [
@@ -53,36 +54,54 @@ REASONS = (REASON_OUTSIDE, REASON_NOT_REGULAR, REASON_OVER_CAP, REASON_OPEN_ERRO
 #: repository with thousands of refused links.
 PATHS_LISTED = 20
 
+#: ``{absolute root a reader was given: {reason: {absolute path}}}``.
 _records: dict[str, dict[str, set[str]]] = {}
 _lock = threading.Lock()
 
 
-def _relative(path: os.PathLike[str] | str, boundary: Boundary) -> str:
-    """The path as the repository spells it (no machine-specific prefix)."""
-    relative = os.path.relpath(os.path.abspath(os.fspath(path)), boundary.lexical)
-    return relative.replace(os.sep, "/")
+def _absolute(path: os.PathLike[str] | str) -> str:
+    return os.path.abspath(os.fspath(path))
+
+
+def _within(root: str, scan_root: str) -> bool:
+    return root == scan_root or root.startswith(scan_root.rstrip(os.sep) + os.sep)
 
 
 def record_refusal(path: os.PathLike[str] | str, repo_root: os.PathLike[str] | str, reason: str) -> None:
     """Record that the read of ``path`` under ``repo_root`` was refused."""
-    boundary = boundary_of(repo_root)
-    relative = _relative(path, boundary)
     with _lock:
-        _records.setdefault(boundary.real, {}).setdefault(reason, set()).add(relative)
+        _records.setdefault(_absolute(repo_root), {}).setdefault(reason, set()).add(_absolute(path))
+
+
+def _take(scan_root: str) -> dict[str, set[str]]:
+    """Under the lock: remove and merge every record of a root at or below
+    ``scan_root`` (a reader given a sub-root, a ``str`` or a ``Path`` of the
+    scan root, records under the same scan)."""
+    merged: dict[str, set[str]] = {}
+    for root in [root for root in _records if _within(root, scan_root)]:
+        for reason, paths in _records.pop(root).items():
+            merged.setdefault(reason, set()).update(paths)
+    return merged
 
 
 def begin_scan(scan_root: os.PathLike[str] | str) -> None:
     """Clear the record of the tree a scan starts on."""
     with _lock:
-        _records.pop(boundary_of(scan_root).real, None)
+        _take(_absolute(scan_root))
+
+
+def _relative(path: str, scan_root: str) -> str:
+    """The path as the scanned tree spells it (no machine-specific prefix)."""
+    return os.path.relpath(path, scan_root).replace(os.sep, "/")
 
 
 def repository_reads_block(scan_root: os.PathLike[str] | str) -> dict | None:
     """The ``scan_meta.repository_reads`` value of the scan of
     ``scan_root``, or ``None`` when nothing was refused on the ``dir_fd``
-    open path (module doc). Takes the record."""
+    open path (module doc). Takes every record of the scan."""
+    top = _absolute(scan_root)
     with _lock:
-        found = _records.pop(boundary_of(scan_root).real, {})
+        found = {reason: {_relative(path, top) for path in paths} for reason, paths in _take(top).items()}
     used = open_path()
     if not any(found.values()) and used == OPEN_PATH_DIR_FD:
         return None
