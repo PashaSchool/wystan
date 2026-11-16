@@ -13,7 +13,7 @@ from pathlib import Path
 
 from wystan.analyzer.git_history import FIELD_END, numstat_file_keys, raw_parents, split_records
 from wystan.analyzer.git_repository import GitRepository, open_repository, origin_url
-from wystan.analyzer.git_runner import object_name, revision, run_git
+from wystan.analyzer.git_runner import GitError, object_name, revision, run_git
 
 # Each field NUL-terminated: no commit field can hold a NUL.
 _DIGEST_FORMAT = "".join(f"{field}{FIELD_END}" for field in ("%H", "%P", "%an", "%ae", "%cI", "%B"))
@@ -84,7 +84,9 @@ def _has_branch(root: str, name: str) -> bool:
 
 def _active_branch(root: str) -> str:
     """The checked-out branch; fails on a detached HEAD (as GitPython did)."""
-    ref = run_git(root, "symbolic-ref", "HEAD").text.strip()
+    ref = run_git(root, "rev-parse", "--symbolic-full-name", "HEAD").text.strip()
+    if ref == "HEAD":  # detached: rev-parse names no branch
+        raise GitError("HEAD is detached; no active branch")
     return ref[len(_HEADS_PREFIX):] if ref.startswith(_HEADS_PREFIX) else ref
 
 

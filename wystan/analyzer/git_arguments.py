@@ -14,33 +14,36 @@ everything after ``--`` is a path and is data.
 
 from __future__ import annotations
 
-#: subcommand -> (allowed options, most positional arguments before ``--``).
-#: ``None`` means any number. Options ending in ``=`` are prefixes.
-FORMS: dict[str, tuple[frozenset[str], int | None]] = {
-    "cat-file": (frozenset({"--batch", "--batch-check"}), 0),
-    "config": (frozenset({"--get", "--get-regexp", "--null", "--name-only"}), 1),
-    "diff-index": (frozenset({"-p", "-M"}), 1),
+#: subcommand -> (allowed options, most positional arguments before ``--``,
+#: whether paths may follow ``--``). Options ending in ``=`` are prefixes.
+#: Positionals are revisions or config names the callers validate
+#: (``git_runner.revision``/``object_name``); only log and diff-tree take
+#: paths, and for every other subcommand a ``--`` is refused, so nothing
+#: after it can reach git as an argument (``symbolic-ref HEAD -- <ref>``
+#: wrote HEAD; symbolic-ref is no longer allowed at all).
+FORMS: dict[str, tuple[frozenset[str], int, bool]] = {
+    "cat-file": (frozenset({"--batch", "--batch-check"}), 0, False),
+    "config": (frozenset({"--get", "--get-regexp", "--null", "--name-only"}), 1, False),
+    "diff-index": (frozenset({"-p", "-M"}), 1, False),
     "diff-tree": (frozenset({"--numstat", "--no-renames", "--root", "--raw", "-r", "--abbrev=",
-                             "--full-index", "-M", "-z", "--no-color", "--name-only"}), 2),
+                             "--full-index", "-M", "-z", "--no-color", "--name-only"}), 2, True),
     "log": (frozenset({"--max-count=", "--since=", "--until=", "--pretty=", "--name-only", "--name-status",
-                       "-z", "--no-renames", "--first-parent"}), None),
-    "ls-files": (frozenset({"-z", "-s"}), 0),
-    "ls-tree": (frozenset({"-r", "-t", "-z", "--full-tree", "--name-only"}), 1),
-    "rev-list": (frozenset({"--count", "--since=", "--objects", "--no-walk", "--missing="}), None),
+                       "-z", "--no-renames", "--first-parent"}), 1, True),
+    "ls-files": (frozenset({"-z", "-s"}), 0, False),
+    "ls-tree": (frozenset({"-r", "-t", "-z", "--full-tree", "--name-only"}), 1, False),
+    "rev-list": (frozenset({"--count", "--since=", "--objects", "--no-walk", "--missing="}), 1, False),
     "rev-parse": (frozenset({"--show-cdup", "--absolute-git-dir", "--verify", "--quiet",
                              "--is-inside-work-tree", "--show-toplevel", "--git-common-dir",
-                             "--is-bare-repository", "--is-shallow-repository"}), None),
-    "status": (frozenset({"--porcelain=v1", "--untracked-files=all", "-z"}), 0),
-    "symbolic-ref": (frozenset({"--quiet"}), 1),
+                             "--is-bare-repository", "--is-shallow-repository", "--symbolic-full-name"}), 1, False),
+    "status": (frozenset({"--porcelain=v1", "--untracked-files=all", "-z"}), 0, False),
 }
-#: The one ref ``symbolic-ref`` may read (a second argument would write it).
-_SYMBOLIC_REF_TARGET = "HEAD"
 #: Actions ``config`` and ``cat-file`` must name (each subcommand writes or
 #: changes mode without one).
 REQUIRED_ACTIONS = {
     "cat-file": frozenset({"--batch", "--batch-check"}),
     "config": frozenset({"--get", "--get-regexp"}),
 }
+_SEPARATOR = "--"
 
 
 def _option_allowed(option: str, allowed: frozenset[str]) -> bool:
@@ -50,25 +53,30 @@ def _option_allowed(option: str, allowed: frozenset[str]) -> bool:
     return bool(sep) and f"{head}=" in allowed
 
 
+def _split(args: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...] | None]:
+    if _SEPARATOR not in args:
+        return args, None
+    index = args.index(_SEPARATOR)
+    return args[:index], args[index + 1:]
+
+
 def refusal(subcommand: str, args: tuple[str, ...]) -> str | None:
     """Why ``git <subcommand> <args>`` is not an engine form, or ``None``."""
     if subcommand not in FORMS:
         return "subcommand not allowed"
-    allowed, most_positional = FORMS[subcommand]
-    positional: list[str] = []
-    for arg in args:
-        if arg == "--":
-            break
-        if arg.startswith("-"):
-            if not _option_allowed(arg, allowed):
-                return f"option not allowed: {arg!r}"
-        else:
-            positional.append(arg)
-    if most_positional is not None and len(positional) > most_positional:
+    allowed, most_positional, takes_paths = FORMS[subcommand]
+    head, paths = _split(args)
+    if paths is not None and not takes_paths:
+        return f"`git {subcommand}` takes no paths: nothing may follow `--`"
+    positional = [arg for arg in head if not arg.startswith("-")]
+    for arg in head:
+        if arg.startswith("-") and not _option_allowed(arg, allowed):
+            return f"option not allowed: {arg!r}"
+    if len(positional) > most_positional:
         return f"too many arguments: {positional!r}"
+    if any(not arg for arg in positional):
+        return "an empty argument"
     required = REQUIRED_ACTIONS.get(subcommand)
-    if required is not None and not required.intersection(args):
+    if required is not None and not required.intersection(head):
         return "a read action is required"
-    if subcommand == "symbolic-ref" and positional != [_SYMBOLIC_REF_TARGET]:
-        return "only `symbolic-ref HEAD` is read"
     return None
