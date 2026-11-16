@@ -173,11 +173,12 @@ def enumerate_source_files(repo_root: Path) -> list[str]:
     """
     tracked: list[str]
     try:
-        from git import Repo  # GitPython — engine dependency
-
         from wystan.analyzer.git import get_tracked_files
+        from wystan.analyzer.git_repository import open_repository
 
-        tracked = get_tracked_files(Repo(str(repo_root)))
+        tracked = get_tracked_files(
+            open_repository(repo_root, search_parent_directories=False),
+        )
     except Exception:  # noqa: BLE001 — non-git fixture trees
         from wystan.pipeline_v2.stage_0_intake import _walk_tracked_files
 

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, run_git
 from wystan.analyzer.incremental import incremental_update
 from wystan.cache.freshness import FreshnessReport, check_freshness
 from wystan.cache.hashing import changed_files, hash_files
@@ -82,8 +83,8 @@ def refresh_feature_map(
     # 1. Fetch new commits
     if fetch_commits_fn is None:
         from wystan.analyzer.git import get_commits
-        from git import Repo
-        repo = Repo(repo_path)
+        from wystan.analyzer.git_repository import open_repository
+        repo = open_repository(repo_path, search_parent_directories=False)
         days_back = max(1, freshness.days_since_scan + 1)
         new_commits = get_commits(repo, days=days_back)
         # Filter to commits after last scan
@@ -141,14 +142,16 @@ def refresh_feature_map(
     )
 
 
+#: Listing the index is fast; a repository that needs longer reads as empty.
+_LS_FILES_TIMEOUT_SEC = 30.0
+
+
 def _list_tracked_files(repo_path: str) -> list[str]:
-    """Use `git ls-files` to get all tracked files (honors .gitignore)."""
-    import subprocess
+    """Use `git ls-files` to get all tracked files (honors .gitignore).
+    Raises GitAnswerUnavailable when git cannot list them (a refused index):
+    an empty list would count every file as removed."""
     try:
-        out = subprocess.check_output(
-            ["git", "ls-files"],
-            cwd=repo_path, text=True, timeout=30,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-        return []
+        out = run_git(repo_path, "ls-files", timeout=_LS_FILES_TIMEOUT_SEC).universal_text
+    except GitError as exc:
+        raise GitAnswerUnavailable(f"tracked files unavailable: {exc}") from exc
     return [line.strip() for line in out.splitlines() if line.strip()]

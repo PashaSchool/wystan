@@ -68,9 +68,9 @@ def _git_head_short(repo_path: Path) -> str:
     """
     try:
         from wystan.analyzer.git import load_repo
+        from wystan.analyzer.git_repository import head_sha
 
-        repo = load_repo(str(repo_path))
-        sha = repo.head.commit.hexsha
+        sha = head_sha(load_repo(str(repo_path)))
         return sha[:8] if sha else "nogit"
     except Exception as exc:  # noqa: BLE001 — best-effort tag, never fatal
         logger.debug("run_dir: no git HEAD for %s (%s)", repo_path, exc)

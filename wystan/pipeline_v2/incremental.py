@@ -33,9 +33,10 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 from pathlib import Path
 from typing import Any
+
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, revision, run_git
 
 logger = logging.getLogger(__name__)
 
@@ -61,38 +62,38 @@ def load_base_scan(path: Path | str) -> dict[str, Any]:
     return data
 
 
+#: Timeouts of the two bookkeeping reads (unchanged from the direct calls).
+_DIFF_TIMEOUT_SEC = 30.0
+_REV_PARSE_TIMEOUT_SEC = 10.0
+
+
 def changed_files_since(repo_path: Path, since: str) -> list[str]:
     """Return ``git diff --name-only <since>..HEAD`` as repo-relative paths.
 
     Empty list when the diff is empty or git fails (logged at warning).
     """
     try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_path), "diff", "--name-only",
-             f"{since}..HEAD"],
-            capture_output=True, text=True, check=True, timeout=30,
+        # Plumbing equal to `git diff --name-only <since>..HEAD` (renames
+        # on), which never touches the clone's index.
+        out = run_git(
+            repo_path, "diff-tree", "-r", "-M", "--name-only", revision(since), "HEAD",
+            timeout=_DIFF_TIMEOUT_SEC,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-            FileNotFoundError) as exc:
-        logger.warning(
-            "incremental: git diff %s..HEAD failed (%s) — empty changed-set",
-            since, exc,
-        )
-        return []
-    return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+    except GitError as exc:
+        # Not an empty changed-set: that would reuse every feature unchanged.
+        logger.warning("incremental: git diff %s..HEAD unavailable (%s)", since, exc)
+        raise GitAnswerUnavailable(f"files changed since {since!r} unavailable: {exc}") from exc
+    return [ln.strip() for ln in out.universal_text.splitlines() if ln.strip()]
 
 
 def head_sha(repo_path: Path) -> str:
-    """Return the current HEAD SHA; empty string on failure."""
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True, timeout=10,
-        )
-        return out.stdout.strip()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("incremental: rev-parse HEAD failed (%s)", exc)
-        return ""
+    """Return the current HEAD SHA; ``""`` for a tree that is not a git
+    repository (or has no commit yet). A failure raises: the map records it
+    as its scan commit, and an empty one reads as a legacy map that is
+    always fresh (``cache.freshness``)."""
+    from wystan.analyzer.git_repository import head_commit_or_empty
+
+    return head_commit_or_empty(repo_path, _REV_PARSE_TIMEOUT_SEC)
 
 
 def touched_feature_uuids(

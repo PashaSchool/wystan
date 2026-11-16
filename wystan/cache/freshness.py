@@ -6,10 +6,10 @@ decide whether any work is needed.
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, revision, run_git
 from wystan.models.types import FeatureMap
 
 
@@ -54,7 +54,8 @@ def check_freshness(
         days_since = max(0, delta.days)
 
     if not scanned_sha or not current_sha:
-        # Legacy map or git unavailable — assume fresh enough
+        # Legacy map (no scanned commit): assume fresh enough. An unreadable
+        # HEAD raised above.
         return FreshnessReport(
             is_stale=False,
             current_sha=current_sha or "",
@@ -90,25 +91,28 @@ def check_freshness(
     )
 
 
+#: Freshness is a quick probe; a slow repository reads as "unknown".
+_REV_PARSE_TIMEOUT_SEC = 5.0
+_RANGE_TIMEOUT_SEC = 10.0
+
+
 def _git_rev_parse(repo_path: str) -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_path, text=True, timeout=5,
-        ).strip()
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
-        return ""
+    """HEAD's commit, ``""`` only for no repository or no commit. A failure
+    raises: an empty answer reads as "assume fresh" in the caller."""
+    from wystan.analyzer.git_repository import head_commit_or_empty
+
+    return head_commit_or_empty(repo_path, _REV_PARSE_TIMEOUT_SEC)
 
 
 def _count_commits(from_sha: str, to_sha: str, repo_path: str) -> int:
     try:
-        out = subprocess.check_output(
-            ["git", "rev-list", "--count", f"{from_sha}..{to_sha}"],
-            cwd=repo_path, text=True, timeout=10,
-        ).strip()
+        out = run_git(
+            repo_path, "rev-list", "--count", f"{revision(from_sha)}..{revision(to_sha)}",
+            timeout=_RANGE_TIMEOUT_SEC,
+        ).universal_text.strip()
         return int(out)
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, ValueError, FileNotFoundError):
-        return 0
+    except (GitError, ValueError) as exc:
+        raise GitAnswerUnavailable(f"commits between {from_sha} and {to_sha} unavailable: {exc}") from exc
 
 
 def _diff_files(
@@ -124,12 +128,15 @@ def _diff_files(
     metric updates.
     """
     try:
-        out = subprocess.check_output(
-            ["git", "diff", "--name-only", f"{from_sha}..{to_sha}"],
-            cwd=repo_path, text=True, timeout=10,
-        )
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
-        return set(), False
+        # Plumbing: what `git diff --name-only A..B` printed (renames on),
+        # without the porcelain that may refresh the clone's index.
+        out = run_git(
+            repo_path, "diff-tree", "-r", "-M", "--name-only", revision(from_sha), revision(to_sha),
+            timeout=_RANGE_TIMEOUT_SEC,
+        ).universal_text
+    except GitError as exc:
+        # Not "nothing changed": the caller must not treat the map as fresh.
+        raise GitAnswerUnavailable(f"files changed between {from_sha} and {to_sha} unavailable: {exc}") from exc
 
     changed = {line.strip() for line in out.splitlines() if line.strip()}
     if not changed:

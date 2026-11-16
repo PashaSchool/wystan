@@ -403,7 +403,9 @@ def _run_refresh(map_path: Path, repo_path: str, *, verbose: bool = False) -> No
                 f"{result.files_truly_modified} modified, {result.files_added} added"
             )
     except Exception as exc:
-        logger.warning("watcher refresh failed: %s", exc)
+        # Includes GitAnswerUnavailable (a refused index): the map is not
+        # written, so a refused listing never empties it.
+        logger.warning("watcher refresh failed, map unchanged: %s", exc)
 
 
 # CLI entry point for Windows subprocess fallback

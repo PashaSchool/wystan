@@ -389,8 +389,14 @@ def refresh(
     console.print(f"[dim]Loading:[/dim] {map_file}")
     fm = FeatureMap.model_validate_json(map_file.read_text())
 
+    from wystan.analyzer.git_runner import GitAnswerUnavailable
+
     if check_only:
-        report = check_freshness(fm, repo_path)
+        try:
+            report = check_freshness(fm, repo_path)
+        except GitAnswerUnavailable as exc:
+            console.print(f"[red]✗ Freshness unknown:[/red] {exc}")
+            raise typer.Exit(1)
         if not report.is_stale:
             console.print("[green]✓ Feature map is up to date with HEAD[/green]")
         else:
@@ -401,7 +407,12 @@ def refresh(
             )
         return
 
-    result = refresh_feature_map(fm, repo_path)
+    try:
+        result = refresh_feature_map(fm, repo_path)
+    except GitAnswerUnavailable as exc:
+        # A refused or failed git answer is not "no files": stop, cache unchanged.
+        console.print(f"[red]✗ Refresh stopped, map unchanged:[/red] {exc}")
+        raise typer.Exit(1)
 
     if not result.freshness_before.is_stale and not detect_new and not refresh_symbols:
         console.print("[green]✓ Already up to date — no refresh needed[/green]")

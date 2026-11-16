@@ -84,6 +84,7 @@ from wystan.pipeline_v2.snapshots import (
     percentile,
     run_snapshots,
     select_snapshot_commits,
+    snapshot_wants_content,
 )
 from wystan.pipeline_v2.stage_6_95_history import (
     _entity_specs,
@@ -197,6 +198,8 @@ def stage_6_96_impact(
         [c.sha for c in snaps],
         _compute,
         log=log,
+        # Only the files the import index and manifest readers read.
+        wants_content=snapshot_wants_content,
     )
     telemetry.update(
         {
@@ -210,6 +213,12 @@ def stage_6_96_impact(
             )
         },
     )
+    # Present only when one happened: tree paths the snapshot export would
+    # not write (unsafe names, collisions), and snapshots a partial clone
+    # could not provide (blobs not in the object store; never fetched).
+    for key in ("impact_export_refused", "impact_skipped_missing_objects"):
+        if key in run_telemetry:
+            telemetry[key] = run_telemetry[key]
 
     # ── Assemble per-entity series (snapshot order is ascending) ─────
     series: list[list[ImpactPoint]] = [[] for _ in entities]

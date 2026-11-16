@@ -1,8 +1,9 @@
 """
 Standalone git reader for daily digest.
 
-Zero imports from wystan core — fully self-contained.
-Reads commits merged to main/master for a given date.
+Reads commits merged to main/master for a given date. Its only engine
+imports are the hardened git runner and the repository helpers built on it
+(the commands are the ones GitPython ran, so the digest is unchanged).
 """
 
 import re
@@ -10,7 +11,16 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from git import Repo, InvalidGitRepositoryError
+from wystan.analyzer.git_formats import DIGEST_RECORD
+from wystan.analyzer.git_history import numstat_file_keys, raw_parents, split_records
+from wystan.analyzer.git_repository import GitRepository, open_repository, origin_url
+from wystan.analyzer.git_runner import GitAnswerUnavailable, GitError, object_name, revision, run_git
+
+# Each field NUL-terminated: no commit field can hold a NUL.
+_DIGEST_FORMAT = DIGEST_RECORD
+_DIGEST_FIELDS = 6
+_DEFAULT_BRANCHES = ("main", "master")
+_HEADS_PREFIX = "refs/heads/"
 
 
 @dataclass
@@ -55,9 +65,9 @@ def _extract_pr(message: str) -> int | None:
     return None
 
 
-def _get_remote_url(repo: Repo) -> str:
+def _get_remote_url(repo: GitRepository) -> str:
     try:
-        url = repo.remotes.origin.url
+        url = origin_url(repo)
         if url.startswith("git@"):
             url = re.sub(r"^git@([^:]+):", r"https://\1/", url)
         url = url.rstrip("/")
@@ -66,6 +76,71 @@ def _get_remote_url(repo: Repo) -> str:
         return url
     except Exception:
         return ""
+
+
+def _has_branch(root: str, name: str) -> bool:
+    found = run_git(root, "rev-parse", "--verify", "--quiet", f"{_HEADS_PREFIX}{name}", check=False)
+    return found.returncode == 0
+
+
+def _active_branch(root: str) -> str:
+    """The checked-out branch; fails on a detached HEAD (as GitPython did)."""
+    ref = run_git(root, "rev-parse", "--symbolic-full-name", "HEAD").text.strip()
+    if ref == "HEAD":  # detached: rev-parse names no branch
+        raise GitError("HEAD is detached; no active branch")
+    return ref[len(_HEADS_PREFIX):] if ref.startswith(_HEADS_PREFIX) else ref
+
+
+def _first_parent_records(root: str, branch: str, since: datetime, until: datetime) -> list[tuple]:
+    """``iter_commits(branch, since, until, first_parent=True)``: sha,
+    parents, author name, author email, committer date (ISO), message."""
+    out = run_git(
+        root, "log", "--first-parent", f"--since={since.isoformat()}", f"--until={until.isoformat()}",
+        f"--pretty=format:{_DIGEST_FORMAT}", "-z", revision(branch), "--",
+    ).text
+    records = [
+        (sha, author, email, committed, msg)
+        for (sha, _grafted, author, email, committed, msg), _files in split_records(out, _DIGEST_FIELDS)
+    ]
+    # Parents as the commit object names them (GitPython's view), not as
+    # shallow grafts rewrite them.
+    parents = raw_parents(root, [r[0] for r in records])
+    return [(r[0], p, *r[1:]) for r, p in zip(records, parents)]
+
+
+def _raw_diff_first_paths(raw: bytes) -> list[str]:
+    """``a_path or b_path`` of each entry of a ``--raw -z`` diff, as
+    GitPython parsed it: the source path of a rename or copy, else the path."""
+    text = raw.decode("utf-8")
+    _, _, text = text.partition(":")
+    paths = []
+    for entry in text.split("\x00:"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition("\x00")
+        path = path.rstrip("\x00").strip("\n")
+        if meta.split(None, 4)[4][0] in "CR":
+            path = path.split("\x00", 1)[0]
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _changed_files(root: str, sha: str, parents: tuple[str, ...]) -> list[str]:
+    """Files of the commit against its first parent (renames detected), or
+    the numstat keys of a root commit. A failed diff raises: an empty list
+    would report a commit that touched no files."""
+    try:
+        if not parents:
+            return numstat_file_keys(root, sha, parents)
+        raw = run_git(
+            root, "diff-tree", object_name(parents[0]), object_name(sha), "-r",
+            "--abbrev=40", "--full-index", "-M", "--raw", "-z", "--no-color",
+        ).stdout
+        return _raw_diff_first_paths(raw)
+    except (GitError, IndexError, ValueError) as exc:
+        # IndexError/ValueError: a record git printed that does not parse.
+        raise GitAnswerUnavailable(f"files of commit {sha} unavailable: {exc}") from exc
 
 
 def get_daily_commits(
@@ -83,17 +158,15 @@ def get_daily_commits(
     Returns:
         Dict with repo info and commits list, ready for JSON serialization.
     """
-    repo = Repo(repo_path)
+    repo = open_repository(repo_path, search_parent_directories=False)
+    root = repo.root
     remote_url = _get_remote_url(repo)
 
     # Resolve branch
     if not branch:
-        for candidate in ("main", "master"):
-            if candidate in [ref.name for ref in repo.heads]:
-                branch = candidate
-                break
+        branch = next((c for c in _DEFAULT_BRANCHES if _has_branch(root, c)), None)
         if not branch:
-            branch = repo.active_branch.name
+            branch = _active_branch(root)
 
     # Parse date range
     target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -102,31 +175,16 @@ def get_daily_commits(
 
     # Get commits on the branch for that date
     commits: list[DigestCommit] = []
-    for git_commit in repo.iter_commits(
-        branch,
-        since=since.isoformat(),
-        until=until.isoformat(),
-        first_parent=True,  # only merged commits, skip merge bases
-    ):
-        msg = git_commit.message.strip()
+    for record in _first_parent_records(root, branch, since, until):
+        sha, parents, author, email, committed, msg = record
+        msg = msg.strip()
         first_line = msg.split("\n")[0]
-
-        files = []
-        try:
-            if git_commit.parents:
-                diff = git_commit.parents[0].diff(git_commit)
-                files = [d.a_path or d.b_path for d in diff if d.a_path or d.b_path]
-            else:
-                files = list(git_commit.stats.files.keys())
-        except Exception:
-            pass
-
         commits.append(DigestCommit(
-            sha=git_commit.hexsha[:8],
+            sha=sha[:8],
             message=first_line,
-            author=git_commit.author.name or git_commit.author.email,
-            date=git_commit.committed_datetime.isoformat(),
-            files_changed=files,
+            author=author or email,
+            date=committed,
+            files_changed=_changed_files(root, sha, parents),
             is_bug_fix=_is_bug_fix(first_line),
             pr_number=_extract_pr(msg),
         ))

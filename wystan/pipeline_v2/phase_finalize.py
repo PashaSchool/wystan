@@ -2765,6 +2765,36 @@ def run_finalize_phase(
             run_dir=run_dir,
         )
     scan_meta["stage_6_96_impact"] = dict(impact_telemetry)
+    # A partial clone scans with what its object store holds (the engine
+    # never fetches) and says so; absent for an ordinary clone.
+    from wystan.pipeline_v2.partial_clone_meta import partial_clone_record
+
+    partial = partial_clone_record(ctx.repo_path, impact_telemetry)
+    if partial is not None:
+        scan_meta["partial_clone"] = partial
+    # An index git cannot read without writing the clone (split, sparse,
+    # oversized, not a file) is not read: no dirty-tree detection. Absent
+    # for an ordinary clone.
+    from wystan.analyzer.git_index import index_refusal
+
+    index_unread = index_refusal(str(ctx.repo_path))
+    if index_unread:
+        scan_meta["index_unread"] = index_unread
+    # Submodules whose git directory lies outside the scan root: state
+    # unknown (not read), neither moved nor clean. Absent when there are none.
+    from wystan.analyzer.git_runner import GitAnswerUnavailable
+    from wystan.analyzer.git_submodules import unread_submodules
+
+    try:
+        submodules_unread = unread_submodules(str(ctx.repo_path))
+        if submodules_unread:
+            scan_meta["submodules_unread"] = {
+                "paths": submodules_unread, "reason": "git directory outside the scan root",
+            }
+    except GitAnswerUnavailable as exc:
+        # The pointer listing itself was refused (an unread index): no
+        # submodule's state is known, which is not "no submodules".
+        scan_meta["submodules_unread"] = {"paths": "all", "reason": str(exc)}
 
     # ── LLM-health stamp (fail LOUD on auth-dead scans) ────────────
     # Must run AFTER the last LLM-bearing stage (6.7b above) and BEFORE

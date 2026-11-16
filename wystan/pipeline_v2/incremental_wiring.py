@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from wystan.analyzer.git_runner import GitAnswerUnavailable
 from wystan.models.types import developer_layer
 from wystan.pipeline_v2.run_logger import StageLogger
 from wystan.pipeline_v2.stage_7_output import write_stage_artifact
@@ -88,9 +89,16 @@ def run_incremental_gate(
             "LLM stages without a previous scan to reuse).",
         )
     incremental_base_scan = _load_base_scan_early(base_scan_path)
-    changed_set = compute_changed_set(
-        repo_path, since or "", incremental_base_scan,
-    )
+    try:
+        changed_set = compute_changed_set(
+            repo_path, since or "", incremental_base_scan,
+        )
+        changed_unavailable = None
+    except GitAnswerUnavailable as exc:
+        # The diff cannot be read: treat every feature and file as changed
+        # (a full recompute), never as unchanged.
+        changed_set = {p for f in deterministic_features for p in f.paths} | set(unattributed)
+        changed_unavailable = str(exc)
     with StageLogger(run_dir, 2, "incremental_gate") as log2_5:
         partition = partition_features(deterministic_features, changed_set)
         # Re-hydrate untouched features from the base scan NOW so we
@@ -122,6 +130,8 @@ def run_incremental_gate(
             "incremental_gate_unattributed_pre": unattributed_pre,
             "incremental_gate_unattributed_post": len(unattributed),
         }
+        if changed_unavailable:
+            incremental_gate_meta["incremental_gate_changed_files_unavailable"] = changed_unavailable
         log2_5.info(
             "incremental gate: "
             f"changed_files={len(changed_set)} "
@@ -295,8 +305,13 @@ def apply_incremental_bookkeeping(
                 "--since requires --base-scan-path (engine cannot match "
                 "lineage without a previous scan)."
             )
-        changed = _changed_files_since(repo_path, since or "")
-        touched = _touched_feature_uuids(changed, base_scan)
+        unavailable = None
+        try:
+            changed = _changed_files_since(repo_path, since or "")
+        except GitAnswerUnavailable as exc:
+            # Unknown changes: carry nothing forward.
+            unavailable, changed = str(exc), None
+        touched = _touched_feature_uuids(changed or [], base_scan)
         # Carry forward Stage 6 metrics for untouched features.
         # We mutate the Feature pydantic models via model_dump round-trip
         # so the carry-forward helper can operate on plain dicts.
@@ -304,7 +319,7 @@ def apply_incremental_bookkeeping(
         base_feats = developer_layer(base_scan)
         # Mutate features in-place — easier than rebuilding pydantic models.
         feat_payload = [f.model_dump() for f in features]
-        carried_count = _carry_forward_metrics(
+        carried_count = 0 if changed is None else _carry_forward_metrics(
             feat_payload, list(base_feats), touched,
         )
         # Push the touched metric values back onto the Feature objects.
@@ -321,10 +336,12 @@ def apply_incremental_bookkeeping(
                 if k in p and p[k] is not None:
                     setattr(feat, k, p[k])
         incremental_meta = {
-            "incremental_changed_files": list(changed),
+            "incremental_changed_files": list(changed or []),
             "incremental_touched_uuids": sorted(touched),
             "incremental_carried_forward_count": carried_count,
         }
+        if unavailable:
+            incremental_meta["incremental_changed_files_unavailable"] = unavailable
     return head, incremental_meta
 
 
