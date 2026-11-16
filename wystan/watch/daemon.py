@@ -156,16 +156,37 @@ def start_daemon(
     os.dup2(null, 1)
     os.dup2(null, 2)
 
+    status = 0
     try:
-        run_watcher(
-            repo_path=repo_path,
-            debounce_seconds=debounce_seconds,
-            map_path=map_path,
-            pid_tracking=True,
-        )
+        status = _watch_or_report(repo_path, debounce_seconds, map_path)
     finally:
         _clear_pid(repo_path)
-        os._exit(0)
+        os._exit(status)
+
+
+def _failure_file(repo_path: str) -> Path:
+    """Where a detached watcher leaves the reason it stopped (its stderr is
+    the null device)."""
+    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    return _PID_DIR / f"{_slug(repo_path)}.error"
+
+
+def _watch_or_report(repo_path: str, debounce_seconds: float, map_path: str | None) -> int:
+    """Run the watcher; the exit status. A watcher that ran out of file
+    descriptors stops with ``EXIT_OUT_OF_DESCRIPTORS`` and says why in its
+    failure file, the log and stderr (not silently with status 0)."""
+    from wystan.analyzer.descriptor_limit import EXIT_OUT_OF_DESCRIPTORS, out_of_descriptors_message
+    from wystan.analyzer.repo_open import DescriptorsExhausted
+
+    try:
+        run_watcher(repo_path=repo_path, debounce_seconds=debounce_seconds, map_path=map_path, pid_tracking=True)
+    except DescriptorsExhausted as exc:
+        message = out_of_descriptors_message(exc)
+        logger.error(message)
+        print(message, file=sys.stderr)
+        _failure_file(repo_path).write_text(message + "\n", encoding="utf-8")
+        return EXIT_OUT_OF_DESCRIPTORS
+    return 0
 
 
 def _start_daemon_windows(
@@ -328,12 +349,7 @@ def _main_for_subprocess() -> None:
     ap.add_argument("--debounce", type=float, default=_DEFAULT_DEBOUNCE_SECONDS)
     ap.add_argument("--map", default=None)
     args = ap.parse_args()
-    run_watcher(
-        repo_path=args.repo,
-        debounce_seconds=args.debounce,
-        map_path=args.map,
-        pid_tracking=True,
-    )
+    sys.exit(_watch_or_report(args.repo, args.debounce, args.map))
 
 
 if __name__ == "__main__":
