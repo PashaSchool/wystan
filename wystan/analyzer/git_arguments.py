@@ -14,6 +14,8 @@ everything after ``--`` is a path and is data.
 
 from __future__ import annotations
 
+from wystan.analyzer.git_formats import PRETTY_ARGUMENTS
+
 #: subcommand -> (allowed options, most positional arguments before ``--``,
 #: whether paths may follow ``--``). Options ending in ``=`` are prefixes.
 #: Positionals are revisions or config names the callers validate
@@ -27,7 +29,7 @@ FORMS: dict[str, tuple[frozenset[str], int, bool]] = {
     "diff-index": (frozenset({"-p", "-M"}), 1, False),
     "diff-tree": (frozenset({"--numstat", "--no-renames", "--root", "--raw", "-r", "--abbrev=",
                              "--full-index", "-M", "-z", "--no-color", "--name-only"}), 2, True),
-    "log": (frozenset({"--max-count=", "--since=", "--until=", "--pretty=", "--name-only", "--name-status",
+    "log": (frozenset({"--max-count=", "--since=", "--until=", "--name-only", "--name-status",
                        "-z", "--no-renames", "--first-parent"}), 1, True),
     "ls-files": (frozenset({"-z", "-s"}), 0, False),
     "ls-tree": (frozenset({"-r", "-t", "-z", "--full-tree", "--name-only"}), 1, False),
@@ -44,9 +46,14 @@ REQUIRED_ACTIONS = {
     "config": frozenset({"--get", "--get-regexp"}),
 }
 _SEPARATOR = "--"
+_PRETTY = "--pretty="
 
 
 def _option_allowed(option: str, allowed: frozenset[str]) -> bool:
+    if option.startswith(_PRETTY):
+        # Only the engine's own formats (git_formats): a free format could
+        # ask for %G? (runs gpg) or another executing placeholder.
+        return option in PRETTY_ARGUMENTS
     if option in allowed:
         return True
     head, sep, _value = option.partition("=")

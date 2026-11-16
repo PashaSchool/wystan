@@ -7,8 +7,8 @@ from pathlib import Path
 
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from wystan.analyzer.git_formats import FAST_RECORD
 from wystan.analyzer.git_history import (
-    FIELD_END,
     count_commits_since,
     head_commits,
     numstat_file_keys,
@@ -324,7 +324,7 @@ def _walk_commits(repo: GitRepository, *, days: int, max_commits: int, src: str 
 # The single history read of a scan; past this the per-commit fallback runs.
 _LOG_TIMEOUT_SEC = 120.0
 #: ``%H %ct %an %B``, each field NUL-terminated (``git_history.split_records``).
-_FAST_FORMAT = f"%H{FIELD_END}%ct{FIELD_END}%an{FIELD_END}%B{FIELD_END}"
+_FAST_FORMAT = FAST_RECORD
 _FAST_FIELDS = 4
 #: Pathspec magic: the path is relative to the top of the working tree.
 _TOP_PATHSPEC = ":(top)"

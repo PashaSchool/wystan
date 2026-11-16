@@ -17,13 +17,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from wystan.analyzer.git_formats import COMMIT_RECORD, FIELD_END  # FIELD_END: re-exported
 from wystan.analyzer.git_runner import GitError, GitFailed, object_name, run_git
 
-# Every field of a pretty format ends in NUL (``%x00``) and ``-z`` puts a
-# NUL between commits: no commit field can hold a NUL, so a message with
-# any other control character (``\x1e``, ``\x1f``) is read whole.
-FIELD_END = "%x00"
-_RECORD_FORMAT = f"%H{FIELD_END}%P{FIELD_END}%ct{FIELD_END}%an{FIELD_END}%B{FIELD_END}"
+# Every field of a pretty format ends in NUL (``%x00``, git_formats) and
+# ``-z`` puts a NUL between commits: no commit field can hold a NUL, so a
+# message with any other control character (``\x1e``, ``\x1f``) is read whole.
+_RECORD_FORMAT = COMMIT_RECORD
 _RECORD_FIELDS = 5
 #: Objects read per ``cat-file --batch`` call: bounds what one call holds in
 #: memory (the runner's output cap applies per call).

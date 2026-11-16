@@ -23,11 +23,12 @@ The caller records what was degraded (``scan_meta.partial_clone``).
 
 from __future__ import annotations
 
-from wystan.analyzer.git_history import FIELD_END, split_records
+from wystan.analyzer.git_formats import COMMIT_RECORD
+from wystan.analyzer.git_history import split_records
 from wystan.analyzer.git_runner import GitError, object_name, run_git
 
 #: ``%H %P %ct %an %B``, each NUL-terminated.
-_FORMAT = "".join(f"{field}{FIELD_END}" for field in ("%H", "%P", "%ct", "%an", "%B"))
+_FORMAT = COMMIT_RECORD
 _FIELDS = 5
 _ADDED, _DELETED = "A", "D"
 HISTORY_COMPLETE = "complete"

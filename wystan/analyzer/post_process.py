@@ -30,6 +30,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from wystan.analyzer.git_formats import SUBJECTS, TAGGED_SUBJECTS
 from wystan.analyzer.git_runner import GitError, run_git
 from wystan.models.types import Feature, FeatureMap, Flow
 
@@ -364,7 +365,7 @@ def _mine_commit_prefixes(repo_path: str, min_count: int = 5) -> dict[str, int]:
     """Extract domain prefixes from local git log subjects."""
     try:
         r = run_git(
-            repo_path, "log", "--pretty=%s", "--since=2 years ago",
+            repo_path, "log", f"--pretty={SUBJECTS}", "--since=2 years ago",
             timeout=_SUBJECTS_TIMEOUT_SEC, check=False,
         )
     except GitError:
@@ -461,7 +462,7 @@ def _collect_files_for_commit_prefix(repo_path: str, prefix: str) -> set[str]:
     try:
         r = run_git(
             repo_path, "log",
-            "--pretty=format:COMMIT:%s", "--name-only", "--no-renames",
+            f"--pretty={TAGGED_SUBJECTS}", "--name-only", "--no-renames",
             "--since=2 years ago",
             timeout=_PREFIX_FILES_TIMEOUT_SEC, check=False,
         )

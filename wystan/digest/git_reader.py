@@ -11,12 +11,13 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from wystan.analyzer.git_history import FIELD_END, numstat_file_keys, raw_parents, split_records
+from wystan.analyzer.git_formats import DIGEST_RECORD
+from wystan.analyzer.git_history import numstat_file_keys, raw_parents, split_records
 from wystan.analyzer.git_repository import GitRepository, open_repository, origin_url
 from wystan.analyzer.git_runner import GitError, object_name, revision, run_git
 
 # Each field NUL-terminated: no commit field can hold a NUL.
-_DIGEST_FORMAT = "".join(f"{field}{FIELD_END}" for field in ("%H", "%P", "%an", "%ae", "%cI", "%B"))
+_DIGEST_FORMAT = DIGEST_RECORD
 _DIGEST_FIELDS = 6
 _DEFAULT_BRANCHES = ("main", "master")
 _HEADS_PREFIX = "refs/heads/"

@@ -83,8 +83,12 @@ SAFE_OPTIONS = (
     "-c", "submodule.recurse=false",
     "-c", "diff.submodule=short",
     "-c", "status.submoduleSummary=false",
-    # A signature check runs gpg and prints into ``git log`` output.
+    # A signature check runs gpg and prints into ``git log`` output; the
+    # gpg programs point at a path that cannot run, in depth.
     "-c", "log.showSignature=false",
+    "-c", f"gpg.program={os.devnull}",
+    "-c", f"gpg.ssh.program={os.devnull}",
+    "-c", f"gpg.x509.program={os.devnull}",
     # color.diff/color.status beat color.ui: all three, or a clone's
     # color.diff=always colours `git diff HEAD`.
     "-c", "color.ui=false",
