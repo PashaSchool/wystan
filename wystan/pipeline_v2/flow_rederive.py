@@ -263,7 +263,7 @@ def _feature_kloc(
         cached = loc_cache.get(rel)
         if cached is None:
             try:
-                cached = count_file_loc(repo_path / rel, rel)
+                cached = count_file_loc(repo_path, rel)
             except Exception:  # noqa: BLE001 — a bad file is 0 loc
                 cached = 0
             loc_cache[rel] = cached

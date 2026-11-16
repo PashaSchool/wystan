@@ -276,7 +276,7 @@ class ReactRouterFrameworkProfile:
                 continue
             if reads >= _MAX_MANIFEST_READS:
                 break
-            doc = read_json(ctx.repo_path / f)
+            doc = read_json(ctx.repo_path / f, ctx.repo_path)
             reads += 1
             if not isinstance(doc, dict):
                 continue

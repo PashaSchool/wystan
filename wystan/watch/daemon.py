@@ -22,13 +22,21 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+# Imported when the module loads, not when the watcher runs out of
+# descriptors: an import then needs a descriptor to open its file.
+from wystan.analyzer.descriptor_limit import EXIT_OUT_OF_DESCRIPTORS, out_of_descriptors_message
+from wystan.analyzer.repo_held_dirs import release_idle
+from wystan.analyzer.repo_open import DescriptorsExhausted
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DEBOUNCE_SECONDS = 30.0
 _DEFAULT_MAP_DIR = Path.home() / ".wystan"
 _PID_DIR = Path.home() / ".wystan" / "watchers"
+#: What the failure file says when even the message could not be built.
+_FALLBACK_MESSAGE = "wystan: the watcher ran out of file descriptors and stopped"
 
 _IGNORED_DIR_NAMES = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",
@@ -149,23 +157,99 @@ def start_daemon(
         # Parent — return child pid
         return pid
 
-    # Child process: detach from terminal
-    os.setsid()
-    null = os.open(os.devnull, os.O_RDWR)
-    os.dup2(null, 0)
-    os.dup2(null, 1)
-    os.dup2(null, 2)
-
+    # Child process. Everything up to ``os._exit`` is inside the ``try``: an
+    # exception escaping here would return the child into the caller's code.
+    status = 0
     try:
-        run_watcher(
-            repo_path=repo_path,
-            debounce_seconds=debounce_seconds,
-            map_path=map_path,
-            pid_tracking=True,
-        )
+        # Detach from the terminal.
+        os.setsid()
+        null = os.open(os.devnull, os.O_RDWR)
+        os.dup2(null, 0)
+        os.dup2(null, 1)
+        os.dup2(null, 2)
+        exhausted = _watch(repo_path, debounce_seconds, map_path)
+        if exhausted is not None:
+            # The status first: the report needs descriptors the process may
+            # not have, and whatever it does, the watcher stopped for want of them.
+            status = EXIT_OUT_OF_DESCRIPTORS
+            _report_out_of_descriptors(repo_path, exhausted)
     finally:
-        _clear_pid(repo_path)
-        os._exit(0)
+        _best_effort(_clear_pid, repo_path)
+        os._exit(status)
+
+
+def _failure_name(repo_path: str) -> Path:
+    return _PID_DIR / f"{_slug(repo_path)}.error"
+
+
+def _failure_file(repo_path: str) -> Path:
+    """Where a detached watcher leaves the reason it stopped (its stderr is
+    the null device)."""
+    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    return _failure_name(repo_path)
+
+
+def last_failure(repo_path: str) -> str | None:
+    """The line the last watcher of this repository stopped with, or
+    ``None`` when none stopped on a failure since one last started."""
+    try:
+        lines = _failure_name(repo_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    return lines[-1] if lines else None
+
+
+def _clear_failure(repo_path: str) -> None:
+    """A watcher that started removes the reason an earlier one stopped, so
+    ``watch-status`` never shows a stale one."""
+    try:
+        _failure_name(repo_path).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("wystan watch: could not remove the failure file of %s", repo_path)
+
+
+def _watch(repo_path: str, debounce_seconds: float, map_path: str | None) -> DescriptorsExhausted | None:
+    """Run the detached watcher; the ``DescriptorsExhausted`` it stopped
+    with, or ``None``. Nothing is reported here: reporting needs descriptors."""
+    try:
+        run_watcher(repo_path=repo_path, debounce_seconds=debounce_seconds, map_path=map_path, pid_tracking=True)
+    except DescriptorsExhausted as exc:
+        return exc
+    return None
+
+
+def _best_effort(action: Callable[..., object], *args: object) -> None:
+    """Run ``action`` on the exit path of a process that may have no
+    descriptor left: a failure is dropped (there is nowhere left to say it),
+    so the exit status already set stands."""
+    try:
+        action(*args)
+    except Exception:  # noqa: BLE001 - the exit path must not raise
+        pass
+
+
+def _write_failure(repo_path: str, message: str) -> None:
+    _failure_file(repo_path).write_text(message + "\n", encoding="utf-8")
+
+
+def _print_to_stderr(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def _report_out_of_descriptors(repo_path: str, exc: DescriptorsExhausted) -> None:
+    """Say, as far as the process still can, that the watcher ran out of
+    file descriptors: the log, stderr and the failure file (shown by
+    ``watch-status``). The reader's idle descriptors are closed first so the
+    write has one; each report is best effort and none raises."""
+    _best_effort(release_idle)
+    message = _FALLBACK_MESSAGE
+    try:
+        message = out_of_descriptors_message(exc)
+    except Exception:  # noqa: BLE001 - the exit path must not raise
+        pass
+    _best_effort(logger.error, message)
+    _best_effort(_print_to_stderr, message)
+    _best_effort(_write_failure, repo_path, message)
 
 
 def _start_daemon_windows(
@@ -243,6 +327,8 @@ def run_watcher(
     observer = Observer()
     observer.schedule(handler, repo_path, recursive=True)
     observer.start()
+    # The watcher is running: an earlier watcher's failure no longer holds.
+    _clear_failure(repo_path)
 
     if verbose:
         print(f"wystan watch: monitoring {repo_path} (debounce {debounce_seconds}s)")
@@ -328,12 +414,7 @@ def _main_for_subprocess() -> None:
     ap.add_argument("--debounce", type=float, default=_DEFAULT_DEBOUNCE_SECONDS)
     ap.add_argument("--map", default=None)
     args = ap.parse_args()
-    run_watcher(
-        repo_path=args.repo,
-        debounce_seconds=args.debounce,
-        map_path=args.map,
-        pid_tracking=True,
-    )
+    sys.exit(_watch_or_report(args.repo, args.debounce, args.map))
 
 
 if __name__ == "__main__":

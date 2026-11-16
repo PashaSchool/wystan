@@ -70,6 +70,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_head_or_raise
 from typing import Any, Mapping
 
 from wystan.pipeline_v2.data import load_yaml
@@ -190,8 +191,7 @@ def _read_head(repo_path: Path | None, rel: str) -> str:
     if repo_path is None:
         return ""
     try:
-        with open(Path(repo_path) / rel, "rb") as fh:
-            return fh.read(_HEAD_BYTES).decode("utf-8", errors="ignore")
+        return read_repo_head_or_raise(Path(repo_path) / rel, repo_path, _HEAD_BYTES).decode("utf-8", errors="ignore")
     except OSError:
         return ""
 

@@ -82,6 +82,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_bytes_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.models.types import FlowSymbolAttribution
@@ -317,7 +318,7 @@ def _get_parser(lang_name: str) -> Any | None:
     return parser
 
 
-def _parse_file(path: Path, lang_name: str) -> tuple[Any | None, bytes | None]:
+def _parse_file(path: Path, lang_name: str, repo_root: Path) -> tuple[Any | None, bytes | None]:
     """Parse ``path`` with ``lang_name`` parser. Caches by (path, mtime).
 
     Returns (tree, source_bytes) or (None, None) on any failure.
@@ -337,7 +338,7 @@ def _parse_file(path: Path, lang_name: str) -> tuple[Any | None, bytes | None]:
         if cached_src is not None:
             return cached_tree, cached_src
     try:
-        src = path.read_bytes()
+        src = read_repo_bytes_or_raise(path, repo_root)
     except OSError as exc:
         logger.debug("stage_6_6: cannot read %s: %s", path, exc)
         return None, None
@@ -606,7 +607,7 @@ def slice_branches(
     if not abs_path.is_file():
         return []
 
-    tree, src = _parse_file(abs_path, lang_name)
+    tree, src = _parse_file(abs_path, lang_name, repo_root)
     if tree is None or src is None:
         return []
 

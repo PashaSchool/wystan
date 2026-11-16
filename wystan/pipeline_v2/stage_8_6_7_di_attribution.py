@@ -47,6 +47,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any
 
 from wystan.pipeline_v2.data import load_yaml
@@ -137,7 +138,7 @@ def _collect_deps(repo: Path, tracked: frozenset[str]) -> set[str]:
         if not rel.endswith("package.json"):
             continue
         try:
-            pkg = json.loads((repo / rel).read_text(encoding="utf-8", errors="ignore"))
+            pkg = json.loads(read_repo_text_or_raise(repo / rel, repo, errors="ignore", max_bytes=MANIFEST_READ_MAX_BYTES))
         except (OSError, ValueError):
             continue
         if not isinstance(pkg, dict):
@@ -164,7 +165,7 @@ def _read(repo: Path, rel: str) -> str | None:
         p = repo / rel
         if p.stat().st_size > _MAX_READ_BYTES:
             return None
-        return p.read_text(encoding="utf-8", errors="ignore")
+        return read_repo_text_or_raise(p, repo, errors="ignore", max_bytes=_MAX_READ_BYTES)
     except OSError:
         return None
 

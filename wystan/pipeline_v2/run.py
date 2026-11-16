@@ -260,6 +260,10 @@ def run_pipeline_v2(
     repo_path = Path(repo_path).resolve()
     model_id = resolve_model(model)
     t0 = time.monotonic()
+    # Refused repository reads are counted per scan (``scan_meta.
+    # repository_reads``, written by the finalize phase).
+    from wystan.analyzer.repo_read_tally import begin_scan
+    begin_scan(repo_path)
 
     # Sprint C3b — caller-overridable Stage 6.3 BFS depth.
     # Defaults to the module-level :data:`_IMPORT_TREE_MAX_DEPTH`

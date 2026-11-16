@@ -88,7 +88,7 @@ class RailsJobsExtractor(RailsPatternExtractor):
         buckets: dict[str, set[str]] = {}
 
         for path in files:
-            text = read_text(ctx.repo_path / path)
+            text = read_text(ctx.repo_path / path, ctx.repo_path)
             if not text:
                 continue
             class_matches = class_re.findall(text)

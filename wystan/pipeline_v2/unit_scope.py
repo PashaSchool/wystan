@@ -120,7 +120,7 @@ def _unit_stack(ctx: "ScanContext", subpath: str, files: list[str]) -> str | Non
     rel_files = [
         f[len(prefix):] if f.startswith(prefix) else f for f in files
     ]
-    stack, _signals = detect_stack(ctx.repo_path / subpath, rel_files)
+    stack, _signals = detect_stack(ctx.repo_path / subpath, rel_files, scan_root=ctx.repo_path)
     return stack
 
 

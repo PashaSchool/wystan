@@ -245,12 +245,12 @@ def synthesise_workspaces(ctx: ScanContext) -> list[Workspace]:
         ]
         if not ws_files:
             return
-        pkg_json = _read_json(ws_root / "package.json")
+        pkg_json = _read_json(ws_root / "package.json", ctx.repo_path)
         stack, _signals = detect_stack(ws_root, [
             # detect_stack expects workspace-relative paths
             f[len(rel_path) + 1:] if f.startswith(rel_path + "/") else f
             for f in ws_files
-        ])
+        ], scan_root=ctx.repo_path)
         out.append(
             Workspace(
                 name=ws_root.name,

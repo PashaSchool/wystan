@@ -24,6 +24,7 @@ Disable via ``WYSTAN_STAGE_6_9B_GENERATED_STRIP=0`` (default ON).
 """
 
 from __future__ import annotations
+from wystan.analyzer.repo_reader import read_repo_head_or_raise
 
 import os
 import re
@@ -174,8 +175,7 @@ class GeneratedContentProbe:
         out = False
         if self._root is not None and rel_path:
             try:
-                with open(self._root / rel_path, "rb") as fp:
-                    head = fp.read(_BANNER_SNIFF)
+                head = read_repo_head_or_raise(self._root / rel_path, self._root, _BANNER_SNIFF)
                 if b"\x00" not in head:
                     text = head.decode("utf-8", errors="replace")
                     out = bool(

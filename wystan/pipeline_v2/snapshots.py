@@ -69,6 +69,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any, Callable, Iterable, TypeVar
 
 from wystan.analyzer.import_graph import (
@@ -486,7 +487,7 @@ def build_snapshot_import_index(
         try:
             if abs_path.stat().st_size > _MAX_FILE_BYTES:
                 continue
-            text = abs_path.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(abs_path, scan_root, errors="ignore")
         except OSError:
             continue
         is_py = suffix in _PY_EXTENSIONS

@@ -71,6 +71,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, cast
 
 from wystan.pipeline_v2.data import load_yaml
@@ -585,9 +586,9 @@ def _iter_py_files(root: Path, *, include_fake: bool = False) -> Iterator[Path]:
             yield p
 
 
-def _parse(path: Path) -> ast.Module | None:
+def _parse(path: Path, root: Path) -> ast.Module | None:
     try:
-        return ast.parse(path.read_text(encoding="utf-8"))
+        return ast.parse(read_repo_text_or_raise(path, root))
     except (OSError, SyntaxError, ValueError):
         return None
 
@@ -639,7 +640,7 @@ def _detect_form_a(
         return None
 
     for path in files:
-        tree = _parse(path)
+        tree = _parse(path, root)
         if tree is None:
             continue
         rel = _rel(path, root)
@@ -696,7 +697,7 @@ def _detect_form_a(
         # note a nearby "DISABLED"/"deprecated" comment marker as anti-case-1
         # provenance (telemetry only — never a tool).
         try:
-            txt = path.read_text(encoding="utf-8")
+            txt = read_repo_text_or_raise(path, root)
         except OSError:
             txt = ""
         for m in re.finditer(r"#.*\b(DISABLED|deprecated|not exposed)\b", txt, re.I):
@@ -795,7 +796,7 @@ def _detect_form_b_map(
     runtime_infra: list[str] = []
     seen_class: set[str] = set()
     for path in files:
-        tree = _parse(path)
+        tree = _parse(path, root)
         if tree is None:
             continue
         rel = _rel(path, root)
@@ -842,7 +843,7 @@ def _detect_form_b_map(
                         # B81-it2 fix: was hardcoded ``hline = 1`` — resolve the
                         # class def line in the reverse-resolved module so the
                         # handler span is the real symbol, not the file head.
-                        hline = _class_def_line(resolved, cn)
+                        hline = _class_def_line(resolved, cn, root)
                         dom = _domain_dir(hfile)
                 if role == "bridge":
                     fam = _class_stem(cn).lower()
@@ -866,7 +867,7 @@ def _detect_form_b_map(
     return entries, bridges, runtime_infra
 
 
-def _class_def_line(path: Path, class_name: str) -> int:
+def _class_def_line(path: Path, class_name: str, root: Path) -> int:
     """Line of ``class <class_name>`` in ``path`` (else 1).
 
     B81-it2 hline fix: when a registry-map handler class is reverse-resolved to
@@ -876,7 +877,7 @@ def _class_def_line(path: Path, class_name: str) -> int:
     guess). Exhibit: onyx 8/8 capability tools carried ``handler_line==1``
     (search_tool.py, image_generation_tool.py, …) before this fix.
     """
-    tree = _parse(path)
+    tree = _parse(path, root)
     if tree is None:
         return 1
     for node in ast.walk(tree):
@@ -910,7 +911,7 @@ def _detect_bridges(root: Path, files: list[Path]) -> list[str]:
     """
     fams: list[str] = []
     for path in files:
-        tree = _parse(path)
+        tree = _parse(path, root)
         if tree is None:
             continue
         for node in ast.walk(tree):
@@ -958,7 +959,7 @@ def _detect_form_b_decorator(
     """
     entries: list[ToolEntry] = []
     for path in files:
-        tree = _parse(path)
+        tree = _parse(path, root)
         if tree is None:
             continue
         rel = _rel(path, root)
@@ -1268,7 +1269,7 @@ def _detect_ts_define_tool(
     anchor = re.compile(r"\bdefineTool\s*\(")
     for path in files:
         try:
-            orig = path.read_text(encoding="utf-8")
+            orig = read_repo_text_or_raise(path, root)
         except OSError:
             continue
         if "defineTool" not in orig:
@@ -1311,7 +1312,7 @@ def _detect_ts_builtin_manifest(
     anchor = re.compile(r"\bBuiltinToolManifest\b")
     for path in files:
         try:
-            orig = path.read_text(encoding="utf-8")
+            orig = read_repo_text_or_raise(path, root)
         except OSError:
             continue
         if "BuiltinToolManifest" not in orig:
@@ -1434,7 +1435,7 @@ def _detect_ts_mcp_feature_module(
     live_reg = re.compile(r"\btoolRegistry\s*\.\s*register\s*\(\s*(\w+)Feature\b")
     for path in files:
         try:
-            orig = path.read_text(encoding="utf-8")
+            orig = read_repo_text_or_raise(path, root)
         except OSError:
             continue
         if "McpFeatureModule" not in orig and "toolRegistry" not in orig:
@@ -1502,7 +1503,7 @@ def _detect_partition(
         rel = _rel(path, root)
         if "/skills/" in ("/" + rel) or "/skills/" in rel:
             continue
-        tree = _parse(path)
+        tree = _parse(path, root)
         if tree is None:
             continue
         local: dict[str, str] = {}
@@ -1591,7 +1592,7 @@ def _detect_skills(root: Path) -> tuple[list[_SkillInfo], list[str], list[str]]:
         for path in sorted(skills_dir.glob("*.py")):
             if path.name == "__init__.py":
                 continue
-            tree = _parse(path)
+            tree = _parse(path, root)
             if tree is None:
                 continue
             req: frozenset[str] | None = None
@@ -1711,7 +1712,7 @@ def _registry_tool_names(
     direct: dict[str, set[str]] = {}
     refs: dict[str, set[str]] = {}
     for p in files:
-        tree = _parse(p)
+        tree = _parse(p, root)
         if tree is None:
             continue
         named_dicts: dict[str, ast.Dict] = {}
@@ -1794,7 +1795,7 @@ def _detect_py_mount_consumers(
     reg_names = set(reg_tool_names)
     out: list[MountConsumer] = []
     for p in files:
-        tree = _parse(p)
+        tree = _parse(p, root)
         if tree is None:
             continue
         rel = _rel(p, root)
@@ -1928,7 +1929,7 @@ def _detect_ts_register_consumers(
                 or p.name.endswith((".test.ts", ".servertest.ts", ".spec.ts")):
             continue
         try:
-            txt = p.read_text(encoding="utf-8")
+            txt = read_repo_text_or_raise(p, root)
         except OSError:
             continue
         if "egistry.register(" not in txt:
@@ -2139,7 +2140,7 @@ def _detect_py_system_prompts(
     const_site: dict[str, str] = {}
     file_consts: list[tuple[str, dict[str, int]]] = []
     for p in files:
-        tree = _parse(p)
+        tree = _parse(p, root)
         if tree is None:
             continue
         rel = _rel(p, root)
@@ -2345,7 +2346,7 @@ def _detect_consumer_importers(
         rel = _rel(p, root)
         if rel.split("/", 1)[0] == ".claude":
             continue
-        tree = _parse(p)
+        tree = _parse(p, root)
         if tree is None:
             continue
         for n in ast.walk(tree):

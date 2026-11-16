@@ -106,6 +106,7 @@ from __future__ import annotations
 
 import os
 import re
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from wystan.pipeline_v2.data import load_yaml
@@ -864,7 +865,7 @@ class SurfaceScopeClassifier:
 
             pj = _Path(self._repo_path) / workspace_dir / "package.json"
             if pj.is_file():
-                doc = _json.loads(pj.read_text(encoding="utf-8"))
+                doc = _json.loads(read_repo_text_or_raise(pj, self._repo_path, max_bytes=MANIFEST_READ_MAX_BYTES))
                 if isinstance(doc, dict):
                     verdict = bool(doc.get("bin")) and doc.get("private") is not True
         except (OSError, ValueError):  # unreadable manifest → no override
@@ -908,7 +909,7 @@ class SurfaceScopeClassifier:
 
             pj = _Path(self._repo_path) / workspace_dir / "package.json"
             if pj.is_file():
-                doc = _json.loads(pj.read_text(encoding="utf-8"))
+                doc = _json.loads(read_repo_text_or_raise(pj, self._repo_path, max_bytes=MANIFEST_READ_MAX_BYTES))
                 if isinstance(doc, dict):
                     verdict = (
                         (bool(doc.get("bin")) or bool(doc.get("publishConfig")))
@@ -1585,7 +1586,7 @@ def _declared_dependency_workspaces(repo_path: Any) -> frozenset[str]:
     for pj in candidates:
         ws = _norm(str(pj.parent.relative_to(root)))
         try:
-            doc = _json.loads(pj.read_text(encoding="utf-8"))
+            doc = _json.loads(read_repo_text_or_raise(pj, root, max_bytes=MANIFEST_READ_MAX_BYTES))
         except (OSError, ValueError):
             continue
         if not isinstance(doc, dict):
@@ -2003,7 +2004,7 @@ def _is_registry_publisher(repo_path: Any, ws_dir: str) -> bool:
         if pj.is_file():
             import json as _json
 
-            doc = _json.loads(pj.read_text(encoding="utf-8"))
+            doc = _json.loads(read_repo_text_or_raise(pj, repo_path, max_bytes=MANIFEST_READ_MAX_BYTES))
             if isinstance(doc, dict):
                 scripts = " ".join(
                     str(v) for v in (doc.get("scripts") or {}).values()

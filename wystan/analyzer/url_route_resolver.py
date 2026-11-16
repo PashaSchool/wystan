@@ -39,6 +39,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 
 
 logger = logging.getLogger(__name__)
@@ -414,9 +415,7 @@ def build_route_registry(
             continue
 
         try:
-            source = (repo_root / rel_path).read_text(
-                encoding="utf-8", errors="ignore",
-            )
+            source = read_repo_text_or_raise(repo_root / rel_path, repo_root, errors="ignore")
         except OSError:
             continue
 

@@ -506,7 +506,7 @@ class RailsRoutesExtractor(RailsPatternExtractor):
             return {}
 
         full_path = ctx.repo_path / compiled.route_file
-        text = read_text(full_path)
+        text = read_text(full_path, ctx.repo_path)
         if not text:
             return {}
 

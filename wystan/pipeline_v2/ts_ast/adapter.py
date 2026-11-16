@@ -61,6 +61,7 @@ output (spec §2).
 """
 
 from __future__ import annotations
+from wystan.analyzer.repo_reader import read_repo_bytes_or_raise
 
 import logging
 import os
@@ -787,7 +788,7 @@ def _load_real_fns() -> _PipelineFns | None:
         ) -> Any:
             raw = source
             if raw is None:
-                raw = Path(repo_root, rel).read_bytes()
+                raw = read_repo_bytes_or_raise(Path(repo_root, rel), repo_root)
             elif isinstance(raw, str):
                 raw = raw.encode("utf-8", errors="ignore")
             fp = m1_parse(rel, raw)  # M1: parse_file(path, source_bytes)

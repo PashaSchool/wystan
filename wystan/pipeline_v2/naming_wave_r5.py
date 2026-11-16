@@ -52,6 +52,7 @@ import glob as _glob
 import json
 import os
 import re
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
@@ -284,11 +285,10 @@ def _manifest_names(repo_root: Any) -> list[str]:
             seen.add(mp)
             try:
                 if mp.endswith(".json"):
-                    with open(mp, encoding="utf-8") as fh:
-                        nm = str((json.load(fh) or {}).get("name") or "")
+                    nm = str((json.loads(read_repo_text_or_raise(mp, root, max_bytes=MANIFEST_READ_MAX_BYTES)) or {}).get("name") or "")
                 else:
-                    with open(mp, encoding="utf-8") as fh:
-                        m = re.search(r'^name\s*=\s*"([^"]+)"', fh.read(), re.M)
+                    m = re.search(r'^name\s*=\s*"([^"]+)"',
+                                  read_repo_text_or_raise(mp, root, max_bytes=MANIFEST_READ_MAX_BYTES), re.M)
                     nm = m.group(1) if m else ""
             except Exception:  # noqa: BLE001 — unreadable manifest: skip
                 continue

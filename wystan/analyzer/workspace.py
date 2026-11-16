@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
+
 
 @dataclass
 class WorkspacePackage:
@@ -176,7 +178,7 @@ def _expand_double_star(
         # Require a manifest — otherwise it's a source dir, not a pkg.
         if not any((cur / m).is_file() for m in _WORKSPACE_MANIFEST_FILENAMES):
             continue
-        name = _package_name(cur)
+        name = _package_name(cur, root)
         out.append(WorkspacePackage(name=name, path=rel))
         seen.add(rel)
 
@@ -224,27 +226,40 @@ def _resolve_globs(root: Path, patterns: list[str]) -> list[WorkspacePackage]:
                         continue
                     rel = str(child.relative_to(root))
                     if fnmatch(rel, pattern) and rel not in seen:
-                        name = _package_name(child)
+                        name = _package_name(child, root)
                         packages.append(WorkspacePackage(name=name, path=rel))
                         seen.add(rel)
         else:
             # Exact path
             exact = root / pattern
             if exact.is_dir() and pattern not in seen:
-                name = _package_name(exact)
+                name = _package_name(exact, root)
                 packages.append(WorkspacePackage(name=name, path=pattern))
                 seen.add(pattern)
 
     return packages
 
 
-def _package_name(pkg_dir: Path) -> str:
-    """Extract a human-readable package name."""
+#: Largest workspace manifest read (package.json, Cargo.toml, go.work, ...):
+#: the one manifest cap; a crafted ``package.json -> /dev/zero`` is refused
+#: as not a regular file before any read.
+WORKSPACE_MANIFEST_MAX_BYTES = MANIFEST_READ_MAX_BYTES
+
+
+def _read(path: Path, root: Path) -> str:
+    """``path.read_text()`` through the guarded reader; ``OSError`` where
+    the manifest is missing or refused, as before for an unreadable one."""
+    return read_repo_text_or_raise(path, root, encoding=None, max_bytes=WORKSPACE_MANIFEST_MAX_BYTES)
+
+
+def _package_name(pkg_dir: Path, root: Path) -> str:
+    """Extract a human-readable package name (manifests read through the
+    guarded reader, contained in the repository ``root``)."""
     # Try reading package.json name
     pkg_json = pkg_dir / "package.json"
     if pkg_json.exists():
         try:
-            data = json.loads(pkg_json.read_text())
+            data = json.loads(_read(pkg_json, root))
             name = data.get("name", "")
             if name:
                 # Strip scope: @myorg/auth → auth
@@ -256,7 +271,7 @@ def _package_name(pkg_dir: Path) -> str:
     cargo = pkg_dir / "Cargo.toml"
     if cargo.exists():
         try:
-            for line in cargo.read_text().splitlines():
+            for line in _read(cargo, root).splitlines():
                 m = re.match(r'^name\s*=\s*"(.+)"', line)
                 if m:
                     return m.group(1)
@@ -277,7 +292,7 @@ def _detect_pnpm(root: Path, files: list[str]) -> WorkspaceInfo | None:
         return None
 
     try:
-        content = ws_file.read_text()
+        content = _read(ws_file, root)
         patterns = _parse_yaml_list(content, "packages")
         if not patterns:
             return None
@@ -295,7 +310,7 @@ def _detect_npm_yarn(root: Path, files: list[str]) -> WorkspaceInfo | None:
         return None
 
     try:
-        data = json.loads(pkg_json.read_text())
+        data = json.loads(_read(pkg_json, root))
         workspaces = data.get("workspaces")
         if not workspaces:
             return None
@@ -345,7 +360,7 @@ def _detect_nx(root: Path, files: list[str]) -> WorkspaceInfo | None:
                 if child.is_dir() and not child.name.startswith("."):
                     # Verify it's an Nx project (has project.json or package.json)
                     if (child / "project.json").exists() or (child / "package.json").exists():
-                        name = _package_name(child)
+                        name = _package_name(child, root)
                         packages.append(WorkspacePackage(
                             name=name,
                             path=str(child.relative_to(root)),
@@ -364,7 +379,7 @@ def _detect_lerna(root: Path, files: list[str]) -> WorkspaceInfo | None:
         return None
 
     try:
-        data = json.loads(lerna_file.read_text())
+        data = json.loads(_read(lerna_file, root))
         patterns = data.get("packages", ["packages/*"])
         packages = _resolve_globs(root, patterns)
         return WorkspaceInfo(detected=True, manager="lerna", packages=packages)
@@ -379,7 +394,7 @@ def _detect_cargo(root: Path, files: list[str]) -> WorkspaceInfo | None:
         return None
 
     try:
-        content = cargo.read_text()
+        content = _read(cargo, root)
         if "[workspace]" not in content:
             return None
 
@@ -423,7 +438,7 @@ def _detect_go(root: Path, files: list[str]) -> WorkspaceInfo | None:
         return None
 
     try:
-        content = go_work.read_text()
+        content = _read(go_work, root)
         patterns: list[str] = []
         in_use = False
         for line in content.splitlines():

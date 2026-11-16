@@ -84,6 +84,7 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 from wystan.framework_linkers.base import (
@@ -343,11 +344,10 @@ def _normalise_url(raw: str) -> tuple[str | None, bool, bool]:
 
 
 @lru_cache(maxsize=2048)
-def _read_text_cached(abs_path: str) -> str | None:
+def _read_text_cached(abs_path: str, repo_root: str) -> str | None:
     """LRU-cached UTF-8 read of ``abs_path``. Returns ``None`` on error."""
     try:
-        with open(abs_path, "r", encoding="utf-8") as fp:
-            return fp.read()
+        return read_repo_text_or_raise(abs_path, repo_root)
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -535,7 +535,7 @@ class NextjsHttpRouteLinker:
         links: list[FrameworkLink] = []
         for rel in caller_files:
             abs_path = str(ctx.repo_path / rel)
-            text = _read_text_cached(abs_path)
+            text = _read_text_cached(abs_path, str(ctx.repo_path))
             if text is None:
                 self.telemetry.files_unreadable += 1
                 continue
@@ -658,7 +658,7 @@ class NextjsHttpRouteLinker:
 
             # Resolve target symbol inside the route file.
             target_abs = str(ctx.repo_path / matched_route.file)
-            target_text = _read_text_cached(target_abs) or ""
+            target_text = _read_text_cached(target_abs, str(ctx.repo_path)) or ""
             handlers = _find_method_handlers(target_text)
             target_symbol, ts_lo, ts_hi = _pick_target_symbol(handlers, method_hint)
 

@@ -62,6 +62,8 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import TYPE_CHECKING
 
 from wystan.framework_linkers.base import (
@@ -188,10 +190,9 @@ class _LinkerTelemetry:
 
 
 @lru_cache(maxsize=4096)
-def _read_text_cached(abs_path: str) -> str | None:
+def _read_text_cached(abs_path: str, repo_root: str) -> str | None:
     try:
-        with open(abs_path, "r", encoding="utf-8") as fp:
-            return fp.read()
+        return read_repo_text_or_raise(abs_path, repo_root)
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -478,8 +479,7 @@ class TrpcProcedureLinker:
                 continue
             abs_path = str(ctx.repo_path / rel)
             try:
-                with open(abs_path, "r", encoding="utf-8") as fp:
-                    pkg = json.load(fp)
+                pkg = json.loads(read_repo_text_or_raise(abs_path, ctx.repo_path, max_bytes=MANIFEST_READ_MAX_BYTES))
             except (OSError, ValueError):
                 continue
             for key in ("dependencies", "devDependencies", "peerDependencies"):
@@ -510,7 +510,7 @@ class TrpcProcedureLinker:
                 continue
             # Cheap pre-filter: only files mentioning router/trpc primitives.
             abs_path = str(ctx.repo_path / rel)
-            text = _read_text_cached(abs_path)
+            text = _read_text_cached(abs_path, str(ctx.repo_path))
             if text is None:
                 continue
             if "createTRPCRouter" not in text and "router(" not in text:
@@ -671,7 +671,7 @@ class TrpcProcedureLinker:
         links: list[FrameworkLink] = []
         for rel in caller_files:
             abs_path = str(ctx.repo_path / rel)
-            text = _read_text_cached(abs_path)
+            text = _read_text_cached(abs_path, str(ctx.repo_path))
             if text is None:
                 self.telemetry.files_unreadable += 1
                 continue

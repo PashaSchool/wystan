@@ -83,6 +83,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 from typing import Any, Iterable, Mapping, NamedTuple
 
 import yaml
@@ -449,11 +450,9 @@ def _resolve(root: Path, rel: str) -> Path | None:
     return p
 
 
-def _read_text(path: Path) -> str | None:
+def _read_text(path: Path, root: Path) -> str | None:
     try:
-        if not path.is_file() or path.stat().st_size > _MAX_FILE_BYTES:
-            return None
-        return path.read_text(encoding="utf-8", errors="strict")
+        return read_repo_text_or_raise(path, root, max_bytes=_MAX_FILE_BYTES)
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -596,7 +595,7 @@ def _evidence_from_file(root: Path, rel: str, token: str) -> list[_Match]:
     path = _resolve(root, rel)
     if path is None:
         return []
-    text = _read_text(path)
+    text = _read_text(path, root)
     if text is None:
         return []
     out: list[_Match] = []
@@ -653,7 +652,7 @@ def _manifest_strings(root: Path, pkg_dir: str) -> list[tuple[str, str, str]]:
     for base, authored_test in (("config.json", False),
                                 ("package.json", True)):
         p = dir_path / base
-        text = _read_text(p)
+        text = _read_text(p, root)
         if text is None:
             continue
         try:
@@ -702,7 +701,7 @@ def _workspace_package_dirs(root_str: str) -> tuple[str, ...]:
     ``()``. Deterministic (sorted children)."""
     root = Path(root_str)
     patterns: list[str] = []
-    text = _read_text(root / "package.json")
+    text = _read_text(root / "package.json", root)
     if text is not None:
         try:
             doc: Any = json.loads(text)
@@ -714,7 +713,7 @@ def _workspace_package_dirs(root_str: str) -> tuple[str, ...]:
                 ws = ws.get("packages")
             if isinstance(ws, list):
                 patterns.extend(str(p) for p in ws if isinstance(p, str))
-    text = _read_text(root / "pnpm-workspace.yaml")
+    text = _read_text(root / "pnpm-workspace.yaml", root)
     if text is not None:
         try:
             pnpm = yaml.safe_load(text)

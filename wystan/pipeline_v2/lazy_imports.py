@@ -43,6 +43,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from wystan.analyzer.repo_reader import read_repo_text_or_raise
 
 __all__ = [
     "LAZY_IMPORT_EDGES_ENV",
@@ -298,7 +299,7 @@ def collect_lazy_import_edges(
         try:
             if p.stat().st_size > _MAX_BYTES:
                 continue
-            text = p.read_text(encoding="utf-8", errors="ignore")
+            text = read_repo_text_or_raise(p, root, errors="ignore")
         except OSError:
             continue
         if rel.endswith(".py"):

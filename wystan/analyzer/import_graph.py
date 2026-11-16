@@ -17,6 +17,7 @@ import os
 from collections import defaultdict
 from collections.abc import Set as AbstractSet
 from pathlib import Path
+from wystan.analyzer.repo_reader import MANIFEST_READ_MAX_BYTES, read_repo_text_or_raise
 
 from wystan.analyzer.ast_extractor import FileSignature
 
@@ -154,8 +155,7 @@ def load_tsconfig_paths(repo_root: str) -> dict[str, str]:
         if not os.path.isfile(tsconfig_path):
             continue
         try:
-            with open(tsconfig_path) as f:
-                content = f.read()
+            content = read_repo_text_or_raise(tsconfig_path, repo_root, encoding=None, max_bytes=MANIFEST_READ_MAX_BYTES)
             # Strip single-line and multi-line comments
             content = _re.sub(r"//[^\n]*", "", content)
             content = _re.sub(r"/\*.*?\*/", "", content, flags=_re.DOTALL)
@@ -638,8 +638,7 @@ def _read_workspace_globs(repo_root: str) -> list[str]:
     pkg_json = os.path.join(repo_root, "package.json")
     if os.path.isfile(pkg_json):
         try:
-            with open(pkg_json, encoding="utf-8") as f:
-                data = _json.load(f)
+            data = _json.loads(read_repo_text_or_raise(pkg_json, repo_root, max_bytes=MANIFEST_READ_MAX_BYTES))
             ws = data.get("workspaces")
             if isinstance(ws, dict):
                 ws = ws.get("packages")
@@ -653,8 +652,7 @@ def _read_workspace_globs(repo_root: str) -> list[str]:
     pnpm_ws = os.path.join(repo_root, "pnpm-workspace.yaml")
     if os.path.isfile(pnpm_ws):
         try:
-            with open(pnpm_ws, encoding="utf-8") as f:
-                lines = f.read().splitlines()
+            lines = read_repo_text_or_raise(pnpm_ws, repo_root, max_bytes=MANIFEST_READ_MAX_BYTES).splitlines()
             in_packages = False
             item_re = _re.compile(r"""^\s*-\s*['"]?([^'"\s#]+)['"]?""")
             for line in lines:
@@ -782,8 +780,7 @@ def detect_workspace_package_map(
         if not os.path.isfile(pj):
             continue
         try:
-            with open(pj, encoding="utf-8") as f:
-                name = _json.load(f).get("name")
+            name = _json.loads(read_repo_text_or_raise(pj, repo_root, max_bytes=MANIFEST_READ_MAX_BYTES)).get("name")
         except (OSError, ValueError):
             continue
         if isinstance(name, str) and name:
@@ -889,8 +886,7 @@ def _package_entry_file(
     if not os.path.isfile(pj):
         return None
     try:
-        with open(pj, encoding="utf-8") as f:
-            data = _json.load(f)
+        data = _json.loads(read_repo_text_or_raise(pj, repo_root, max_bytes=MANIFEST_READ_MAX_BYTES))
     except (OSError, ValueError):
         return None
 
