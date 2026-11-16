@@ -158,6 +158,10 @@ def _git_version(executable: str) -> tuple[int, int]:
     return (int(found.group(1)), int(found.group(2))) if found else (0, 0)
 
 
+#: ``git config --get-regexp`` exit codes that are answers: found, none.
+_CONFIG_LISTED = (0, 1)
+
+
 def _defined_filter_drivers(repo_root: str) -> list[str]:
     """Filter driver names the clone's configuration (with its includes, in
     this working tree's own context) defines, sorted."""
@@ -165,6 +169,10 @@ def _defined_filter_drivers(repo_root: str) -> list[str]:
         git_command(repo_root, "config", "--null", "--name-only", "--get-regexp", r"^filter\."),
         child_environment(repo_root), _CONFIG_TIMEOUT_SEC, DEFAULT_MAX_OUTPUT_BYTES,
     )
+    # 0: drivers listed, 1: none defined. Anything else (an unreadable
+    # config) is not "no filters": the read that needed them is refused.
+    if listing.returncode not in _CONFIG_LISTED:
+        raise UnsafeArgument(f"cannot list the clone's filter drivers (git config exited {listing.returncode})")
     return sorted({
         name[len("filter."):name.rindex(".")]
         for name in listing.text.split("\0")
